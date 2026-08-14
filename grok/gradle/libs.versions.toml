@@ -1,0 +1,11 @@
+[versions]
+junit = "5.11.4"
+kafka = "3.9.0"
+
+[libraries]
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version = "1.11.4" }
+kafka-clients = { module = "org.apache.kafka:kafka-clients", version.ref = "kafka" }
+
+[plugins]
+java = { id = "java" }

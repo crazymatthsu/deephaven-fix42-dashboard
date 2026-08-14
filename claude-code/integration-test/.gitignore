@@ -1,0 +1,5 @@
+# Generated at test time by run_integration.sh
+.out/
+.venv-it/
+.pytest_cache/
+__pycache__/

@@ -1,0 +1,104 @@
+# FIX 4.2 dashboard demo stack — Kafka (KRaft, single node) + Deephaven server.
+#
+# Verified on macOS with podman 5.8.2 / podman-compose 1.6.0.
+#   podman compose -f docker/docker-compose.yml up -d
+#   podman compose -f docker/docker-compose.yml down -v
+#
+# Image tags are pinned to versions that were pulled and inspected on this machine:
+#   apache/kafka:3.9.1          (official Apache Kafka image, KRaft mode)
+#   ghcr.io/deephaven/server:42.4  (== :latest at time of writing; python 3.12, JDK 21)
+#
+# Both deephaven.ui (deephaven-plugin-ui 0.40.2) and deephaven.plot.express
+# (deephaven-plugin-plotly-express 0.20.0) are already bundled in the server image,
+# so no derived Dockerfile is required. See README "Deephaven image" section.
+
+name: fix42-dashboard
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Kafka — single-node KRaft (combined broker + controller).
+  #
+  # Two client listeners so both sides of the demo can reach it:
+  #   PLAINTEXT  kafka:9092        <- in-network, used by the deephaven container
+  #   EXTERNAL   localhost:19092   <- published to the host, used by the Java generator
+  # CONTROLLER:9093 is the internal KRaft quorum listener (never published).
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: fix42-kafka
+    hostname: kafka
+    ports:
+      - "19092:19092"
+    environment:
+      CLUSTER_ID: "fix42dashboardcluster"
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:19092"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,EXTERNAL://localhost:19092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+
+      # Demo sizing: single node, so every replication factor is 1.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: "3"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: "1"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_LOG_RETENTION_HOURS: "168"
+    # The healthcheck also (idempotently) creates the demo topic. This is load-
+    # bearing, not a convenience: Deephaven's kc.consume() resolves the topic's
+    # partitions once, at startup. If the topic only springs into existence when
+    # the generator first produces, the consumer starts with zero partitions and
+    # shuts down immediately -- tables stay empty forever. Gating deephaven on
+    # this healthcheck (depends_on: service_healthy) guarantees the topic exists
+    # with all 3 partitions before the consumer ever looks.
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic fix42.messages --partitions 3 --replication-factor 1 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic fix42.messages"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # Deephaven server — runs the dashboard scripts in Application Mode.
+  #
+  # /scripts  = deephaven-scripts/src  (fix42cache + dh_app python packages)
+  # /app.d    = this folder's app.d    (dashboard.app descriptor + loader.py)
+  #
+  # PYTHONPATH=/scripts is deliberate: app-mode scripts are evaluated with
+  # __file__ UNSET (verified on 42.4), so a script cannot bootstrap sys.path from
+  # its own location. Setting PYTHONPATH makes `import fix42cache` / `import dh_app`
+  # work no matter how app.py is written.
+  # ---------------------------------------------------------------------------
+  deephaven:
+    image: ghcr.io/deephaven/server:42.4
+    container_name: fix42-deephaven
+    ports:
+      - "10000:10000"
+    volumes:
+      - ../deephaven-scripts/src:/scripts:ro,z
+      - ./app.d:/app.d:ro,z
+    environment:
+      START_OPTS: >-
+        -Xmx4g
+        -Ddeephaven.console.type=python
+        -Ddeephaven.application.dir=/app.d
+        -DAuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler
+      PYTHONPATH: "/scripts"
+      FIX42_KAFKA_BOOTSTRAP: "kafka:9092"
+      FIX42_TOPIC: "fix42.messages"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/opt/grpc_health_probe/grpc_health_probe", "-addr=localhost:10000"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s

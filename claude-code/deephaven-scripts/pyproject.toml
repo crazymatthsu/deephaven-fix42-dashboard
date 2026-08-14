@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fix42cache"
+version = "0.1.0"
+description = "Pure-python FIX 4.2 parser and order state machine for the Deephaven FIX 4.2 dashboard"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "deephaven-fix42-dashboard" }]
+# fix42cache is stdlib-only by contract (doc 05 §3): no runtime dependencies.
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[tool.setuptools]
+# src/ layout; packages are auto-discovered so `dh_app` (owned by the Deephaven
+# agent) installs too as soon as it exists, without editing this file.
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

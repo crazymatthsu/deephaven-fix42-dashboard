@@ -1,0 +1,38 @@
+services:
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v23.2.18
+    command:
+      - redpanda
+      - start
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://localhost:19092
+      - --schema-registry-addr
+      - internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --mode
+      - dev-container
+    ports:
+      - "8081:8081"
+      - "18081:18081"
+      - "9092:9092"
+      - "19092:19092"
+
+  deephaven:
+    build:
+      context: ..
+      dockerfile: compose/Dockerfile
+    ports:
+      - "${DEEPHAVEN_PORT:-10000}:10000"
+    volumes:
+      - ./data:/data
+    environment:
+      - KAFKA_BOOTSTRAP=redpanda:9092
+      - FIX_TOPIC=fix42.dropcopy
+      - START_OPTS=-Xmx4g -Ddeephaven.application.dir=/app.d -Dauthentication.psk=deephaven
+    depends_on:
+      - redpanda

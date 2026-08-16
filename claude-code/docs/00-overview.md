@@ -118,3 +118,4 @@ claude-code/
 - [03 — Deephaven DAG design](03-deephaven-dag.md)
 - [04 — Deephaven features & API survey](04-deephaven-features-api.md)
 - [05 — Implementation plan, build & testing](05-implementation-and-testing.md) *(module APIs, scenario catalog, demo runbook)*
+- [06 — State machine language choice: Python vs Java](06-state-machine-language-analysis.md) *(trade-offs + measured in-container throughput ceiling)*

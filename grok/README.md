@@ -14,7 +14,8 @@ Work lives only under `grok/`. Analysis is in [`docs/`](docs/).
 | `oms-engine` | Linker, state machine, `OmsCache` query API |
 | `fix-demo-producer` | Mock tape → Kafka |
 | `dh-app` | Deephaven Application Mode (Python) |
-| `compose` | Podman / Docker: Deephaven + Redpanda |
+| `amps-connectors` | Spring Boot AMPS → Deephaven table ingest |
+| `compose` | Podman / Docker: Deephaven + Redpanda + AMPS connectors |
 
 ## Build and test
 
@@ -22,15 +23,21 @@ Requires Java 21+ and Gradle (wrapper included).
 
 ```bash
 ./gradlew test
-./gradlew :dh-app:prepareDeephavenImage
+./gradlew :dh-app:prepareDeephavenImage :amps-connectors:bootJar
 ```
 
 ## Local demo (Podman Desktop)
 
 ```bash
-./gradlew :dh-app:prepareDeephavenImage
+./gradlew :dh-app:prepareDeephavenImage :amps-connectors:bootJar
 podman compose -f compose/compose.yaml up --build
 ```
+
+AMPS connectors start after Deephaven is healthy and rehydrate from AMPS
+once the session is up. Enable mappings in
+`amps-connectors/src/main/resources/application.yml` (`enabled: true`)
+and point `AMPS_HOST` / `AMPS_PORT` at a running AMPS server. See
+[`docs/05-amps-connectors.md`](docs/05-amps-connectors.md).
 
 `docker compose` works the same way.
 

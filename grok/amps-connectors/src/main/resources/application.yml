@@ -1,0 +1,112 @@
+spring:
+  main:
+    web-application-type: none
+
+deephaven:
+  host: localhost
+  port: 10000
+  secure: false
+  psk: deephaven
+  wait-timeout: 120s
+  retry-interval: 2s
+  publish-timeout: 10s
+
+amps:
+  auto-start: true
+  default-host: localhost
+  default-port: 9007
+  reconnect-backoff: 2s
+  reconnect-max-backoff: 30s
+  connectors:
+    # SOW + JSON. Keyed Deephaven table. Delta AMPS + delta publisher (merge).
+    - name: orders-json
+      enabled: false
+      host: localhost
+      port: 9007
+      topic: ORDERS
+      topic-kind: sow
+      data-format: json
+      subscriber-mode: delta
+      publisher-mode: delta
+      table-name: amps_orders
+      key-columns:
+        - OrderId
+      fields:
+        - source: OrderId
+          column: OrderId
+          type: string
+        - source: Symbol
+          column: Symbol
+          type: string
+        - source: Side
+          column: Side
+          type: string
+        - source: OrderQty
+          column: OrderQty
+          type: double
+        - source: Price
+          column: Price
+          type: double
+        - source: Status
+          column: Status
+          type: string
+
+    # SOW + NVFIX. Keyed table. Full AMPS messages, full publisher replace.
+    - name: quotes-nvfix
+      enabled: false
+      topic: QUOTES
+      topic-kind: sow
+      data-format: nvfix
+      subscriber-mode: full
+      publisher-mode: full
+      table-name: amps_quotes
+      key-columns:
+        - Symbol
+      fields:
+        - source: Symbol
+          column: Symbol
+          type: string
+        - source: Bid
+          column: Bid
+          type: double
+        - source: Ask
+          column: Ask
+          type: double
+        - source: BidSize
+          column: BidSize
+          type: long
+        - source: AskSize
+          column: AskSize
+          type: long
+
+    # Journal + FIX. Append-only Deephaven table. Replay from epoch on Deephaven restart.
+    - name: dropcopy-fix
+      enabled: false
+      topic: FIX42_DROPCOPY
+      topic-kind: journal
+      data-format: fix
+      subscriber-mode: full
+      publisher-mode: full
+      table-name: amps_fix_tape
+      fields:
+        - source: "11"
+          column: ClOrdID
+          type: string
+        - source: "37"
+          column: OrderID
+          type: string
+        - source: "55"
+          column: Symbol
+          type: string
+        - source: "35"
+          column: MsgType
+          type: string
+        - source: "150"
+          column: ExecType
+          type: string
+        - source: "14"
+          column: CumQty
+          type: double
+        - source: "6"
+          column: AvgPx
+          type: double

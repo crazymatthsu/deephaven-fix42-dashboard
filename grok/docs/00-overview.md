@@ -50,7 +50,8 @@ grok/
   oms-engine/           linker, state machine, in-process query API
   fix-demo-producer/    mock FIX 4.2 → Kafka
   dh-app/               Deephaven Python application-mode scripts
-  compose/              Podman / Docker Compose (Deephaven + Redpanda)
+  amps-connectors/      Spring Boot AMPS → Deephaven ingest
+  compose/              Podman / Docker Compose (Deephaven + Redpanda + AMPS connectors)
 ```
 
 Build is Gradle, Java 21. Python lives in `:dh-app` and is **not**

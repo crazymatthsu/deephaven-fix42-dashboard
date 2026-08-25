@@ -1,0 +1,152 @@
+# amps-connectors -- AMPS topics bridged into Deephaven tables.
+#
+# Everything the application does is configured here (docs/07-amps-connectors.md).
+# Run against the demo stack with the `demo` profile, which swaps every source for the
+# in-process simulator so the pipeline can be exercised without an AMPS server:
+#
+#   ./gradlew :amps-connectors:bootRun --args="--spring.profiles.active=demo"
+
+spring:
+  application:
+    name: amps-connectors
+  main:
+    banner-mode: "off"
+
+logging:
+  level:
+    com.fix42.dashboard.amps: INFO
+
+# Source driver for every connector below. The `demo` profile flips this to SIMULATED.
+# A placeholder rather than a profile override of the connector list, because a profile that
+# redeclares `amps.connectors` replaces the whole list instead of merging into it.
+amps-source-driver: AMPS
+
+amps:
+  enabled: true
+
+  # The Deephaven server every connector publishes into. Matches docker/docker-compose.yml:
+  # anonymous auth, python console, gRPC on 10000.
+  deephaven:
+    host: localhost
+    port: 10000
+    tls: false
+    authentication: Anonymous
+    console-type: python
+    timeout: 30s
+    # The poll that notices Deephaven restarting. On a change the tables are re-created and
+    # every connector resubscribes from the start, rehydrating the tables.
+    health-check-interval: 5s
+    reconnect-delay: 5s
+
+  connectors:
+
+    # ---------------------------------------------------------------------------------
+    # FIX over a SOW topic -> keyed Deephaven table.
+    # The SOW is the state of the world, so an update replaces that key's row, and a
+    # subscription replays the whole SOW on connect.
+    # ---------------------------------------------------------------------------------
+    - name: orders-fix
+      enabled: true
+      format: FIX
+      source:
+        driver: ${amps-source-driver}
+        host: localhost
+        port: 9007
+        transport: tcp
+        topic: Orders
+        sow: true
+        subscription-mode: FULL
+        # field-separator defaults to SOH; set it only for a feed that delimits differently
+        # (for example `field-separator: "|"`).
+        timeout: 10s
+        reconnect-delay: 5s
+        simulated-rate: 20
+        simulated-keys: 25
+      deephaven:
+        table: amps_orders
+        publish-mode: FULL
+        key-columns: [ClOrdID]
+        ingest-timestamp-column: IngestTs
+        max-batch-rows: 5000
+        flush-interval: 250ms
+      # Allowlist: a tag absent from this list is never published, whatever AMPS sends.
+      fields:
+        - { tag: "11",  column: ClOrdID,      type: STRING }
+        - { tag: "37",  column: OrderID,      type: STRING }
+        - { tag: "1",   column: Account,      type: STRING }
+        - { tag: "55",  column: Symbol,       type: STRING }
+        - { tag: "54",  column: Side,         type: STRING }
+        - { tag: "38",  column: OrderQty,     type: DOUBLE }
+        - { tag: "44",  column: Price,        type: DOUBLE }
+        - { tag: "39",  column: OrdStatus,    type: STRING }
+        - { tag: "14",  column: CumQty,       type: DOUBLE }
+        - { tag: "151", column: LeavesQty,    type: DOUBLE }
+        - { tag: "6",   column: AvgPx,        type: DOUBLE }
+        - { tag: "60",  column: TransactTime, type: INSTANT }
+
+    # ---------------------------------------------------------------------------------
+    # NVFIX over a SOW topic, delta end to end.
+    # AMPS sends only the fields that changed; publish-mode DELTA merges each update over
+    # the last row for its key so the untouched columns keep their values.
+    # ---------------------------------------------------------------------------------
+    - name: positions-nvfix
+      enabled: true
+      format: NVFIX
+      source:
+        driver: ${amps-source-driver}
+        host: localhost
+        port: 9007
+        topic: Positions
+        sow: true
+        subscription-mode: DELTA
+        simulated-rate: 10
+        simulated-keys: 12
+      deephaven:
+        table: amps_positions
+        publish-mode: DELTA
+        key-columns: [Account, Symbol]
+        ingest-timestamp-column: IngestTs
+        flush-interval: 250ms
+      fields:
+        - { tag: Account,     column: Account,     type: STRING }
+        - { tag: Symbol,      column: Symbol,      type: STRING }
+        - { tag: Quantity,    column: Quantity,    type: DOUBLE }
+        - { tag: AvgCost,     column: AvgCost,     type: DOUBLE }
+        - { tag: MarketValue, column: MarketValue, type: DOUBLE }
+        - { tag: Currency,    column: Currency,    type: STRING }
+
+    # ---------------------------------------------------------------------------------
+    # JSON over a journal topic -> append-only Deephaven table.
+    # No SOW to replay, so the subscription starts from the `epoch` bookmark: every restart
+    # resubscribes from the beginning of the transaction log.
+    # ---------------------------------------------------------------------------------
+    - name: trades-json
+      enabled: true
+      format: JSON
+      source:
+        driver: ${amps-source-driver}
+        host: localhost
+        port: 9007
+        topic: Trades
+        sow: false
+        subscription-mode: FULL
+        bookmark: epoch
+        simulated-rate: 15
+        simulated-keys: 30
+      deephaven:
+        table: amps_trades
+        publish-mode: FULL
+        key-columns: []
+        ingest-timestamp-column: IngestTs
+        max-batch-rows: 10000
+        flush-interval: 500ms
+      # JSON tags are field names; a dotted tag addresses a nested object (execution.venue).
+      fields:
+        - { tag: tradeId,           column: TradeID,   type: STRING }
+        - { tag: orderId,           column: OrderID,   type: STRING }
+        - { tag: symbol,            column: Symbol,    type: STRING }
+        - { tag: side,              column: Side,      type: STRING }
+        - { tag: quantity,          column: Quantity,  type: DOUBLE }
+        - { tag: price,             column: Price,     type: DOUBLE }
+        - { tag: "execution.venue", column: Venue,     type: STRING }
+        - { tag: tradeTime,         column: TradeTime, type: INSTANT }

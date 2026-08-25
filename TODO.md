@@ -41,3 +41,26 @@
 
 [unit test and integration test]
 - create unit test for each component of the project, and integration test for the whole project.
+
+[AMPS connectors]
+- spring boot application 
+- application.yml driven config 
+- one AMPS connector can have one more more connectors configured 
+- configure AMPS source host port 
+- configure AMPS source data to Deephaven table mapping 
+  - AMPS source data format can be : fix , nvfix, or json 
+  - AMPS subscriber can be delta update or full update 
+  - Deephaven keyed table publisher can support delta update or full update
+  - configure AMPS topic name
+  - configure deephaven table name
+  - create the deephaven table if not exist yet
+  - for fields not configured, it won't be published to deephaven
+  - for AMPS FIX data 
+    - configure a list of fix tag to deephaven table column name and column data type mapping
+  - for AMPS NVFIX data 
+    - configure a list of nvfix tag to deephaven table column name and column data type mapping 
+  - for AMPS json data 
+    - configure a list of json tag name to deephaven table column name and column data type mapping
+- when starting or restarting deephaven server, it needs to start or restart AMPS connectors as well, once deephaven is up, to rehydrate data from AMPS 
+- if AMPS is a sow topic, deephaven will be a keyed table 
+- if AMPS is a journal topic, not a sow topic, AMPS subscriber will by default subscribe from the beginning to resubscribe all data, and deephaven will have an append only table 

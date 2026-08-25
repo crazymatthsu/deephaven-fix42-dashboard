@@ -45,6 +45,9 @@ Status colors (`ui.TableFormat` + `if_`):
   - `/apps/libs` `oms-engine` JAR
   - `-Ddeephaven.application.dir=/app.d`
   - anonymous auth **or** PSK `deephaven` for local demo
+- `amps-connectors` — Spring Boot sidecar; waits for Deephaven health,
+  then maps configured AMPS topics into Deephaven input tables
+  (see [`05-amps-connectors.md`](05-amps-connectors.md))
 
 `fix-demo-producer` publishes a scripted lifecycle:
 
@@ -60,7 +63,7 @@ The producer uses `FixSerializer` so checksums are legal.
 
 ## Tests
 
-### Unit (`fix-codec`, `oms-engine`)
+### Unit (`fix-codec`, `oms-engine`, `amps-connectors`)
 
 - Parser: `|` and SOH, checksum, strict header, unknown tags kept
 - Serializer: recomputes `9` and `10`

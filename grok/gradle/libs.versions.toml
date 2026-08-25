@@ -1,11 +1,20 @@
 [versions]
 junit = "5.11.4"
 kafka = "3.9.0"
+spring-boot = "3.4.5"
+spring-dependency-management = "1.1.7"
+amps-client = "5.3.5.0"
+deephaven-client = "0.40.9"
 
 [libraries]
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher", version = "1.11.4" }
 kafka-clients = { module = "org.apache.kafka:kafka-clients", version.ref = "kafka" }
+amps-client = { module = "com.crankuptheamps:amps-client", version.ref = "amps-client" }
+deephaven-java-client-flight = { module = "io.deephaven:deephaven-java-client-flight", version.ref = "deephaven-client" }
+deephaven-qst = { module = "io.deephaven:deephaven-qst", version.ref = "deephaven-client" }
 
 [plugins]
 java = { id = "java" }
+spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }
+spring-dependency-management = { id = "io.spring.dependency-management", version.ref = "spring-dependency-management" }

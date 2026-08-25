@@ -36,3 +36,31 @@ services:
       - START_OPTS=-Xmx4g -Ddeephaven.application.dir=/app.d -Dauthentication.psk=deephaven
     depends_on:
       - redpanda
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import socket; s=socket.create_connection(('127.0.0.1',10000),2); s.close()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 25s
+
+  amps-connectors:
+    build:
+      context: ..
+      dockerfile: compose/Dockerfile.amps
+    environment:
+      SPRING_PROFILES_ACTIVE: compose
+      DEEPHAVEN_HOST: deephaven
+      DEEPHAVEN_PORT: "10000"
+      DEEPHAVEN_PSK: deephaven
+      AMPS_HOST: ${AMPS_HOST:-host.containers.internal}
+      AMPS_PORT: ${AMPS_PORT:-9007}
+    depends_on:
+      deephaven:
+        condition: service_healthy
+    restart: on-failure

@@ -135,6 +135,15 @@ tables — the DAG never changes shape at runtime.
 Individual tables also appear in the Panels menu (`order_state_latest`, `executions`,
 `status_summary`, …), which is the fallback UX if the `deephaven.ui` plugin is unavailable.
 
+**Dashboard-only view (no IDE chrome)** — Deephaven's iframe-embed endpoint serves any
+global by name, so the dashboard can be opened standalone (for a wall monitor, or to
+embed in another page):
+
+- <http://localhost:10000/iframe/widget/?name=fix42_dashboard> — the full 3-panel dashboard
+- `http://localhost:10000/iframe/table/?name=order_state_latest` — a single live table
+
+With anonymous auth no extra parameter is needed; under PSK auth append `&psk=<key>`.
+
 ### 5. Tear down
 
 ```bash

@@ -92,6 +92,8 @@ claude-code/
 │   ├── src/fix42cache/         # pure python: tags, parser, model, state machine
 │   ├── src/dh_app/             # deephaven server scripts: ingest, dag, query api, dashboard
 │   └── tests/                  # pytest unit tests
+├── amps-connectors/            # Spring Boot: AMPS topics -> Deephaven input tables (doc 07)
+│   └── src/main/{java,resources}/  # connectors + application.yml
 ├── docker/                     # podman-compose stack: kafka (KRaft) + deephaven (+ui)
 ├── integration-test/           # e2e: generator → kafka → deephaven, asserted via pydeephaven
 └── README.md                   # build + demo runbook
@@ -119,3 +121,4 @@ claude-code/
 - [04 — Deephaven features & API survey](04-deephaven-features-api.md)
 - [05 — Implementation plan, build & testing](05-implementation-and-testing.md) *(module APIs, scenario catalog, demo runbook)*
 - [06 — State machine language choice: Python vs Java](06-state-machine-language-analysis.md) *(trade-offs + measured in-container throughput ceiling)*
+- [07 — AMPS connectors](07-amps-connectors.md) *(AMPS → Deephaven bridge: config model, SOW vs journal, delta handling, lifecycle)*

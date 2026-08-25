@@ -7,7 +7,9 @@ import com.fix42.dashboard.amps.config.FieldMapping;
 import com.fix42.dashboard.amps.config.SourceFormat;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -88,11 +90,7 @@ public class SimulatedAmpsSubscriber implements AmpsSubscriber {
         List<FieldMapping> fields = connector.getFields();
         char separator = connector.getSource().getFieldSeparator();
         if (connector.getFormat() == SourceFormat.JSON) {
-            List<String> members = new ArrayList<>(fields.size());
-            for (FieldMapping field : fields) {
-                members.add(jsonMember(field, key, tick));
-            }
-            return "{" + String.join(",", members) + "}";
+            return renderJson(jsonTree(fields, key, tick));
         }
         StringBuilder payload = new StringBuilder();
         for (FieldMapping field : fields) {
@@ -102,17 +100,50 @@ public class SimulatedAmpsSubscriber implements AmpsSubscriber {
         return payload.toString();
     }
 
-    private String jsonMember(FieldMapping field, int key, long tick) {
+    /**
+     * Build the document a set of mappings describes. A dotted tag such as
+     * {@code execution.venue} nests, so the generated payload is one the configured mapping
+     * actually resolves against rather than a flattened approximation of it.
+     */
+    private Map<String, Object> jsonTree(List<FieldMapping> fields, int key, long tick) {
+        Map<String, Object> root = new LinkedHashMap<>();
+        for (FieldMapping field : fields) {
+            String[] path = field.getTag().split("\\.");
+            Map<String, Object> node = root;
+            for (int i = 0; i < path.length - 1; i++) {
+                Object child = node.computeIfAbsent(path[i], name -> new LinkedHashMap<String, Object>());
+                if (!(child instanceof Map)) {
+                    break;
+                }
+                @SuppressWarnings("unchecked")
+                Map<String, Object> next = (Map<String, Object>) child;
+                node = next;
+            }
+            node.put(path[path.length - 1], jsonScalar(field, key, tick));
+        }
+        return root;
+    }
+
+    /** A pre-rendered JSON scalar: quoted for the textual column types, bare for the rest. */
+    private String jsonScalar(FieldMapping field, int key, long tick) {
         String value = value(field, key, tick);
         boolean quoted = field.getType() == ColumnType.STRING
                 || field.getType() == ColumnType.CHAR
                 || field.getType() == ColumnType.INSTANT;
-        String rendered = quoted ? "\"" + value + "\"" : value;
-        // Dotted mappings address nested objects; the simulator only produces flat records, so
-        // it emits the leaf name and relies on the decoder's flat-key fallback.
-        String name = field.getTag();
-        int dot = name.lastIndexOf('.');
-        return "\"" + (dot < 0 ? name : name.substring(dot + 1)) + "\":" + rendered;
+        return quoted ? "\"" + value + "\"" : value;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String renderJson(Map<String, Object> node) {
+        List<String> members = new ArrayList<>(node.size());
+        for (Map.Entry<String, Object> member : node.entrySet()) {
+            Object value = member.getValue();
+            String rendered = value instanceof Map
+                    ? renderJson((Map<String, Object>) value)
+                    : String.valueOf(value);
+            members.add("\"" + member.getKey() + "\":" + rendered);
+        }
+        return "{" + String.join(",", members) + "}";
     }
 
     private String value(FieldMapping field, int key, long tick) {

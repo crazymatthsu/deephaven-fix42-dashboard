@@ -338,6 +338,37 @@ which takes a moment on a large backlog. Watch row counts settle in `order_state
 
 ---
 
+## AMPS connectors (optional)
+
+Separate from the FIX 4.2 pipeline above, `amps-connectors` is a Spring Boot application that
+subscribes to [60East AMPS](https://www.crankuptheamps.com/) topics and publishes the fields you
+map into Deephaven tables in the same server — so they appear in the IDE alongside
+`order_state_latest`. One application runs one or more connectors, all configured in
+`application.yml`.
+
+- **Formats** — `FIX`, `NVFIX` and `JSON`, each with its own tag → column → type mapping. The
+  mapping is an allowlist: an unmapped field is never published.
+- **SOW topic → keyed table**, replayed with `sow_and_subscribe`. **Journal topic → append-only
+  table**, resubscribed from the `epoch` bookmark so a restart replays everything.
+- **Delta** subscriptions and delta publishing, so a partial AMPS update merges over the stored
+  row instead of blanking the columns it omits.
+- **Restarting Deephaven restarts the connectors.** A poll detects the new server, re-creates the
+  tables and replays every subscription from the start, rehydrating the tables.
+
+```bash
+# with an AMPS server on localhost:9007
+./gradlew :amps-connectors:bootRun
+
+# without one -- the demo profile swaps in an in-process simulator
+./gradlew :amps-connectors:bootRun --args="--spring.profiles.active=demo"
+```
+
+AMPS is commercial software with no public image, so the compose stack does not include one.
+Runbook and configuration reference: [amps-connectors/README.md](amps-connectors/README.md).
+Design and contract: [docs/07-amps-connectors.md](docs/07-amps-connectors.md).
+
+---
+
 ## Repository layout
 
 ```
@@ -352,6 +383,9 @@ claude-code/
 │   ├── src/fix42cache/            #   pure python: tags, parser, model, state machine
 │   ├── src/dh_app/                #   deephaven server scripts: ingest, dag, api, dashboard
 │   └── tests/                     #   pytest unit suite
+├── amps-connectors/               # Spring Boot: AMPS topics -> Deephaven input tables
+│   ├── src/main/java/com/fix42/dashboard/amps/
+│   └── src/main/resources/application.yml   # the whole configuration surface
 ├── docker/
 │   ├── docker-compose.yml         # kafka (KRaft) + deephaven, pinned images
 │   └── app.d/                     # application mode: dashboard.app + loader.py
@@ -375,3 +409,5 @@ claude-code/
 | [03 — DAG design](docs/03-deephaven-dag.md) | node-by-node spec, table/global names, query API, consistency notes |
 | [04 — Features & API survey](docs/04-deephaven-features-api.md) | Kafka consumer, table publishers, listeners, `deephaven.ui`, app mode, `pydeephaven` |
 | [05 — Implementation & testing](docs/05-implementation-and-testing.md) | module APIs, scenario catalog, build layout, demo runbook |
+| [06 — State machine language choice](docs/06-state-machine-language-analysis.md) | python vs java for the stateful fold, with a measured throughput ceiling |
+| [07 — AMPS connectors](docs/07-amps-connectors.md) | the AMPS → Deephaven bridge: config model, SOW vs journal, delta handling, lifecycle |

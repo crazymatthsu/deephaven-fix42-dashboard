@@ -11,6 +11,10 @@ spring:
     name: amps-connectors
   main:
     banner-mode: "off"
+    # Nothing else holds the JVM open: there is no web server, and every thread the
+    # connectors start is a daemon. Without this the process exits as soon as the
+    # application context has finished refreshing.
+    keep-alive: true
 
 logging:
   level:

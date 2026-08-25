@@ -56,13 +56,39 @@ class SimulatedAmpsSubscriberTest {
     }
 
     @Test
+    @DisplayName("generated JSON resolves every configured tag, dotted paths included")
     void generatesDecodableJsonPayloads() {
         ConnectorProperties connector = TestConnectors.jsonTrades();
         String payload = new SimulatedAmpsSubscriber(connector).encode(2, 4);
 
         var fields = new JsonRecordDecoder(new ObjectMapper()).decode(payload);
-        assertThat(fields).containsKeys("tradeId", "symbol", "quantity", "venue");
+        // Exactly the tags the connector maps -- otherwise a column silently publishes null.
+        assertThat(fields).containsKeys(
+                connector.getFields().stream().map(f -> f.getTag()).toArray(String[]::new));
         assertThat(Long.parseLong(fields.get("quantity"))).isPositive();
+    }
+
+    @Test
+    @DisplayName("a dotted tag nests in the generated document")
+    void nestsDottedJsonTags() {
+        ConnectorProperties connector = TestConnectors.jsonTrades();
+        String payload = new SimulatedAmpsSubscriber(connector).encode(1, 1);
+
+        assertThat(payload).contains("\"execution\":{\"venue\":");
+        assertThat(new JsonRecordDecoder(new ObjectMapper()).decode(payload))
+                .containsKey("execution.venue");
+    }
+
+    @Test
+    @DisplayName("generated FIX/NVFIX payloads resolve every configured tag too")
+    void generatesDecodableNvfixPayloads() {
+        ConnectorProperties connector = TestConnectors.nvfixPositions();
+        String payload = new SimulatedAmpsSubscriber(connector).encode(1, 1);
+
+        var fields = new DelimitedRecordDecoder(connector.getSource().getFieldSeparator())
+                .decode(payload);
+        assertThat(fields).containsKeys(
+                connector.getFields().stream().map(f -> f.getTag()).toArray(String[]::new));
     }
 
     @Test

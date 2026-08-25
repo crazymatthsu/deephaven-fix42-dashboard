@@ -13,3 +13,4 @@ rootProject.name = "deephaven-fix42-dashboard"
 
 include(":fix-mock-generator")
 include(":deephaven-scripts")
+include(":amps-connectors")

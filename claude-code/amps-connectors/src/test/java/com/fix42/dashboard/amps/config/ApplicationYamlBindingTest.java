@@ -1,0 +1,115 @@
+package com.fix42.dashboard.amps.config;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.time.Duration;
+import java.util.List;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
+
+/**
+ * The shipped application.yml binds, validates, and means what the docs say it means.
+ *
+ * <p>{@code amps.enabled=false} keeps the lifecycle monitor from dialling a Deephaven server:
+ * this test is about the configuration model, not about running connectors.
+ */
+@SpringBootTest(properties = "amps.enabled=false")
+@ActiveProfiles("demo")
+class ApplicationYamlBindingTest {
+
+    @Autowired
+    private AmpsConnectorsProperties properties;
+
+    @Test
+    void bindsEveryExampleConnector() {
+        assertThat(properties.getConnectors()).extracting(ConnectorProperties::getName)
+                .containsExactly("orders-fix", "positions-nvfix", "trades-json");
+    }
+
+    @Test
+    void bindsTheDeephavenServerSettings() {
+        DeephavenServerProperties deephaven = properties.getDeephaven();
+        assertThat(deephaven.getHost()).isEqualTo("localhost");
+        assertThat(deephaven.getPort()).isEqualTo(10_000);
+        assertThat(deephaven.getAuthentication()).isEqualTo("Anonymous");
+        assertThat(deephaven.getConsoleType()).isEqualTo("python");
+        assertThat(deephaven.getHealthCheckInterval()).isEqualTo(Duration.ofSeconds(5));
+        assertThat(deephaven.target()).isEqualTo("localhost:10000");
+    }
+
+    @Test
+    @DisplayName("the FIX example is a SOW topic keyed on ClOrdID")
+    void bindsTheFixConnector() {
+        ConnectorProperties connector = connector("orders-fix");
+        assertThat(connector.getFormat()).isEqualTo(SourceFormat.FIX);
+        assertThat(connector.getSource().isSow()).isTrue();
+        assertThat(connector.getSource().getTopic()).isEqualTo("Orders");
+        assertThat(connector.getSource().getSubscriptionMode()).isEqualTo(UpdateMode.FULL);
+        assertThat(connector.getDeephaven().getTable()).isEqualTo("amps_orders");
+        assertThat(connector.getDeephaven().getKeyColumns()).containsExactly("ClOrdID");
+        assertThat(connector.getDeephaven().isKeyed()).isTrue();
+        assertThat(connector.getFields()).extracting(FieldMapping::getTag).contains("11", "55", "38");
+        assertThat(fieldFor(connector, "60").getType()).isEqualTo(ColumnType.INSTANT);
+        assertThat(fieldFor(connector, "38").getType()).isEqualTo(ColumnType.DOUBLE);
+    }
+
+    @Test
+    @DisplayName("the NVFIX example is delta end to end")
+    void bindsTheNvfixConnector() {
+        ConnectorProperties connector = connector("positions-nvfix");
+        assertThat(connector.getFormat()).isEqualTo(SourceFormat.NVFIX);
+        assertThat(connector.getSource().getSubscriptionMode()).isEqualTo(UpdateMode.DELTA);
+        assertThat(connector.getDeephaven().getPublishMode()).isEqualTo(UpdateMode.DELTA);
+        assertThat(connector.getDeephaven().getKeyColumns()).containsExactly("Account", "Symbol");
+    }
+
+    @Test
+    @DisplayName("the JSON example is a journal topic with an append-only table")
+    void bindsTheJsonConnector() {
+        ConnectorProperties connector = connector("trades-json");
+        assertThat(connector.getFormat()).isEqualTo(SourceFormat.JSON);
+        assertThat(connector.getSource().isSow()).isFalse();
+        assertThat(connector.getSource().getBookmark()).isEqualTo("epoch");
+        assertThat(connector.getDeephaven().isKeyed()).isFalse();
+        assertThat(fieldFor(connector, "execution.venue").getColumn()).isEqualTo("Venue");
+    }
+
+    @Test
+    @DisplayName("the demo profile swaps every source for the simulator")
+    void demoProfileSelectsTheSimulatedDriver() {
+        assertThat(properties.getConnectors())
+                .extracting(c -> c.getSource().getDriver())
+                .containsOnly(AmpsSourceProperties.Driver.SIMULATED);
+    }
+
+    @Test
+    void theShippedConfigurationPassesValidation() {
+        assertThat(ConnectorValidator.validate(properties)).isEmpty();
+    }
+
+    @Test
+    void defaultsApplyWhereTheYamlIsSilent() {
+        AmpsSourceProperties source = connector("positions-nvfix").getSource();
+        assertThat(source.getTransport()).isEqualTo("tcp");
+        assertThat(source.getFieldSeparator()).isEqualTo((char) 0x01);
+        assertThat(source.getPort()).isEqualTo(9007);
+        assertThat(connector("positions-nvfix").getDeephaven().isCreateIfMissing()).isTrue();
+    }
+
+    private ConnectorProperties connector(String name) {
+        List<ConnectorProperties> matches = properties.getConnectors().stream()
+                .filter(c -> name.equals(c.getName())).toList();
+        assertThat(matches).as("connector %s", name).hasSize(1);
+        return matches.get(0);
+    }
+
+    private static FieldMapping fieldFor(ConnectorProperties connector, String tag) {
+        return connector.getFields().stream()
+                .filter(f -> tag.equals(f.getTag()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no mapping for tag " + tag));
+    }
+}

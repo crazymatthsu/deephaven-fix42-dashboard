@@ -1,0 +1,10 @@
+# `demo` profile -- run the whole pipeline without an AMPS server.
+#
+#   ./gradlew :amps-connectors:bootRun --args="--spring.profiles.active=demo"
+#
+# Every source switches to the in-process simulator, which synthesises payloads in each
+# connector's own format from its own field mappings. Decode, mapping, delta merge, batching
+# and the Deephaven publish all run exactly as they do against a real AMPS server -- only the
+# bytes' origin differs. AMPS is commercial software with no public image, so this is what
+# keeps the demo self-contained.
+amps-source-driver: SIMULATED

@@ -1,0 +1,8 @@
+deephaven:
+  host: ${DEEPHAVEN_HOST:deephaven}
+  port: ${DEEPHAVEN_PORT:10000}
+  psk: ${DEEPHAVEN_PSK:deephaven}
+
+amps:
+  default-host: ${AMPS_HOST:host.containers.internal}
+  default-port: ${AMPS_PORT:9007}

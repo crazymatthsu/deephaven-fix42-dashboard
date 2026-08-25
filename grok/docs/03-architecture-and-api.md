@@ -11,11 +11,13 @@ fix-codec/                   no third-party deps
 oms-engine/                  depends on :fix-codec
 fix-demo-producer/           depends on :fix-codec + kafka-clients
 dh-app/                      Python + Application Mode (no Java compile)
+amps-connectors/             Spring Boot; AMPS Java client + Deephaven Flight
 ```
 
-No Spring, no QuickFIX, no database. The artifact Deephaven loads is
-the shadowed / assembled `oms-engine` JAR (transitively includes
-`fix-codec`).
+The OMS path still has no Spring and no database. The artifact Deephaven
+loads for the blotter is the shadowed `oms-engine` JAR (transitively
+includes `fix-codec`). AMPS ingest is a **separate** Spring Boot process;
+see [`05-amps-connectors.md`](05-amps-connectors.md).
 
 ## Runtime flow
 

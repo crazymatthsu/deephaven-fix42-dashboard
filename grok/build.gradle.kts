@@ -13,7 +13,7 @@ subprojects {
     }
 }
 
-val javaProjects = listOf("fix-codec", "oms-engine", "fix-demo-producer")
+val javaProjects = listOf("fix-codec", "oms-engine", "fix-demo-producer", "amps-connectors")
 
 subprojects {
     if (name in javaProjects) {
@@ -39,4 +39,10 @@ subprojects {
             "testRuntimeOnly"(rootProject.libs.junit.platform.launcher)
         }
     }
+}
+
+tasks.register("prepareCompose") {
+    group = "distribution"
+    description = "Package Deephaven Application Mode assets and the AMPS connector boot JAR"
+    dependsOn(":dh-app:prepareDeephavenImage", ":amps-connectors:bootJar")
 }

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fix42.dashboard.amps.TestConnectors;
 import com.fix42.dashboard.amps.config.ConnectorProperties;
+import com.fix42.dashboard.amps.config.ConnectorValidator;
 import com.fix42.dashboard.amps.decode.RecordDecoderFactory;
 import com.fix42.dashboard.amps.deephaven.RecordingDeephavenGateway;
 import com.fix42.dashboard.amps.source.AmpsRecord;
@@ -121,6 +122,69 @@ class ConnectorTest {
         assertThat(connector.receivedRecords()).isEqualTo(2);
         assertThat(connector.rejectedRecords()).isEqualTo(1);
         assertThat(gateway.rowsFor("amps_orders", "add")).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("a table can be keyed on the AMPS SOW key rather than a mapped field")
+    void keysOnTheAmpsSowKey() throws Exception {
+        // The shape a SOW topic with a KeyGenerator forces: the key is assigned by AMPS and is
+        // not reconstructible from the record body, so the SOW key header is the only handle.
+        ConnectorProperties properties = TestConnectors.fixOrders();
+        properties.getDeephaven().setSowKeyColumn("SowKey");
+        properties.getDeephaven().setKeyColumns(java.util.List.of("SowKey"));
+        assertThat(ConnectorValidator.validate(properties)).isEmpty();
+
+        Connector connector = connector(properties);
+        connector.start();
+        subscriber.deliver(AmpsRecord.of(
+                TestConnectors.delimited("11", "C-1", "55", "AAPL"), "1234567890123456789"));
+        subscriber.deliver(AmpsRecord.of(
+                TestConnectors.delimited("11", "C-1", "55", "MSFT"), "1234567890123456789"));
+        connector.stop();
+
+        int sowKeyIndex = connector.schema().indexOf("SowKey");
+        assertThat(gateway.rowsFor("amps_orders", "add"))
+                .hasSize(2)
+                .allSatisfy(row -> assertThat(row[sowKeyIndex]).isEqualTo("1234567890123456789"));
+    }
+
+    @Test
+    @DisplayName("an OOF delete resolves its key from the SOW key even with an empty body")
+    void deletesByTheAmpsSowKeyWithNoBody() throws Exception {
+        ConnectorProperties properties = TestConnectors.fixOrders();
+        properties.getDeephaven().setSowKeyColumn("SowKey");
+        properties.getDeephaven().setKeyColumns(java.util.List.of("SowKey"));
+
+        Connector connector = connector(properties);
+        connector.start();
+        subscriber.deliver(AmpsRecord.of(
+                TestConnectors.delimited("11", "C-1", "55", "AAPL"), "987654321"));
+        subscriber.deliver(AmpsRecord.delete("", "987654321"));
+        connector.stop();
+
+        int sowKeyIndex = connector.schema().indexOf("SowKey");
+        assertThat(gateway.publishes()).extracting(RecordingDeephavenGateway.Publish::action)
+                .containsExactly("add", "delete");
+        assertThat(gateway.rowsFor("amps_orders", "delete")).singleElement()
+                .satisfies(row -> assertThat(row[sowKeyIndex]).isEqualTo("987654321"));
+    }
+
+    @Test
+    @DisplayName("records with no SOW key are rejected, not collapsed onto one row")
+    void rejectsRecordsWithNoKeyValue() throws Exception {
+        ConnectorProperties properties = TestConnectors.fixOrders();
+        properties.getDeephaven().setSowKeyColumn("SowKey");
+        properties.getDeephaven().setKeyColumns(java.util.List.of("SowKey"));
+
+        Connector connector = connector(properties);
+        connector.start();
+        // Two distinct records, neither carrying a SOW key.
+        subscriber.deliver(AmpsRecord.of(TestConnectors.delimited("11", "C-1", "55", "AAPL")));
+        subscriber.deliver(AmpsRecord.of(TestConnectors.delimited("11", "C-2", "55", "MSFT")));
+        connector.stop();
+
+        assertThat(gateway.publishes()).as("nothing keyless is published").isEmpty();
+        assertThat(connector.rejectedRecords()).isEqualTo(2);
     }
 
     @Test

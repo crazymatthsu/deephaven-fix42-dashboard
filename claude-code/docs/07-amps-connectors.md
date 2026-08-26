@@ -138,6 +138,33 @@ count (10/13/16/19 → s/ms/µs/ns).
 Two optional synthetic columns are appended after the mapped fields: `sow-key-column` (the AMPS
 SOW key of the message) and `ingest-timestamp-column` (when the connector processed it).
 
+### 5.1 Keying on the AMPS SOW key
+
+`sow-key-column` may itself be named in `key-columns`, which is the answer for a SOW topic whose
+key AMPS assigns — a `KeyGenerator`, or any configuration where the key is not reconstructible
+from the record body:
+
+```yaml
+deephaven:
+  table: amps_orders
+  sow-key-column: SowKey
+  key-columns: [SowKey]        # key on what AMPS assigned, not on a mapped field
+```
+
+`Message.getSowKey()` travels on the record as `AmpsRecord.sowKey` and is written to that column
+like any other value, so the keyed table's identity matches the SOW's exactly. It is also the
+only workable key for **removals**: an out-of-focus message may carry no body at all, so a key
+derived from mapped fields would have nothing to resolve against, while the SOW key is still on
+the message.
+
+The business fields stay mapped as ordinary columns — the SOW key is opaque, so it identifies
+rows without describing them.
+
+**A row is only published when every key column has a value.** A record whose key value is
+missing is counted in `rejectedRecords` and dropped. Rendering the gap as text instead would
+give every such record the same key and collapse them onto one row of the table, which is why
+`TableSchema.rowKey` returns `null` the moment any key component is null.
+
 ## 6. Deephaven lifecycle → connector lifecycle
 
 > *"when starting or restarting deephaven server, it needs to start or restart AMPS connectors as

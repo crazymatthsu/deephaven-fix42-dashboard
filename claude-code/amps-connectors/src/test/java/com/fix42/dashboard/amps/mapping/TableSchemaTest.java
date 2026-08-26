@@ -66,6 +66,15 @@ class TableSchemaTest {
     }
 
     @Test
+    @DisplayName("a row missing a key value has no key, rather than one that reads 'null'")
+    void aNullKeyValueYieldsNoRowKey() {
+        TableSchema schema = TableSchema.of(TestConnectors.nvfixPositions());
+        assertThat(schema.rowKey(new Object[] {null, "AAPL", 1.0d, 1.0d})).isNull();
+        assertThat(schema.rowKey(new Object[] {"ACC-1", null, 1.0d, 1.0d})).isNull();
+        assertThat(schema.rowKey(new Object[] {"ACC-1", "AAPL", 1.0d, 1.0d})).isNotNull();
+    }
+
+    @Test
     void indexOfRejectsUnknownColumns() {
         TableSchema schema = TableSchema.of(TestConnectors.fixOrders());
         assertThat(schema.indexOf("Price")).isEqualTo(3);

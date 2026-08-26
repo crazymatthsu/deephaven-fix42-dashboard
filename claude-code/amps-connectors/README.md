@@ -75,6 +75,15 @@ amps:
         - { tag: Price, column: Price, type: DOUBLE }
 ```
 
+To key on the SOW key AMPS assigns — the case for a topic with a `KeyGenerator`, where the key
+cannot be rebuilt from the record body — name the SOW key column in `key-columns`:
+
+```yaml
+      deephaven:
+        sow-key-column: SowKey
+        key-columns: [SowKey]
+```
+
 `tag` is a FIX tag number for `FIX`, a field name for `NVFIX`, and a field name or dotted path
 (`execution.venue`) for `JSON`. `type` is one of `STRING BOOLEAN BYTE SHORT INT LONG FLOAT DOUBLE
 CHAR INSTANT`; `integer`, `bool` and `timestamp` bind too.
@@ -109,6 +118,11 @@ replays every subscription from the start.
 
 **A connector logs `start failed, retrying on the next health check`** — that connector's AMPS
 server is unreachable. The others keep running and this one recovers on its own.
+
+**Rows are rejected and nothing is published** — a keyed connector drops any record whose key
+columns are not all populated, rather than collapsing them onto one row; the count shows in the
+status line as `rejected`. Keying on `sow-key-column` when AMPS is not sending a SOW key does
+this to every message.
 
 **Columns come back null** — the field is not in `fields`, or its `tag` does not match what the
 payload carries. For JSON, check whether the document is flat (`venue`) or nested

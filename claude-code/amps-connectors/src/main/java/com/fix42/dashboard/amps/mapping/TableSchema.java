@@ -110,8 +110,15 @@ public final class TableSchema {
     /**
      * Build the row-key of a mapped row: its key-column values joined by the unit separator.
      *
+     * <p>A row missing any key value has no key at all, so this returns {@code null} rather than
+     * rendering the gap as text. Without that, every keyless record would join on the same
+     * literal and collapse onto a single row of the target table -- the caller drops them
+     * instead. This is reachable in practice: a SOW key column is empty whenever AMPS delivers a
+     * message without one.
+     *
      * @param values a row's values, indexed by this schema's column order
-     * @return the composite key, or {@code null} when the table is not keyed
+     * @return the composite key; {@code null} when the table is not keyed, or when any key
+     *     column of this row is null
      */
     public String rowKey(Object[] values) {
         if (keyIndexes.length == 0) {
@@ -119,10 +126,14 @@ public final class TableSchema {
         }
         StringBuilder key = new StringBuilder();
         for (int i = 0; i < keyIndexes.length; i++) {
+            Object value = values[keyIndexes[i]];
+            if (value == null) {
+                return null;
+            }
             if (i > 0) {
                 key.append(KEY_SEPARATOR);
             }
-            key.append(values[keyIndexes[i]]);
+            key.append(value);
         }
         return key.toString();
     }

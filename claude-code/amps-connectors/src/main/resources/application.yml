@@ -111,6 +111,18 @@ amps:
         key-columns: [Account, Symbol]
         ingest-timestamp-column: IngestTs
         flush-interval: 250ms
+        # Publish the AMPS SOW key of each message as a column. Off by default: when it is
+        # not set the column does not exist at all. Uncomment to see it in the table.
+        # sow-key-column: SowKey
+        #
+        # ...and key the table on it instead of on the mapped fields. That is the answer for
+        # a SOW topic whose key AMPS assigns (a KeyGenerator), where the key cannot be rebuilt
+        # from the record body, and it is the only key that survives a removal -- an
+        # out-of-focus message may carry no body at all. Replaces the key-columns above.
+        # key-columns: [SowKey]
+        #
+        # Both change the table's schema, so an existing amps_positions has to be dropped
+        # first -- the bootstrap refuses to adopt a table whose columns disagree (doc 07 s8).
       fields:
         - { tag: Account,     column: Account,     type: STRING }
         - { tag: Symbol,      column: Symbol,      type: STRING }

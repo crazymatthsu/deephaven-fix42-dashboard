@@ -112,6 +112,69 @@ table quietly.
 did not mention this field"** (keep the stored value) from **"the payload sent it empty"** (clear
 it). Both look like `null` in the value array; only the mask separates them.
 
+### 4.1 Delta end to end — a SOW topic delta-subscribed and delta-published
+
+The `DELTA`/`DELTA` row above is a supported and fully wired path, not a theoretical one: it is
+what the shipped `positions-nvfix` connector does.
+
+```yaml
+      source:
+        topic: Positions
+        sow: true
+        subscription-mode: DELTA     # AMPS sends only the fields that changed
+      deephaven:
+        table: amps_positions
+        publish-mode: DELTA          # merge each partial over the stored row
+        key-columns: [Account, Symbol]
+```
+
+**On the AMPS side**, `sow: true` plus `subscription-mode: DELTA` selects the delta form of the
+SOW subscription:
+
+```java
+return source.getSubscriptionMode() == UpdateMode.DELTA
+        ? Message.Command.SOWAndDeltaSubscribe
+        : Message.Command.SOWAndSubscribe;
+```
+
+**On the Deephaven side**, every mapped row goes through `DeltaRowMerger` before it is batched,
+so what reaches the keyed input table is always a complete row. A second message carrying only
+`Quantity` keeps the `AvgCost` the first one set:
+
+```
+in:  Account=ACC-1  Symbol=AAPL  Quantity=100  AvgCost=185.5
+in:  Account=ACC-1  Symbol=AAPL  Quantity=150
+out: ["ACC-1", "AAPL", 150.0, 185.5]
+```
+
+**The pairing is mandatory, not advisory.** Three validator rules box it in: a delta subscription
+requires a SOW topic, delta publishing requires a keyed table, and a delta subscription requires
+delta publishing. The third is the destructive one — see the table above.
+
+#### The seeding assumption
+
+The merger takes whatever arrives first for a key as that key's base row:
+
+```java
+Object[] previous = lastByKey.get(key);
+if (previous == null) {
+    merged = row.values().clone();     // first message for this key becomes the base
+} else {
+    merged[i] = row.present()[i] ? row.values()[i] : previous[i];
+}
+```
+
+This is correct **because `sow_and_delta_subscribe` replays the SOW first**, and SOW records are
+complete: the base is a whole record and deltas layer onto it. If a key's first message were
+itself a partial delta, the columns it did not mention would start null and stay null until a
+complete record for that key arrived.
+
+Nothing in the connector depends on that never happening beyond the replay itself, and a
+connector restart re-replays the SOW (§6), so the merger's memory is rebuilt from complete
+records on every start. `Connector.start` calls `merger.clear()` for exactly this reason —
+carrying merged state across a restart would let a stale value from the previous life survive
+into a table the replay was supposed to rebuild.
+
 ## 5. Field mapping is an allowlist
 
 `fields` is the complete set of columns. A field in the payload with no mapping is dropped — it

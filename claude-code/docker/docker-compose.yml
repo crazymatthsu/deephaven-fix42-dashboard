@@ -7,6 +7,7 @@
 # Image tags are pinned to versions that were pulled and inspected on this machine:
 #   apache/kafka:3.9.1          (official Apache Kafka image, KRaft mode)
 #   ghcr.io/deephaven/server:42.4  (== :latest at time of writing; python 3.12, JDK 21)
+#   kafbat/kafka-ui:v1.5.0      (native arm64; the maintained successor to provectuslabs/kafka-ui)
 #
 # Both deephaven.ui (deephaven-plugin-ui 0.40.2) and deephaven.plot.express
 # (deephaven-plugin-plotly-express 0.20.0) are already bundled in the server image,
@@ -102,3 +103,37 @@ services:
       timeout: 5s
       retries: 30
       start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # kafka-ui -- browse the broker: topics, partitions, offsets and the actual
+  # message payloads on fix42.messages.
+  #
+  # Read-only inspection tool, not part of the pipeline: nothing depends on it and
+  # the demo works without it. It is the quickest way to answer "did the generator
+  # actually publish?" separately from "did Deephaven consume?", which otherwise
+  # both look like an empty dashboard.
+  #
+  # Reaches the broker on the in-network listener (kafka:9092), never the host-side
+  # EXTERNAL one -- it runs inside the compose network like the deephaven service.
+  #
+  # DYNAMIC_CONFIG_ENABLED lets the UI add clusters at runtime; left off so the
+  # container stays stateless and reproducible from this file alone.
+  # ---------------------------------------------------------------------------
+  kafka-ui:
+    image: kafbat/kafka-ui:v1.5.0
+    container_name: fix42-kafka-ui
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: "fix42"
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: "kafka:9092"
+      DYNAMIC_CONFIG_ENABLED: "false"
+      # The FIX payloads are SOH-delimited text, not Avro/Protobuf: read both key
+      # and value as plain strings so the Messages tab shows them directly.
+      KAFKA_CLUSTERS_0_DEFAULTKEYSERDE: "String"
+      KAFKA_CLUSTERS_0_DEFAULTVALUESERDE: "String"
+      SERVER_SERVLET_CONTEXT_PATH: "/"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped

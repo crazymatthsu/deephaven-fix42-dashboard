@@ -29,6 +29,7 @@ DK trades) so the whole thing is reproducible from a cold start in about two min
   │                           │                    │                    │                          │
   │  kafka   (KRaft, 1 node)  │◄── kafka:9092 ─────┤   declarative DAG  ▼                          │
   │  deephaven + deephaven.ui │                    │     order_state_latest = last_by(OrderKey)    │
+  │  kafka-ui  :8080          │                    │                                               │
   └───────────────────────────┘                    │     executions_latest  = last_by(ExecID)      │
                                                    │     clordid_index · execid_index              │
                                                    │     status_summary · symbol_summary           │
@@ -78,11 +79,14 @@ suite through the Gradle-wrapped python module.
 podman compose -f docker/docker-compose.yml up -d
 ```
 
-Starts Kafka (KRaft, single node) and Deephaven. Deephaven waits for Kafka's healthcheck
+Starts Kafka (KRaft, single node), Deephaven, and **kafka-ui** on
+<http://localhost:8080>. Deephaven waits for Kafka's healthcheck
 to pass before starting, so no ordering flags are needed. The healthcheck also pre-creates
 the `fix42.messages` topic — required, because Deephaven's Kafka consumer resolves the
 topic's partitions once at startup and would sit idle forever if the topic only appeared
 on the generator's first produce. First run pulls ~2 GB of images.
+
+To skip the UI, name the services you want: `podman compose -f docker/docker-compose.yml up -d kafka deephaven`.
 
 Watch the Deephaven server come up and load the application:
 
@@ -143,6 +147,39 @@ embed in another page):
 - `http://localhost:10000/iframe/table/?name=order_state_latest` — a single live table
 
 With anonymous auth no extra parameter is needed; under PSK auth append `&psk=<key>`.
+
+### 4b. Inspect the broker (kafka-ui)
+
+Go to **<http://localhost:8080>** — no login. Cluster **`fix42`** → **Topics** →
+**`fix42.messages`** → the **Messages** tab shows every record: key (the chain key, e.g.
+`ORD-0003`), partition, offset, timestamp, and the raw FIX payload.
+
+Both key and value are read with the `String` serde, configured in the compose file, because
+the payloads are SOH-delimited FIX text rather than Avro or Protobuf. Without that they would
+render as base64. SOH shows as an escape (`\u0001`) between tags.
+
+This is a read-only inspection tool, deliberately outside the pipeline — nothing depends on it.
+Its value is splitting one ambiguous symptom into two answerable questions. An empty dashboard
+means either the generator never published or Deephaven never consumed, and those have
+completely different fixes:
+
+| kafka-ui shows | Diagnosis |
+|---|---|
+| no messages | the generator never reached the broker — check it used `localhost:19092`, not `kafka:9092` |
+| messages present, dashboard empty | ingestion is the problem — check `podman logs fix42-deephaven` |
+
+The **Consumers** tab lists Deephaven's group, `dh-fix42-dashboard`, with its committed offsets
+and per-partition lag — the direct read on whether ingestion is keeping up.
+
+Expect it to report **no active members** even while ingestion is healthy. Deephaven assigns
+partitions explicitly (`ALL_PARTITIONS_SEEK_TO_BEGINNING`, doc 03 §2.1) rather than joining the
+group for a rebalance, so it commits offsets without ever becoming a group member. Read the lag
+column, not the member list:
+
+```
+GROUP              TOPIC           PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG
+dh-fix42-dashboard fix42.messages  0          37              37              0
+```
 
 ### 5. Tear down
 
@@ -291,11 +328,13 @@ podman machine start
 podman info | head        # should print host details
 ```
 
-**Port already in use** (`10000`, `19092`) — find the squatter, or remap the host side of
+**Port already in use** (`10000`, `19092`, `8080`) — find the squatter, or remap the host side of
 the port in `docker/docker-compose.yml` (`"10001:10000"`):
 ```bash
 lsof -nP -iTCP:10000 -sTCP:LISTEN
 ```
+`8080` is the most likely clash, since plenty of things want it. Only kafka-ui uses it, so
+remapping it (`"8090:8080"`) or dropping the service affects nothing else.
 
 **Image pull fails / is slow** — pre-pull, then retry compose:
 ```bash

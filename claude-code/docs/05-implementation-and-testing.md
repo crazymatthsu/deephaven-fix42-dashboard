@@ -162,13 +162,17 @@ source selection, AMPS config and the AMPS→update-graph hand-off *are* unit-te
     topic that appears only on first produce leaves the consumer with zero
     partitions and it shuts down). Auto-create topics on (belt and braces).
   - `deephaven`: `ghcr.io/deephaven/server:<pinned — verify pullable>`; ports
-    `10000:10000`; volumes: `../deephaven-scripts/src:/scripts:ro,z`, `./app.d:/app.d:ro,z`;
+    `${DH_PORT:-10000}:10000`; volumes: `../deephaven-scripts/src:/scripts:ro,z`,
+    `./apps/_lib:/dh-app-lib:ro,z`, `./apps/${DH_APP:-fix42-dashboard}:/app.d:ro,z`;
     `START_OPTS` = app-mode dir + anonymous auth + `-Xmx4g` (doc 04 §7);
     depends_on kafka healthy. If `deephaven.ui` missing from base image, add
     `Dockerfile` (`pip install deephaven-plugin-ui deephaven-plugin-plotly-express`)
     and build in compose.
-- `app.d/dashboard.app` per doc 04 §7; `file_0=/scripts/dh_app/app.py` (or copy via
-  config dir — whichever app-mode resolves; verify).
+- **One folder per app under `docker/apps/`**, selected with `DH_APP`; only that folder
+  is mounted at `/app.d`. `apps/<name>/<name>.app` per doc 04 §7 with `file_0=main.py`;
+  `main.py` calls `load()` from the shared `apps/_lib/loader.py` (mounted at
+  `/dh-app-lib`) to execute its entrypoint under `/scripts`. `DH_PORT` and
+  `DH_CONTAINER` let a second app run beside the first — `docker/apps/README.md`.
 - SELinux-friendly `:z` volume flags are harmless on macOS podman.
 
 ## 6. Integration test (`integration-test/`)

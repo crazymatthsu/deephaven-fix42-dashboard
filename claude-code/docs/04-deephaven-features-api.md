@@ -132,8 +132,11 @@ dash = ui.dashboard(orders_dashboard(...))
 
 - Image: `ghcr.io/deephaven/server:<pinned>` (python). Port 10000 (web IDE + gRPC).
   `START_OPTS=-Xmx4g -Ddeephaven.console.type=python`.
-- **Application Mode** auto-runs our scripts at startup:
-  `-Ddeephaven.application.dir=/app.d` with `dashboard.app`:
+- **Application Mode** auto-runs one app's scripts at startup:
+  `-Ddeephaven.application.dir=/app.d`, where `/app.d` is whichever folder under
+  `docker/apps/` the `DH_APP` variable names (default `fix42-dashboard`). Deephaven
+  loads **every** `.app` file in that one directory, so mounting a single app folder is
+  what keeps apps from leaking into each other:
 
   ```
   type=script
@@ -141,8 +144,11 @@ dash = ui.dashboard(orders_dashboard(...))
   enabled=true
   id=fix42.dashboard
   name=FIX42 Order State Dashboard
-  file_0=app.py
+  file_0=main.py
   ```
+
+  `file_N` accepts an absolute container path **or** a path relative to the application
+  dir (both verified on 42.4). Adding an app is adding a folder — `docker/apps/README.md`.
 
   Globals created by `app.py` (tables + the `ui.dashboard`) surface in the UI's
   Panels list. `app.py` adds `deephaven-scripts/src` to `sys.path` and wires

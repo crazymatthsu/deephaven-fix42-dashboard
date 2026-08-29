@@ -34,6 +34,11 @@ IT_TARGETED_SCENARIOS="${IT_TARGETED_SCENARIOS:-0}"
 PYTEST_ARGS="${PYTEST_ARGS:-}"
 STACK_TIMEOUT="${STACK_TIMEOUT:-240}"
 
+# The compose stack runs one app out of docker/apps/, chosen by DH_APP. Pin it here so
+# a DH_APP left over in the caller's shell cannot silently start a different app and
+# make every assertion below fail on missing tables.
+export DH_APP="${DH_APP:-fix42-dashboard}"
+
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[warn] %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[1;31m[fail] %s\033[0m\n' "$*" >&2; exit 1; }

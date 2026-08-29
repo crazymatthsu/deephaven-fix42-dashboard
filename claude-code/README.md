@@ -26,7 +26,7 @@ DK trades) so the whole thing is reproducible from a cold start in about two min
                                                    │        ├─► order_state_blink    (snapshots)   │
   ┌───────────────────────────┐                    │        ├─► executions_blink     (35=8 / Q)    │
   │  podman compose           │                    │        └─► order_events_blink   (lifecycle)   │
-  │                           │                    │                    │                          │
+  │  DH_APP picks the app     │                    │                    │                          │
   │  kafka   (KRaft, 1 node)  │◄── kafka:9092 ─────┤   declarative DAG  ▼                          │
   │  deephaven + deephaven.ui │                    │     order_state_latest = last_by(OrderKey)    │
   │  kafka-ui  :8080          │                    │                                               │
@@ -94,6 +94,15 @@ on the generator's first produce. First run pulls ~2 GB of images.
 
 To skip the UI, name the services you want: `podman compose -f docker/docker-compose.yml up -d kafka deephaven`.
 
+Deephaven runs **one app** out of `docker/apps/`, chosen with `DH_APP` and defaulting to
+`fix42-dashboard`. To run a different one:
+
+```bash
+DH_APP=example-minimal podman compose -f docker/docker-compose.yml up -d
+```
+
+See [Multiple Deephaven apps](#multiple-deephaven-apps) below.
+
 Watch the Deephaven server come up and load the application:
 
 ```bash
@@ -104,8 +113,7 @@ You are looking for the banner the app prints when the DAG is wired:
 
 ```
 FIX 4.2 Order State Dashboard -- ready
-  kafka bootstrap : kafka:9092
-  topic           : fix42.messages (seek to beginning)
+  source          : kafka: kafka:9092 topic=fix42.messages (seek to beginning)
   tables          : order_state_latest, executions, ...
   dashboard       : fix42_dashboard
 ```
@@ -316,13 +324,15 @@ Pinned to **`ghcr.io/deephaven/server:42.4`**. Verified on this machine:
 
 ### Application mode wiring
 
-`docker/app.d/dashboard.app` points at `loader.py`, which executes
-`/scripts/dh_app/app.py`. Both an absolute `file_0=/scripts/dh_app/app.py` and a path
-relative to the application dir were verified to work on 42.4 — the loader is used anyway
-because **app-mode scripts run with `__file__` unset** (`__name__` is `"__main__"`). The
-loader defines `__file__` before executing the entrypoint, puts `/scripts` on `sys.path`,
-and turns a missing entrypoint into one actionable log line instead of an injector stack
-trace. `PYTHONPATH=/scripts` in the compose file is the belt-and-braces backup.
+`docker/apps/fix42-dashboard/fix42-dashboard.app` points at `main.py`, which calls
+`load()` from the shared `docker/apps/_lib/loader.py` to execute `/scripts/dh_app/app.py`.
+Both an absolute `file_0=/scripts/dh_app/app.py` and a path relative to the application
+dir were verified to work on 42.4 — the loader is used anyway because **app-mode scripts
+run with `__file__` unset** (`__name__` is `"__main__"`). It defines `__file__` before
+executing the entrypoint, puts `/scripts` on `sys.path`, and turns a missing or raising
+entrypoint into one actionable log line instead of an injector stack trace, with the
+server left up so the IDE console still works. `PYTHONPATH=/scripts` in the compose file
+is the belt-and-braces backup.
 
 ---
 
@@ -381,6 +391,21 @@ compose implementation ignores conditions, the Kafka consumer simply retries, an
 **Cache looks stale after a restart** — it rebuilds by replaying the topic from offset 0,
 which takes a moment on a large backlog. Watch row counts settle in `order_state_latest`.
 
+**No FIX tables, and the log says a different app loaded** — `DH_APP` is set in your
+shell. Compose bakes the mount at `up` time, so check what the container actually got:
+```bash
+podman inspect fix42-deephaven --format '{{range .Mounts}}{{.Destination}}={{.Source}}{{"\n"}}{{end}}' | grep app.d
+```
+
+**`DH_APP=typo` starts but publishes nothing** — podman *creates* the missing host
+directory rather than failing, so `/app.d` comes up empty and the server logs:
+```
+d.s.a.ApplicationInjector | Finding custom application(s) in '/app.d'...
+d.s.a.ApplicationInjector | No custom application(s) found...
+```
+`ls docker/apps` lists the valid names — and will also show the empty folder the typo
+just created, so delete it (`rmdir docker/apps/<typo>`) before it looks like a real app.
+
 **`FIX42_SOURCE='...' is not a known source`** — the app refuses to start rather than
 falling back to Kafka. A deployment that meant to read AMPS and silently got Kafka would
 look perfectly healthy while rebuilding a cache from the wrong journal.
@@ -394,6 +419,42 @@ banner prints exactly what was subscribed, and every connection transition is lo
 ```bash
 podman logs fix42-deephaven | grep -E 'AMPS (subscribed|connection state)'
 ```
+
+---
+
+## Multiple Deephaven apps
+
+`docker/apps/` holds **one folder per Deephaven Application Mode app**, and the compose
+stack mounts exactly one of them at `/app.d`:
+
+```bash
+podman compose -f docker/docker-compose.yml up -d                          # fix42-dashboard
+DH_APP=example-minimal podman compose -f docker/docker-compose.yml up -d   # a different app
+```
+
+| App | Publishes |
+|---|---|
+| `fix42-dashboard` *(default)* | The full FIX 4.2 pipeline — `order_state_latest`, `executions`, `order_events`, `fix_messages`, the query API, `fix42_dashboard` |
+| `example-minimal` | One table, `example_heartbeat`. The copy-me template; it imports nothing from the repo, so it proves the switch on its own |
+
+Because only the selected folder is mounted, apps cannot leak into each other — bring up
+`example-minimal` and `order_state_latest` is simply not there.
+
+**Adding an app is adding a folder.** Copy `example-minimal`, rename the `.app` file and
+its `id=`, and point `main.py` at your entrypoint the way `fix42-dashboard/main.py` does.
+Full instructions, including the shared `_lib/loader.py`:
+[docker/apps/README.md](docker/apps/README.md).
+
+**Two apps at once** — give the second its own project name, port and container name, and
+`--no-deps` so it does not start a second Kafka:
+
+```bash
+DH_APP=example-minimal DH_PORT=10001 DH_CONTAINER=dh-example \
+  podman compose -f docker/docker-compose.yml -p dh-example up -d --no-deps deephaven
+```
+
+That leaves `fix42-dashboard` on `:10000` and the second app on `:10001`, sharing one
+broker. Remove it with `podman rm -f dh-example`.
 
 ---
 
@@ -501,7 +562,10 @@ claude-code/
 │   └── src/main/resources/application.yml   # the whole configuration surface
 ├── docker/
 │   ├── docker-compose.yml         # kafka (KRaft) + deephaven, pinned images
-│   └── app.d/                     # application mode: dashboard.app + loader.py
+│   └── apps/                      # one folder per deephaven app; DH_APP picks one
+│       ├── _lib/loader.py         #   shared app-mode loader, mounted at /dh-app-lib
+│       ├── fix42-dashboard/       #   the default app (.app descriptor + main.py)
+│       └── example-minimal/       #   copy-me template, no repo dependencies
 ├── integration-test/
 │   ├── run_integration.sh         # up → generate → pytest → down
 │   ├── test_e2e.py                # pydeephaven assertions incl. restart idempotence

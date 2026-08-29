@@ -102,9 +102,18 @@ services:
       - ../deephaven-scripts/src:/scripts:ro,z
       - ./apps/_lib:/dh-app-lib:ro,z
       - ./apps/${DH_APP:-fix42-dashboard}:/app.d:ro,z
+      # Java engine app (DH_APP=fix42-dashboard-java): `./gradlew :deephaven-app-java:assemble`
+      # stages the jar here. Harmless for every other app -- an empty or absent directory makes
+      # EXTRA_CLASSPATH expand to nothing and the server starts exactly as before. (podman creates
+      # a missing relative host directory rather than failing the mount.)
+      - ${DH_JAVA_LIBS:-../deephaven-app-java/build/deploy/libs}:/apps/libs:ro,z
     environment:
       # Echoed into the container so app scripts and log lines can name themselves.
       DH_APP: "${DH_APP:-fix42-dashboard}"
+      # bin/start PREPENDS this to the server's own classpath, which is why /apps/libs must never
+      # hold a jar the image already ships -- a duplicate would shadow the engine. The staging task
+      # only puts our own jar there, because every deephaven dependency is compileOnly.
+      EXTRA_CLASSPATH: "/apps/libs/*"
       START_OPTS: >-
         -Xmx4g
         -Ddeephaven.console.type=python
@@ -119,10 +128,15 @@ services:
       FIX42_TOPIC: "fix42.messages"
       # To read an AMPS transaction log instead, set FIX42_SOURCE: "amps" and point
       # these at your own broker. AMPS is commercial software with no public image, so
-      # there is no AMPS service in this file, and the AMPS python client is not in the
-      # Deephaven image either -- it has to be installed:
-      #   podman exec fix42-deephaven pip install amps-python-client
-      # See the "AMPS transaction log as the source" section of the README.
+      # there is no AMPS service in this file, and its client is not in the Deephaven
+      # image either -- it has to be supplied. Which client depends on the app:
+      #   DH_APP=fix42-dashboard        (python)  podman exec fix42-deephaven \
+      #                                             pip install amps-python-client
+      #   DH_APP=fix42-dashboard-java   (java)    drop ONE amps-client-<version>.jar into
+      #                                             deephaven-app-java/build/deploy/libs
+      #                                             (mounted at /apps/libs) and recreate
+      # See the "AMPS transaction log as the source" section of the README, and
+      # deephaven-app-java/README.md for the java side.
       #
       # FIX42_AMPS_URI: "tcp://amps:9007/amps/fix"   # comma-separated for an HA pair
       # FIX42_AMPS_TOPIC: "fix42.messages"           # defaults to FIX42_TOPIC

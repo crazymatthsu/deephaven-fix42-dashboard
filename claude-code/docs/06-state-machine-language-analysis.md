@@ -10,8 +10,12 @@ inside the production container.
 The fold runs inside Deephaven's embedded Python, on the update-graph (UG) thread, as
 a table listener that processes each Kafka row and republishes via `TablePublisher`
 (doc 03 §2.2). Everything around it — ingestion wiring, DAG, query API, deephaven.ui
-dashboard — is necessarily Python: that is Deephaven Community's scripting surface,
-and the project TODO mandates Deephaven server-side Python scripting practices.
+dashboard — is Python: that is Deephaven Community's scripting surface, and the project
+TODO mandates Deephaven server-side Python scripting practices.
+
+*(Written before the port. "Necessarily" would be too strong: the ingestion wiring, DAG and query
+API all have Java engine equivalents, and `deephaven-app-java` uses them. Only the deephaven.ui
+dashboard is genuinely Python-only — §3.)*
 
 ## 2. Comparison
 
@@ -44,7 +48,22 @@ and the project TODO mandates Deephaven server-side Python scripting practices.
 - Tight tail-latency SLOs on cache updates.
 - The cache must serve non-Deephaven JVM consumers directly.
 
+One correction the port itself supplies to row 1 of the table above ("Deephaven integration"): the
+Java path needs **no custom image** — a jar on `EXTRA_CLASSPATH` plus a `.app` descriptor is the
+whole deployment. The row's other half stands, with a smaller scope than it implies: there *is* a
+jpy shim, but it is ~30 lines that bind Java tables into the script session and it carries no
+business logic. It is there for visibility, not interop — `pydeephaven`'s `open_table` resolves
+scope tickets only, and `deephaven.ui` is python-only. See the module README.
+
 ## 3. Escape hatch (deliberate design)
+
+> **Status update — the hatch has been taken.** `deephaven-app-java` is a complete Java
+> implementation of the whole app (option 2 below, not just the fold) against the Deephaven Java
+> engine API. It runs in the same server, exports the same globals, and passes the same integration
+> suite unmodified; `DH_APP=fix42-dashboard-java` selects it. The analysis below stands as the
+> reasoning for why Python remains the *default* — nothing measured here has changed — and the
+> throughput claim for the Java path is **not** re-measured: §4's numbers are Python's.
+> See [`deephaven-app-java/README.md`](../deephaven-app-java/README.md).
 
 `fix42cache` and `dh_app` communicate only through the frozen row schemas
 (doc 01 §4/§6), so swapping the fold's engine is not a pipeline rewrite:

@@ -430,11 +430,15 @@ stack mounts exactly one of them at `/app.d`:
 ```bash
 podman compose -f docker/docker-compose.yml up -d                          # fix42-dashboard
 DH_APP=example-minimal podman compose -f docker/docker-compose.yml up -d   # a different app
+
+./gradlew :deephaven-app-java:assemble                                     # the java build:
+DH_APP=fix42-dashboard-java podman compose -f docker/docker-compose.yml up -d
 ```
 
 | App | Publishes |
 |---|---|
 | `fix42-dashboard` *(default)* | The full FIX 4.2 pipeline — `order_state_latest`, `executions`, `order_events`, `fix_messages`, the query API, `fix42_dashboard` |
+| `fix42-dashboard-java` | **The same pipeline, built in Java** against the Deephaven engine API (`:deephaven-app-java`). Identical table names, columns and values; build the jar first with `./gradlew :deephaven-app-java:assemble` |
 | `example-minimal` | One table, `example_heartbeat`. The copy-me template; it imports nothing from the repo, so it proves the switch on its own |
 
 Because only the selected folder is mounted, apps cannot leak into each other — bring up
@@ -548,7 +552,7 @@ Design and contract: [docs/07-amps-connectors.md](docs/07-amps-connectors.md).
 ```
 claude-code/
 ├── docs/                          # analysis & design — the binding contracts
-│   ├── 00-overview.md … 05-implementation-and-testing.md
+│   ├── 00-overview.md … 08-on-demand-executions-idea.md
 ├── settings.gradle.kts            # gradle multi-module root (Java 21 toolchain)
 ├── build.gradle.kts
 ├── fix-mock-generator/            # Java 21: FIX builder + scenario engine + Kafka CLI
@@ -557,6 +561,11 @@ claude-code/
 │   ├── src/fix42cache/            #   pure python: tags, parser, model, state machine
 │   ├── src/dh_app/                #   deephaven server scripts: ingest (kafka|amps), dag, api, dashboard
 │   └── tests/                     #   pytest unit suite
+├── deephaven-app-java/            # Java 21: the same deephaven app on the java engine API
+│   ├── src/main/java/com/fix42/dashboard/fixcache/   #   state machine (no deephaven imports)
+│   ├── src/main/java/com/fix42/dashboard/dh/         #   publishers, dag, query api, app entry
+│   ├── parity/                    #   regenerates the python-vs-java golden the tests assert
+│   └── README.md                  #   what is ported, what is not, and how it is verified
 ├── amps-connectors/               # Spring Boot: AMPS topics -> Deephaven input tables
 │   ├── src/main/java/com/fix42/dashboard/amps/
 │   └── src/main/resources/application.yml   # the whole configuration surface
@@ -565,6 +574,7 @@ claude-code/
 │   └── apps/                      # one folder per deephaven app; DH_APP picks one
 │       ├── _lib/loader.py         #   shared app-mode loader, mounted at /dh-app-lib
 │       ├── fix42-dashboard/       #   the default app (.app descriptor + main.py)
+│       ├── fix42-dashboard-java/  #   the java build of the same app (jpy shim + .app)
 │       └── example-minimal/       #   copy-me template, no repo dependencies
 ├── integration-test/
 │   ├── run_integration.sh         # up → generate → pytest → down

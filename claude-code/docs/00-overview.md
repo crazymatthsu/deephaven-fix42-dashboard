@@ -31,12 +31,16 @@ cache to a **Deephaven streaming-table architecture**.
                                                   └─────────────────────────────────────────────┘
 ```
 
-Two implementation halves:
+Implementation modules:
 
-| Half | Language | Role |
+| Module | Language | Role |
 |---|---|---|
 | `fix-mock-generator` | Java 21 (Gradle module) | Builds valid FIX 4.2 messages, generates realistic order lifecycles for every required scenario, publishes them to Kafka. |
 | `deephaven-scripts` | Python (Gradle-wrapped submodule) | `fix42cache` — pure-python FIX parser + order state machine (no Deephaven imports, unit-testable). `dh_app` — Deephaven server scripts: ingestion (Kafka or an AMPS transaction log, `FIX42_SOURCE`), DAG, query API, dashboard. |
+| `deephaven-app-java` | Java 21 (Gradle module) | The same app against the Deephaven **Java engine API**: `fixcache` (the state machine, no Deephaven imports) + `dh` (publishers, DAG, query API). Runs in the same server, exports the same globals, and is asserted by the same integration suite. Doc 06 §3's escape hatch, implemented. |
+
+The two dashboard apps are alternatives, not layers: pick one with `DH_APP`
+(`fix42-dashboard` or `fix42-dashboard-java`).
 
 **Key architectural decision — hybrid DAG.** Deephaven's declarative table operations
 (`where`, `last_by`, joins, aggregations) cannot express FIX chain resolution
@@ -92,6 +96,10 @@ claude-code/
 │   ├── src/fix42cache/         # pure python: tags, parser, model, state machine
 │   ├── src/dh_app/             # deephaven server scripts: ingest (kafka|amps), dag, query api, dashboard
 │   └── tests/                  # pytest unit tests
+├── deephaven-app-java/         # Java 21: the same deephaven app on the java engine API
+│   ├── src/main/java/com/fix42/dashboard/fixcache/  # state machine (no deephaven imports)
+│   ├── src/main/java/com/fix42/dashboard/dh/        # publishers, DAG, query api, app entry
+│   └── parity/                 # regenerates the python-vs-java golden asserted by the tests
 ├── amps-connectors/            # Spring Boot: AMPS topics -> Deephaven input tables (doc 07)
 │   └── src/main/{java,resources}/  # connectors + application.yml
 ├── docker/                     # podman-compose stack: kafka (KRaft) + deephaven (+ui)

@@ -7,8 +7,9 @@ DAG node names in [03-deephaven-dag.md](03-deephaven-dag.md).
 ## 1. Gradle build (root `claude-code/`)
 
 - Gradle 9.x Kotlin DSL, wrapper committed. `settings.gradle.kts` includes
-  `:fix-mock-generator` and `:deephaven-scripts`; plugin
-  `org.gradle.toolchains.foojay-resolver-convention` (JDK auto-provisioning).
+  `:fix-mock-generator`, `:deephaven-scripts`, `:amps-connectors` and
+  `:deephaven-app-java`; plugin `org.gradle.toolchains.foojay-resolver-convention`
+  (JDK auto-provisioning).
 - **Java 21** via toolchain: `java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }`
   (host has JDK 23; foojay downloads 21).
 - `:deephaven-scripts` is a python module wrapped in Gradle: task `pytest` (Exec) that
@@ -145,6 +146,13 @@ Location `deephaven-scripts/src/dh_app/`. Config via env:
 
 `dh_app` contains **no business logic** — it adapts `fix42cache` rows to publisher
 batches. All business logic stays in the pure package where it is unit-tested.
+
+`:deephaven-app-java` re-implements this whole section (and §3) against the Deephaven **Java**
+engine API, reading the same environment variables and exporting the same globals, so the two apps
+are interchangeable behind `DH_APP`. The same split holds there:
+`com.fix42.dashboard.fixcache` is the pure state machine and `com.fix42.dashboard.dh` the adapter.
+Its `ParityAgainstPythonTest` asserts the two implementations agree column-for-column on every
+emitted row. See [`deephaven-app-java/README.md`](../deephaven-app-java/README.md).
 (`dh_app` correctness is covered by the integration test; no pytest for it — with one
 exception: `ingest.py` and `amps_ingest.py` import `deephaven` and `AMPS` lazily, so
 source selection, AMPS config and the AMPS→update-graph hand-off *are* unit-tested in

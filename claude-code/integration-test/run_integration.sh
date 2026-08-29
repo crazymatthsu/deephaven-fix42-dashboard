@@ -91,6 +91,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The java app (docker/apps/fix42-dashboard-java) is a jar mounted at /apps/libs, and the mount is
+# read when the container starts -- so it has to be built BEFORE `up -d`, not alongside the
+# generator further down.
+if [[ "$DH_APP" == *java* ]]; then
+  log "building the java deephaven app (mounted at /apps/libs)"
+  ( cd "$ROOT" && ./gradlew --console=plain --quiet :deephaven-app-java:assemble ) \
+    || die "java app build failed"
+fi
+
 log "starting stack (kafka + deephaven)"
 "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" up -d
 
@@ -110,9 +119,13 @@ echo "    Deephaven responding (HTTP $code)"
 
 # The app-mode loader reports its own failures; surface them early rather than
 # letting the test fail with a confusing "table not found".
-if "$CONTAINER_CLI" logs fix42-deephaven 2>&1 | grep -q '\[fix42-loader\] ERROR'; then
-  warn "the app-mode loader reported an error:"
-  "$CONTAINER_CLI" logs fix42-deephaven 2>&1 | grep -A 12 '\[fix42-loader\] ERROR' >&2 || true
+# loader.py prints "[<app-name>] ERROR"; the java shim raises through app mode instead, which the
+# server logs as a Traceback. Match both, against whichever container this run started.
+DH_CONTAINER_NAME="${DH_CONTAINER:-fix42-deephaven}"
+if "$CONTAINER_CLI" logs "$DH_CONTAINER_NAME" 2>&1 | grep -qE "\[$DH_APP\] ERROR|Traceback \(most recent call last\)"; then
+  warn "the app-mode script reported an error:"
+  "$CONTAINER_CLI" logs "$DH_CONTAINER_NAME" 2>&1 \
+    | grep -A 12 -E "\[$DH_APP\] ERROR|Traceback \(most recent call last\)" >&2 || true
   warn "continuing -- pytest will report precisely which globals are missing"
 fi
 

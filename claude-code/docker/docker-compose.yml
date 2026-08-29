@@ -102,9 +102,18 @@ services:
       - ../deephaven-scripts/src:/scripts:ro,z
       - ./apps/_lib:/dh-app-lib:ro,z
       - ./apps/${DH_APP:-fix42-dashboard}:/app.d:ro,z
+      # Java engine app (DH_APP=fix42-dashboard-java): `./gradlew :deephaven-app-java:assemble`
+      # stages the jar here. Harmless for every other app -- an empty or absent directory makes
+      # EXTRA_CLASSPATH expand to nothing and the server starts exactly as before. (podman creates
+      # a missing relative host directory rather than failing the mount.)
+      - ${DH_JAVA_LIBS:-../deephaven-app-java/build/deploy/libs}:/apps/libs:ro,z
     environment:
       # Echoed into the container so app scripts and log lines can name themselves.
       DH_APP: "${DH_APP:-fix42-dashboard}"
+      # bin/start PREPENDS this to the server's own classpath, which is why /apps/libs must never
+      # hold a jar the image already ships -- a duplicate would shadow the engine. The staging task
+      # only puts our own jar there, because every deephaven dependency is compileOnly.
+      EXTRA_CLASSPATH: "/apps/libs/*"
       START_OPTS: >-
         -Xmx4g
         -Ddeephaven.console.type=python

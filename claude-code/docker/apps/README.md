@@ -15,7 +15,14 @@ sees that app's `.app` descriptors and no others — apps cannot leak into each 
 | App | What it publishes |
 |---|---|
 | `fix42-dashboard` | The full FIX 4.2 pipeline: `order_state_latest`, `executions`, `order_events`, `fix_messages`, the query API and `fix42_dashboard`. Needs Kafka (or AMPS — see `FIX42_SOURCE`). |
+| `fix42-dashboard-java` | The same pipeline, built by `:deephaven-app-java` against the Deephaven **Java** engine API. Same table names, columns and values. Run `./gradlew :deephaven-app-java:assemble` first — the jar is mounted at `/apps/libs` and named on `EXTRA_CLASSPATH`. |
 | `example-minimal` | One table, `example_heartbeat`. The copy-me template: it imports nothing from the repo, so bringing it up proves the `DH_APP` switch on its own. |
+
+`fix42-dashboard-java` is also the worked example of an app whose `main.py` is a *shim* rather than
+an entrypoint: it calls one static Java method and binds the returned tables into `globals()`. That
+is what makes them reachable through `pydeephaven`'s `open_table` (which resolves scope tickets
+only) and what lets the python-only `deephaven.ui` dashboard run over Java-built tables. See
+[`deephaven-app-java/README.md`](../../deephaven-app-java/README.md).
 
 ## Adding an app
 

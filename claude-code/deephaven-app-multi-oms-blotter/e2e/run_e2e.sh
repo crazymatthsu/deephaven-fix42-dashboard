@@ -102,13 +102,23 @@ dh_log_show() { local logs; logs="$(dh_log)"; grep -E -A "${2:-12}" "$1" <<<"$lo
 # under us" (another process tearing down the shared fix42 stack): both look like
 # connection-refused until the deadline, and the timeout message then blames the
 # wrong thing. So the wait loops below also poll container *existence* -- a
-# vanished container fails immediately, naming the real cause. In that case the
-# EXIT trap must NOT `down -v` either: the compose project name is shared, so any
-# fix42 stack running by then belongs to whoever replaced ours.
-STACK_VANISHED=0
+# vanished container fails immediately, naming the real cause.
+#
+# The EXIT trap must not blindly `down -v` either: the compose project name is
+# shared, so after a mid-run reclaim that teardown would land on whoever replaced
+# our stack. The trap therefore tears down only when $DH_CONTAINER_NAME is still
+# the exact container THIS run started (id captured after `up`; a restart -- the
+# suite's own restart test included -- preserves the id, only an outside recreate
+# changes it). Decision table: no id captured -> tear down (reap our own partial
+# `up`); id matches -> tear down; id differs or container gone -> skip. The skip
+# can leak OUR kafka when the stack merely vanished and nothing replaced it --
+# a deliberate leak-over-reap trade-off: every entry point here starts with
+# `down -v`, which reaps a leaked stack for free, while reaping a live successor
+# stack costs someone else their run.
+DH_CID=""
 dh_container_exists() { "$CONTAINER_CLI" container inspect "$DH_CONTAINER_NAME" >/dev/null 2>&1; }
+current_dh_cid() { "$CONTAINER_CLI" container inspect --format '{{.Id}}' "$DH_CONTAINER_NAME" 2>/dev/null || true; }
 stack_vanished() {
-  STACK_VANISHED=1
   die "container $DH_CONTAINER_NAME no longer exists -- it was removed while this suite waited $1. Another process (or session) likely tore down or reclaimed the shared fix42 stack; re-run once it is free."
 }
 
@@ -119,15 +129,19 @@ stack_vanished() {
 # ---------------------------------------------------------------------------
 cleanup() {
   local rc=$?
-  if [[ "$STACK_VANISHED" == "1" ]]; then
-    warn "skipping teardown: our container vanished mid-run, so any fix42 stack running now belongs to another process"
-  elif [[ "$KEEP_STACK" == "1" ]]; then
+  if [[ "$KEEP_STACK" == "1" ]]; then
     log "KEEP_STACK=1 -- leaving the stack up (IDE: $DH_URL/ide -> multi_oms_blotter)"
     printf '    tear down later with: DH_APP=%s %s -f %s down -v\n' \
       "$DH_APP" "${COMPOSE_CMD[*]}" "$COMPOSE_FILE"
   else
-    log "tearing down the stack"
-    compose down -v >/dev/null 2>&1 || true
+    local now_cid
+    now_cid="$(current_dh_cid)"
+    if [[ -z "$DH_CID" || "$now_cid" == "$DH_CID" ]]; then
+      log "tearing down the stack"
+      compose down -v >/dev/null 2>&1 || true
+    else
+      warn "skipping teardown: $DH_CONTAINER_NAME is not the container this run started (vanished or recreated by another process). If nothing replaced the stack this can leak our kafka -- the next run's 'down -v' reaps it."
+    fi
   fi
   exit "$rc"
 }
@@ -140,6 +154,10 @@ compose down -v >/dev/null 2>&1 || true
 # slows the boot down.
 log "starting stack (kafka + deephaven)"
 compose up -d kafka deephaven
+
+# Pin this run's Deephaven container id -- the EXIT trap's teardown condition.
+DH_CID="$(current_dh_cid)"
+[[ -n "$DH_CID" ]] || warn "could not capture the $DH_CONTAINER_NAME container id; teardown will proceed unconditionally"
 
 # `up -d` returns once containers are created; wait for Deephaven to actually serve.
 log "waiting for Deephaven at $DH_URL (timeout ${STACK_TIMEOUT}s)"

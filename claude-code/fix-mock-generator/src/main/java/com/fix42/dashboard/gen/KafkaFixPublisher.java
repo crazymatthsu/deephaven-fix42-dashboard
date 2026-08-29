@@ -10,9 +10,13 @@ import org.apache.kafka.common.serialization.StringSerializer;
 /**
  * Publishes serialized FIX 4.2 messages to Kafka.
  *
- * <p>The record key is the chain's venue {@code 37 OrderID}, so every message of one order lands in
- * one partition and per-order ordering survives the broker ({@code docs/00-overview.md} §5). The
- * record value is the raw SOH-delimited FIX string.
+ * <p>The record key is the chain key — the venue {@code 37 OrderID} in single-tape mode, the hub
+ * order's {@code D} ClOrdID in multi-OMS mode — so every message of one order lands in one
+ * partition and per-order ordering survives the broker ({@code docs/00-overview.md} §5). The record
+ * value is the raw SOH-delimited FIX string.
+ *
+ * <p>The constructor's topic is the default destination; {@link #publish(String, String, String)}
+ * overrides it per message for the multi-OMS topology's four hub topics.
  */
 public final class KafkaFixPublisher implements AutoCloseable {
 
@@ -43,8 +47,19 @@ public final class KafkaFixPublisher implements AutoCloseable {
         return props;
     }
 
-    /** Sends one message keyed by its chain key. */
+    /** Sends one message to the constructor's topic, keyed by its chain key. */
     public void publish(String chainKey, String rawFix) {
+        publish(topic, chainKey, rawFix);
+    }
+
+    /**
+     * Sends one message to an explicit topic, keyed by its chain key.
+     *
+     * <p>Multi-OMS mode routes per message: each hub's drop-copy tape has its own topic
+     * ({@code docs/09-multi-oms-blotter.md} §3), while the key still keeps one order's messages on
+     * one partition.
+     */
+    public void publish(String topic, String chainKey, String rawFix) {
         producer.send(new ProducerRecord<>(topic, chainKey, rawFix));
         published++;
     }

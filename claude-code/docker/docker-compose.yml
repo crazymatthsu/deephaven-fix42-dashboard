@@ -55,15 +55,22 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
       KAFKA_LOG_RETENTION_HOURS: "168"
-    # The healthcheck also (idempotently) creates the demo topic. This is load-
+    # The healthcheck also (idempotently) creates the demo topics. This is load-
     # bearing, not a convenience: Deephaven's kc.consume() resolves the topic's
     # partitions once, at startup. If the topic only springs into existence when
     # the generator first produces, the consumer starts with zero partitions and
     # shuts down immediately -- tables stay empty forever. Gating deephaven on
-    # this healthcheck (depends_on: service_healthy) guarantees the topic exists
+    # this healthcheck (depends_on: service_healthy) guarantees the topics exist
     # with all 3 partitions before the consumer ever looks.
+    #
+    # fix42.messages          <- DH_APP=fix42-dashboard / fix42-dashboard-java
+    # fix42.oms-a .. oms-c    <- DH_APP=multi-oms-blotter (docs/09 s3 topology),
+    #                            which opens FOUR consumers at startup and needs
+    #                            every one of them to find its partitions.
+    # Creating all five always is harmless: an unused topic costs nothing, and it
+    # keeps the healthcheck independent of which app was selected.
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic fix42.messages --partitions 3 --replication-factor 1 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic fix42.messages"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic fix42.messages --partitions 3 --replication-factor 1 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic fix42.oms-a --partitions 3 --replication-factor 1 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic fix42.oms-b-parent --partitions 3 --replication-factor 1 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic fix42.oms-b-child --partitions 3 --replication-factor 1 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --if-not-exists --topic fix42.oms-c --partitions 3 --replication-factor 1 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic fix42.messages"]
       interval: 10s
       timeout: 10s
       retries: 12
@@ -81,14 +88,18 @@ services:
   # .app descriptors and no others. Adding an app is adding a folder — see
   # docker/apps/README.md.
   #
-  # /scripts     = deephaven-scripts/src  (fix42cache + dh_app python packages)
-  # /dh-app-lib  = apps/_lib              (loader shared by every app)
-  # /app.d       = apps/${DH_APP}         (the selected app, and only it)
+  # /scripts      = deephaven-scripts/src  (fix42cache + dh_app python packages)
+  # /moms-scripts = deephaven-app-multi-oms-blotter/src  (the multi_oms package)
+  # /dh-app-lib   = apps/_lib              (loader shared by every app)
+  # /app.d        = apps/${DH_APP}         (the selected app, and only it)
   #
-  # PYTHONPATH=/scripts is deliberate: app-mode scripts are evaluated with
-  # __file__ UNSET (verified on 42.4), so a script cannot bootstrap sys.path from
-  # its own location. Setting PYTHONPATH makes `import fix42cache` / `import dh_app`
-  # work no matter how an entrypoint is written.
+  # PYTHONPATH=/scripts:/moms-scripts is deliberate: app-mode scripts are evaluated
+  # with __file__ UNSET (verified on 42.4), so a script cannot bootstrap sys.path
+  # from its own location. Setting PYTHONPATH makes `import fix42cache` /
+  # `import dh_app` / `import multi_oms` work no matter how an entrypoint is
+  # written. Both directories are always mounted and always on the path: the
+  # multi-OMS app reuses fix42cache UNCHANGED from /scripts (doc 09 s4), and the
+  # extra mount is inert for every other app.
   #
   # DH_PORT and DH_CONTAINER exist so a second app can run *beside* this one
   # rather than replacing it -- see docker/apps/README.md.
@@ -100,6 +111,7 @@ services:
       - "${DH_PORT:-10000}:10000"
     volumes:
       - ../deephaven-scripts/src:/scripts:ro,z
+      - ../deephaven-app-multi-oms-blotter/src:/moms-scripts:ro,z
       - ./apps/_lib:/dh-app-lib:ro,z
       - ./apps/${DH_APP:-fix42-dashboard}:/app.d:ro,z
       # Java engine app (DH_APP=fix42-dashboard-java): `./gradlew :deephaven-app-java:assemble`
@@ -119,7 +131,7 @@ services:
         -Ddeephaven.console.type=python
         -Ddeephaven.application.dir=/app.d
         -DAuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler
-      PYTHONPATH: "/scripts"
+      PYTHONPATH: "/scripts:/moms-scripts"
       # Where fix_raw reads its raw FIX from: "kafka" (this stack) or "amps".
       # Both replay their journal from the beginning on every boot, so either way a
       # restart rebuilds the identical cache (docs/03-deephaven-dag.md section 2.1).
@@ -143,6 +155,28 @@ services:
       # FIX42_AMPS_BOOKMARK: "epoch"                 # epoch | now | most_recent | literal
       # FIX42_AMPS_FILTER: ""                        # optional server-side content filter
       # FIX42_AMPS_CLIENT_NAME: "dh-fix42-dashboard"
+      #
+      # --- DH_APP=multi-oms-blotter only (docs/09-multi-oms-blotter.md s3) --------
+      # Every one of these has a working default, so the app runs with none of them
+      # set; they are listed here because a misconfigured topology is a STARTUP
+      # ERROR, never a silent fallback, and this is where you would fix it.
+      #
+      # MULTIOMS_KAFKA_BOOTSTRAP: "kafka:9092"   # broker for every hub topic
+      # MULTIOMS_QTY_TOL: "1e-6"                 # abs tolerance for qty deltas
+      # MULTIOMS_NOTIONAL_TOL: "0.01"            # abs tolerance for notional deltas
+      # MULTIOMS_PAGE_SIZE: "200"                # blotter page size (UI default)
+      #
+      # MULTIOMS_HUBS is the topology: a JSON array of hub objects, defaulting to
+      # exactly the four hubs below. `upstream` names another hub, `link_tag` is the
+      # FIX tag on that hub's orders carrying the upstream order's id, and both are
+      # present-or-absent together (a root has neither). Names and topics must be
+      # unique, and the graph must be acyclic with at least one root.
+      # MULTIOMS_HUBS: >-
+      #   [{"name": "OMS-A", "topic": "fix42.oms-a"},
+      #    {"name": "OMS-B-parent", "topic": "fix42.oms-b-parent", "upstream": "OMS-A", "link_tag": 16666},
+      #    {"name": "OMS-B-child", "topic": "fix42.oms-b-child", "upstream": "OMS-B-parent", "link_tag": 16667},
+      #    {"name": "OMS-C", "topic": "fix42.oms-c", "upstream": "OMS-B-child", "link_tag": 16668}]
+      # Adding a hub here also means adding its topic to the kafka healthcheck above.
     depends_on:
       kafka:
         condition: service_healthy

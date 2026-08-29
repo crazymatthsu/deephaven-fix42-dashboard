@@ -132,3 +132,4 @@ claude-code/
 - [06 — State machine language choice: Python vs Java](06-state-machine-language-analysis.md) *(trade-offs + measured in-container throughput ceiling)*
 - [07 — AMPS connectors](07-amps-connectors.md) *(AMPS → Deephaven bridge: config model, SOW vs journal, table types, delta handling, lifecycle)*
 - [08 — On-demand executions from AMPS](08-on-demand-executions-idea.md) *(**tabled idea, not a contract** — explored and set aside: two sources of truth, partial memory win)*
+- [09 — Multi-OMS drop-copy blotter](09-multi-oms-blotter.md) *(contract for `deephaven-app-multi-oms-blotter`: cross-hub linking via configurable tags, per-edge CumQty/LeavesQty/notional recon, break taxonomy, paged blotter UI)*

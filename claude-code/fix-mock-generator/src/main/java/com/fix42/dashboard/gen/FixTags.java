@@ -57,6 +57,21 @@ public final class FixTags {
     public static final int LEAVES_QTY = 151;
     public static final int CXL_REJ_RESPONSE_TO = 434;
 
+    /**
+     * Cross-hub link tags of the multi-OMS topology ({@code docs/09-multi-oms-blotter.md} §3).
+     *
+     * <p>Each is carried by the downstream order's {@code D} and holds the {@code 11 ClOrdID} of the
+     * upstream order it routes, which is what the blotter joins the two hubs on.
+     */
+    /** {@code 16666} on an {@code OMS-B-parent} D: the {@code OMS-A} ClOrdID it routes. */
+    public static final int EXT_ORDER_ID_A_TO_B = 16666;
+
+    /** {@code 16667} on an {@code OMS-B-child} D: the {@code OMS-B-parent} ClOrdID it splits. */
+    public static final int EXT_ORDER_ID_B_PARENT_TO_CHILD = 16667;
+
+    /** {@code 16668} on an {@code OMS-C} D: the {@code OMS-B-child} ClOrdID it routes. */
+    public static final int EXT_ORDER_ID_C_TO_B_CHILD = 16668;
+
     public static final String MSG_NEW_ORDER_SINGLE = "D";
     public static final String MSG_CANCEL_REPLACE_REQUEST = "G";
     public static final String MSG_CANCEL_REQUEST = "F";
@@ -83,6 +98,9 @@ public final class FixTags {
     public static final String EXEC_TYPE_PENDING_NEW = "A";
     public static final String EXEC_TYPE_PENDING_REPLACE = "E";
 
+    public static final String ORD_TYPE_MARKET = "1";
+    public static final String ORD_TYPE_LIMIT = "2";
+
     public static final String EXEC_TRANS_NEW = "0";
     public static final String EXEC_TRANS_CANCEL = "1";
     public static final String EXEC_TRANS_CORRECT = "2";
@@ -92,6 +110,12 @@ public final class FixTags {
 
     public static final String SENDER_VENUE = "MOCKVENUE";
     public static final String SENDER_CLIENT = "CLIENT";
+
+    /**
+     * {@code 56 TargetCompID} of every multi-OMS tape: each hub drop-copies to one audit consumer,
+     * so {@code 49} is the hub name and {@code 56} is this constant.
+     */
+    public static final String TARGET_DROP_COPY = "DROPCOPY";
 
     /** Maps a FIX {@code 39 OrdStatus} code to the readable name used by the Deephaven cache. */
     public static String ordStatusName(String code) {

@@ -11,8 +11,10 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -41,6 +43,9 @@ class GeneratorMainTest {
         assertFalse(cfg.dryRun());
         assertFalse(cfg.listScenarios());
         assertNull(cfg.emitExpected());
+        assertFalse(cfg.multiOms());
+        assertEquals(MultiOmsScenarioEngine.DEFAULT_MAX_CHILDREN, cfg.children());
+        assertEquals(3, cfg.children());
     }
 
     @Test
@@ -195,6 +200,167 @@ class GeneratorMainTest {
         assertEquals(2, messages.stream()
                 .filter(m -> FixTags.EXEC_TYPE_REJECTED.equals(m.get(FixTags.EXEC_TYPE)))
                 .count());
+    }
+
+    // ---------------------------------------------------------------- multi-OMS mode
+
+    @Test
+    @DisplayName("--multi-oms and --children parse, and --children defaults to 3")
+    void multiOmsFlagsParse() {
+        GeneratorMain.Config cfg = GeneratorMain.parseArgs(new String[] {
+            "--multi-oms", "--children", "5", "--orders", "4", "--seed", "42",
+            "--scenario", "missed_fill", "--dry-run",
+        });
+        assertTrue(cfg.multiOms());
+        assertEquals(5, cfg.children());
+        assertEquals("missed_fill", cfg.scenario());
+        assertEquals("fix42.messages", cfg.topic(), "the unused default is left alone");
+
+        assertEquals(3, GeneratorMain.parseArgs(new String[] {"--multi-oms"}).children());
+    }
+
+    @Test
+    @DisplayName("--topic is rejected in multi-OMS mode; the topology fixes the destinations")
+    void multiOmsRejectsTopic() {
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
+                () -> GeneratorMain.parseArgs(new String[] {"--multi-oms", "--topic", "custom"}));
+        assertTrue(thrown.getMessage().contains("--topic"), thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("fix42.oms-a"), thrown.getMessage());
+        // Flag order must not matter.
+        assertThrows(IllegalArgumentException.class,
+                () -> GeneratorMain.parseArgs(new String[] {"--topic", "custom", "--multi-oms"}));
+    }
+
+    @Test
+    @DisplayName("--children needs --multi-oms and must be at least 1")
+    void childrenValidation() {
+        assertThrows(IllegalArgumentException.class,
+                () -> GeneratorMain.parseArgs(new String[] {"--children", "2"}));
+        assertThrows(IllegalArgumentException.class,
+                () -> GeneratorMain.parseArgs(new String[] {"--multi-oms", "--children", "0"}));
+        assertThrows(IllegalArgumentException.class,
+                () -> GeneratorMain.parseArgs(new String[] {"--multi-oms", "--children", "x"}));
+    }
+
+    @Test
+    @DisplayName("--scenario validates against the mode's own catalog")
+    void scenarioValidatesPerMode() {
+        assertThrows(IllegalArgumentException.class,
+                () -> GeneratorMain.parseArgs(new String[] {"--scenario", "clean_fill"}));
+        assertThrows(IllegalArgumentException.class,
+                () -> GeneratorMain.parseArgs(new String[] {"--multi-oms", "--scenario", "fill_bust"}));
+        assertEquals("clean_fill", GeneratorMain.parseArgs(
+                new String[] {"--multi-oms", "--scenario", "clean_fill"}).scenario());
+        assertEquals("fill_bust", GeneratorMain.parseArgs(
+                new String[] {"--scenario", "fill_bust"}).scenario());
+    }
+
+    @Test
+    @DisplayName("--multi-oms --list-scenarios prints the multi-OMS catalog and the topology")
+    void listMultiOmsScenarios() throws Exception {
+        String output = capture(GeneratorMain.parseArgs(new String[] {"--multi-oms", "--list-scenarios"}));
+        for (MultiOmsScenarioCatalog scenario : MultiOmsScenarioCatalog.values()) {
+            assertTrue(output.contains(scenario.cliName()), scenario.cliName());
+        }
+        for (String topic : MultiOmsTopology.topics()) {
+            assertTrue(output.contains(topic), topic);
+        }
+        assertTrue(output.contains("16666") && output.contains("16667") && output.contains("16668"));
+        for (ScenarioCatalog single : ScenarioCatalog.values()) {
+            assertFalse(output.contains(single.cliName()), "single-tape catalog must not leak: " + single);
+        }
+    }
+
+    @Test
+    @DisplayName("--help covers the multi-OMS flags too")
+    void helpCoversMultiOms() throws Exception {
+        String output = capture(GeneratorMain.parseArgs(new String[] {"--help"}));
+        assertTrue(output.contains("--multi-oms"));
+        assertTrue(output.contains("--children"));
+    }
+
+    @Test
+    @DisplayName("--multi-oms --dry-run prints '<topic>\\t<pipe-rendered message>' per line")
+    void multiOmsDryRunOutput() throws Exception {
+        String output = capture(GeneratorMain.parseArgs(new String[] {
+            "--multi-oms", "--dry-run", "--orders", "3", "--seed", "42", "--children", "2",
+        }));
+        List<String> lines = output.lines().filter(l -> !l.isBlank()).toList();
+        assertTrue(lines.size() > 24);
+
+        Set<String> topics = new HashSet<>();
+        for (String line : lines) {
+            String[] parts = line.split("\t", -1);
+            assertEquals(2, parts.length, "one tab separating topic from message: " + line);
+            topics.add(parts[0]);
+            assertTrue(MultiOmsTopology.topics().contains(parts[0]), parts[0]);
+            assertTrue(parts[1].startsWith("8=FIX.4.2|"), parts[1]);
+            assertTrue(parts[1].endsWith("|"), parts[1]);
+            assertEquals(0, parts[1].chars().filter(c -> c == FixTags.SOH).count());
+            assertTrue(TestFix.framingValid(parts[1].replace(FixTags.PIPE, FixTags.SOH)), parts[1]);
+        }
+        assertEquals(Set.copyOf(MultiOmsTopology.topics()), topics);
+
+        long roots = lines.stream()
+                .map(l -> l.split("\t", -1)[1])
+                .map(TestFix::parse)
+                .filter(m -> FixTags.MSG_NEW_ORDER_SINGLE.equals(m.get(FixTags.MSG_TYPE))
+                        && MultiOmsTopology.OMS_A.name().equals(m.get(FixTags.SENDER_COMP_ID)))
+                .count();
+        assertEquals(3, roots, "one OMS-A order per requested family");
+    }
+
+    @Test
+    @DisplayName("--multi-oms --dry-run is deterministic for a given seed")
+    void multiOmsDryRunIsDeterministic() throws Exception {
+        String[] args = {"--multi-oms", "--dry-run", "--orders", "4", "--seed", "77",
+            "--scenario", "partial_route"};
+        assertEquals(
+                capture(GeneratorMain.parseArgs(args)).lines()
+                        .map(GeneratorMainTest::withoutWallClockFields).toList(),
+                capture(GeneratorMain.parseArgs(args)).lines()
+                        .map(GeneratorMainTest::withoutWallClockFields).toList());
+    }
+
+    @Test
+    @DisplayName("--multi-oms --emit-expected writes one JSON object per hub order")
+    void multiOmsEmitExpected(@TempDir Path dir) throws Exception {
+        Path target = dir.resolve("nested").resolve("expected-oms.json");
+        capture(GeneratorMain.parseArgs(new String[] {
+            "--multi-oms", "--dry-run", "--orders", "12", "--seed", "42", "--children", "3",
+            "--emit-expected", target.toString(),
+        }));
+
+        String json = Files.readString(target, StandardCharsets.UTF_8);
+        assertTrue(json.startsWith("["));
+        assertTrue(json.strip().endsWith("]"));
+        for (String column : List.of("Oms", "ClOrdID", "OrderID", "ExtOrdID", "GlobalKey", "RootGlobalKey",
+                "Scenario", "OrdStatus", "CumQty", "LeavesQty", "AvgPx", "LinkState", "BreakKind")) {
+            assertTrue(json.contains("\"" + column + "\":"), column);
+        }
+        int rows = json.split("\"GlobalKey\":", -1).length - 1;
+        assertEquals(rows, new MultiOmsScenarioEngine(42L, 3).generate(12, ScenarioCatalog.ALL)
+                .expectedOrders().size());
+        for (String hub : List.of("OMS-A", "OMS-B-parent", "OMS-B-child", "OMS-C")) {
+            assertTrue(json.contains("\"Oms\":\"" + hub + "\""), hub);
+        }
+        for (String kind : List.of("NONE", "UNROUTED", "QTY_BREAK", "DANGLING")) {
+            assertTrue(json.contains("\"BreakKind\":\"" + kind + "\""), kind);
+        }
+        assertTrue(json.contains("\"LinkState\":\"ROOT\""));
+        assertTrue(json.contains("\"LinkState\":\"LINKED\""));
+        assertTrue(json.contains("\"GlobalKey\":\"OMS-A|A-0001\""));
+    }
+
+    @Test
+    @DisplayName("single-tape mode is untouched: no topic prefix, no multi-OMS scenarios")
+    void singleTapeModeUnchanged() throws Exception {
+        String output = capture(GeneratorMain.parseArgs(
+                new String[] {"--dry-run", "--orders", "3", "--seed", "42"}));
+        for (String line : output.lines().filter(l -> !l.isBlank()).toList()) {
+            assertTrue(line.startsWith("8=FIX.4.2|"), line);
+            assertEquals(0, line.chars().filter(c -> c == '\t').count(), "no topic prefix in single-tape mode");
+        }
     }
 
     /** Blanks the fields that follow the wall clock: 52/60 and the checksum that covers them. */

@@ -1,0 +1,5 @@
+# Generated at test time by run_e2e.sh
+.venv-e2e/
+.pytest_cache/
+__pycache__/
+expected_multi_oms.json

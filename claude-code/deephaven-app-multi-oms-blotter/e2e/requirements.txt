@@ -1,0 +1,12 @@
+# Client-side dependencies for the multi-OMS end-to-end test (doc 09 s10).
+#
+# pydeephaven talks Barrage/gRPC to the server on port 10000 and its version must
+# track the server image pinned in docker/docker-compose.yml
+# (ghcr.io/deephaven/server:42.4 -> pydeephaven 42.4). Bump both together.
+pydeephaven==42.4
+
+# to_arrow().to_pandas() -- pyarrow arrives via pydeephaven, pinned loosely here
+# so the assertion helpers have a guaranteed pandas.
+pandas>=2.0
+pyarrow>=14.0
+pytest>=8.0

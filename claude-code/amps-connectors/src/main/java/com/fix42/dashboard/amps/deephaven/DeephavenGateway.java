@@ -39,7 +39,11 @@ public interface DeephavenGateway extends AutoCloseable {
     void ensureTable(TableSchema schema, String connectorName);
 
     /**
-     * Add rows to a connector's table. For a keyed table this replaces the row of each key.
+     * Add rows to a connector's table.
+     *
+     * <p>What "add" means follows the schema's table type: a keyed table replaces the row of
+     * each key, an append-only table appends, and a blink or ring table takes the rows through
+     * the {@code TablePublisher} that created it.
      *
      * @param schema the target schema; row values are indexed by its column order
      * @param rows the rows to add

@@ -65,6 +65,11 @@ tasks.named<org.springframework.boot.gradle.tasks.run.BootRun>("bootRun") {
 tasks.test {
     useJUnitPlatform()
     jvmArgs = arrowJvmArgs
+    // LiveTableTypeTest is opt-in and needs a real server; forward its switches to the test JVM.
+    //   ./gradlew :amps-connectors:test --tests '*LiveTableTypeTest' -Damps.live=true
+    for (key in listOf("amps.live", "amps.live.port")) {
+        System.getProperty(key)?.let { systemProperty(key, it) }
+    }
     testLogging {
         events("passed", "skipped", "failed")
     }

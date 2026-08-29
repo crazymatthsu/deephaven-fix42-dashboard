@@ -6,6 +6,7 @@ import com.fix42.dashboard.amps.mapping.ColumnSpec;
 import com.fix42.dashboard.amps.mapping.TableSchema;
 import io.deephaven.client.impl.ClientConfig;
 import io.deephaven.client.impl.ConsoleSession;
+import io.deephaven.client.impl.ExportId;
 import io.deephaven.client.impl.FlightSession;
 import io.deephaven.client.impl.FlightSessionFactoryConfig;
 import io.deephaven.client.impl.ScopeId;
@@ -36,11 +37,18 @@ import org.springframework.stereotype.Component;
  *
  * <ul>
  *   <li>a <strong>console session</strong> runs python to create the tables, because
- *       {@code input_table} is a server-side constructor with no gRPC equivalent;
- *   <li><strong>Arrow Flight</strong> carries the rows, because
- *       {@code FlightSession.addToInputTable} is the native bulk path -- rows go over as an
- *       Arrow batch rather than as generated python.
+ *       {@code input_table} and {@code table_publisher} are server-side constructors with no
+ *       gRPC equivalent;
+ *   <li><strong>Arrow Flight</strong> carries the rows, because it is the native bulk path --
+ *       rows go over as an Arrow batch rather than as generated python.
  * </ul>
+ *
+ * <p>How the batch lands depends on the table type. An input table takes it directly
+ * ({@code addToInputTable}). A blink table cannot: it is not an input table, and the only way
+ * into one is the {@code TablePublisher} that created it. So for {@code BLINK} and {@code RING}
+ * the batch is uploaded as an export, bound into the script scope under a scratch name, and
+ * moved into the publisher by one line of python -- three round trips per <em>batch</em>, and
+ * the rows still travel as Arrow.
  */
 @Component
 public class FlightDeephavenGateway implements DeephavenGateway {
@@ -50,6 +58,7 @@ public class FlightDeephavenGateway implements DeephavenGateway {
     private final DeephavenServerProperties properties;
     private final ReentrantLock lock = new ReentrantLock();
     private final AtomicLong generation = new AtomicLong();
+    private final AtomicLong batchSequence = new AtomicLong();
     private final List<String> bootstrappedTables = new ArrayList<>();
 
     private BufferAllocator allocator;
@@ -182,6 +191,10 @@ public class FlightDeephavenGateway implements DeephavenGateway {
         }
         FlightSession session = requireSession();
         NewTable batch = toNewTable(schema.columns(), rows);
+        if (schema.tableType().publisherBacked()) {
+            addViaPublisher(session, schema, batch, rows.size());
+            return;
+        }
         try {
             session.addToInputTable(new ScopeId(schema.tableName()), batch, allocator)
                     .get(properties.getTimeout().toMillis(), TimeUnit.MILLISECONDS);
@@ -195,8 +208,52 @@ public class FlightDeephavenGateway implements DeephavenGateway {
         }
     }
 
+    /**
+     * Hand one Arrow batch to a table's server-side {@code TablePublisher}.
+     *
+     * <p>The scratch global is unique per batch because two flushes of the same connector can
+     * overlap -- the scheduled one and a full-buffer flush by a submitting thread. The python
+     * deletes it in a {@code finally}, so a failed {@code add} does not leave the rows pinned in
+     * the script scope.
+     */
+    private void addViaPublisher(
+            FlightSession session, TableSchema schema, NewTable batch, int rowCount) {
+        String scratch =
+                TableBootstrapScript.batchVariable(schema.tableName(), batchSequence.incrementAndGet());
+        ExportId export = null;
+        try {
+            export = session.putExportManual(batch, allocator);
+            session.session().publish(new ScopeId(scratch), export)
+                    .get(properties.getTimeout().toMillis(), TimeUnit.MILLISECONDS);
+            String failure = execute(
+                    TableBootstrapScript.publishBatch(schema.tableName(), scratch),
+                    "publish to " + schema.tableName());
+            if (failure != null) {
+                throw new DeephavenUnavailableException("failed publishing " + rowCount
+                        + " row(s) to " + schema.tableName() + ": " + failure);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new DeephavenUnavailableException(
+                    "interrupted publishing to " + schema.tableName(), e);
+        } catch (DeephavenUnavailableException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new DeephavenUnavailableException(
+                    "failed publishing " + rowCount + " row(s) to " + schema.tableName()
+                            + ": " + rootMessage(e), e);
+        } finally {
+            if (export != null) {
+                // The scope now holds its own reference; ours is only in the way.
+                session.release(export);
+            }
+        }
+    }
+
     @Override
     public void deleteRows(TableSchema schema, List<Object[]> rows) {
+        // Only a keyed table has anything to remove: an append-only table forbids deletion, and
+        // a blink or ring table has already forgotten the row by the time the removal arrives.
         if (rows.isEmpty() || !schema.keyed()) {
             return;
         }
@@ -245,9 +302,14 @@ public class FlightDeephavenGateway implements DeephavenGateway {
     /**
      * Run python in the console session.
      *
+     * <p>Package-private so {@code LiveTableTypeTest} can assert on the server rather than
+     * reading tables back: {@code executeCode} reports failures, not values.
+     *
+     * @param script the python to run
+     * @param what what the script is doing, for the interruption message
      * @return {@code null} on success, else the failure text
      */
-    private String execute(String script, String what) {
+    String execute(String script, String what) {
         ConsoleSession current = console;
         if (current == null) {
             return "no console session";

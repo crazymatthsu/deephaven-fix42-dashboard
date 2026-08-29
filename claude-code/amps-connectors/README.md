@@ -41,17 +41,45 @@ Any setting can be overridden on the command line, e.g. a Deephaven on another p
 ./gradlew :amps-connectors:test
 ```
 
-153 tests, no AMPS server and no Deephaven server required.
+175 tests, no AMPS server and no Deephaven server required. Six more check the generated
+python against a real server and are skipped unless you ask for them:
+
+```bash
+podman run -d --name dh -p 10000:10000 \
+  -e START_OPTS="-Ddeephaven.console.type=python \
+     -DAuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler" \
+  ghcr.io/deephaven/server:42.4
+./gradlew :amps-connectors:test --tests '*LiveTableTypeTest' -Damps.live=true
+```
 
 ## Configure
 
-The shipped `src/main/resources/application.yml` is a worked example of all three formats:
+The shipped `src/main/resources/application.yml` is a worked example of all three formats and
+four table types:
 
 | Connector | Format | AMPS topic | Deephaven table |
 |---|---|---|---|
-| `orders-fix` | FIX, full subscription | `Orders` (SOW) | `amps_orders`, keyed on `ClOrdID` |
-| `positions-nvfix` | NVFIX, **delta** subscription and publish | `Positions` (SOW) | `amps_positions`, keyed on `Account`+`Symbol` |
-| `trades-json` | JSON, from the `epoch` bookmark | `Trades` (journal) | `amps_trades`, append-only |
+| `orders-fix` | FIX, full subscription | `Orders` (SOW) | `amps_orders`, **keyed** on `ClOrdID` |
+| `positions-nvfix` | NVFIX, **delta** subscription and publish | `Positions` (SOW) | `amps_positions`, **keyed** on `Account`+`Symbol` |
+| `trades-json` | JSON, from the `epoch` bookmark | `Trades` (journal) | `amps_trades`, **append-only** |
+| `ticks-json` | JSON, from the `epoch` bookmark | `Ticks` (journal) | `amps_ticks`, **ring**, 5 000 rows |
+
+### Table types
+
+`deephaven.table-type` picks what gets created. Left unset it follows the topic — `KEYED` for a
+SOW topic, `APPEND_ONLY` for a journal topic — which is what this module did before the setting
+existed, so existing configuration keeps its behaviour.
+
+| `table-type` | what you get | retains | removals |
+|---|---|---|---|
+| `KEYED` | `input_table(key_cols=…)`; an add replaces that key's row | one row per key | yes |
+| `APPEND_ONLY` | `input_table()`; every row appended | everything | no |
+| `BLINK` | a blink table fed by a `TablePublisher` | one update cycle | no |
+| `RING` | `ring_table` over that blink table | the last `ring-capacity` rows | no |
+
+`BLINK` and `RING` bound memory for real: nothing upstream keeps the rows. `KEYED` is the only
+type that can apply an out-of-focus removal, and the only one `publish-mode: DELTA` can merge
+into.
 
 Add a connector by appending to `amps.connectors`. The essentials:
 
@@ -64,11 +92,12 @@ amps:
         host: amps.example.com
         port: 9007
         topic: MyTopic
-        sow: true                   # SOW topic -> keyed table; false -> append-only
+        sow: true                   # SOW topic (state) vs journal topic (log)
         subscription-mode: FULL     # DELTA makes AMPS send only changed fields
       deephaven:
         table: my_table             # the global name in the Deephaven IDE
-        key-columns: [Id]           # required when sow: true, forbidden when sow: false
+        table-type: KEYED           # KEYED | APPEND_ONLY | BLINK | RING; default follows `sow`
+        key-columns: [Id]           # required by KEYED, forbidden by everything else
         publish-mode: FULL          # must be DELTA if subscription-mode is DELTA
       fields:                       # an allowlist -- anything not listed is never published
         - { tag: Id,    column: Id,    type: STRING }
@@ -94,11 +123,12 @@ The full option list, with the reasoning behind each, is in
 ## What to expect at startup
 
 ```
-Watching Deephaven at localhost:10000 every 5000ms for 3 connector(s)
+Watching Deephaven at localhost:10000 every 5000ms for 4 connector(s)
 Connected to Deephaven at localhost:10000 (generation 1)
 [orders-fix] started: FIX Orders -> keyed table amps_orders (13 columns, publish FULL)
 [positions-nvfix] started: NVFIX Positions -> keyed table amps_positions (7 columns, publish DELTA)
 [trades-json] started: JSON Trades -> append-only table amps_trades (9 columns, publish FULL)
+[ticks-json] started: JSON Ticks -> ring table amps_ticks (5 columns, publish FULL)
 ```
 
 Open <http://localhost:10000/ide> and the tables are in the Panels menu.
@@ -108,7 +138,7 @@ Open <http://localhost:10000/ide> and the tables are in the Panels menu.
 **Configuration is rejected at startup** — the message lists every problem at once:
 ```
 invalid amps-connectors configuration:
-  - connector 'x': source.sow=true requires deephaven.key-columns (a SOW topic maps to a keyed table)
+  - connector 'x': deephaven.table-type=KEYED requires deephaven.key-columns (source.sow=true defaults deephaven.table-type to KEYED)
 ```
 The rules and why each exists: [docs 07 §7](../docs/07-amps-connectors.md#7-startup-validation-connectorvalidator).
 

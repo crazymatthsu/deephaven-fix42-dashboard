@@ -60,8 +60,10 @@ amps:
         filter: "/Symbol = 'AAPL'"
       deephaven:
         table: amps_orders       # the global name; must be an identifier
+        table-type: KEYED        # KEYED | APPEND_ONLY | BLINK | RING; default follows `sow`
+        ring-capacity: 100000    # RING only: rows retained
         publish-mode: FULL       # FULL | DELTA
-        key-columns: [ClOrdID]   # non-empty => keyed table
+        key-columns: [ClOrdID]   # KEYED only, and required by it
         ingest-timestamp-column: IngestTs
         sow-key-column: SowKey   # optional; carries the AMPS SOW key
         create-if-missing: true
@@ -74,22 +76,64 @@ amps:
 Bound by `AmpsConnectorsProperties` (`@ConfigurationProperties("amps")`) and validated at
 startup by `ConnectorValidator` (§7).
 
-## 3. SOW topic vs journal topic — the pivot
+## 3. Two independent choices: the AMPS side and the Deephaven side
 
-`source.sow` decides the shape of everything downstream.
+`source.sow` decides how the topic is read. `deephaven.table-type` decides what it is read
+*into*. They used to be the same decision; they are not any more.
+
+### 3.1 The AMPS side — `source.sow`
 
 | | **SOW topic** (`sow: true`) | **Journal topic** (`sow: false`) |
 |---|---|---|
 | AMPS command | `sow_and_subscribe`, or `sow_and_delta_subscribe` in DELTA mode | `subscribe` from a bookmark |
 | replay on connect | the whole state of the world | the whole transaction log, from `epoch` |
-| Deephaven table | `input_table(col_defs=…, key_cols=[…])` — **keyed** | `input_table(col_defs=…)` — **append-only** |
-| an update to an existing record | replaces that key's row | appends another row |
-| record removal | out-of-focus (`oof`) message → `deleteFromInputTable` | n/a |
-| `key-columns` | required | must be empty |
+| an update to an existing record | a new message for that SOW key | another message |
+| record removal | out-of-focus (`oof`) message | n/a |
 
 The default bookmark is `epoch`, i.e. "resubscribe from the beginning", which is what makes a
 journal-backed table rebuild identically after a restart — the same property doc 03 §3.3 relies
 on for the Kafka side of the FIX pipeline.
+
+### 3.2 The Deephaven side — `deephaven.table-type`
+
+Deephaven has exactly one remotely writable table, the `input_table`, so every other shape has
+to be built on the server out of something that *can* be fed from off-box. That splits the four
+types into two families:
+
+| `table-type` | created as | rows arrive via | retains | removals |
+|---|---|---|---|---|
+| `KEYED` | `input_table(col_defs=…, key_cols=[…])` | `addToInputTable` | one row per key | yes |
+| `APPEND_ONLY` | `input_table(col_defs=…)` | `addToInputTable` | everything | no |
+| `BLINK` | `table_publisher()` | `TablePublisher.add` | one update cycle | no |
+| `RING` | `ring_table(blink, ring-capacity)` | `TablePublisher.add` | the last `ring-capacity` rows | no |
+
+**Unset means "whatever the topic implies"** — `KEYED` for a SOW topic, `APPEND_ONLY` for a
+journal topic. That is exactly what this module did before the setting existed, so every
+configuration written against the old rules keeps its old behaviour.
+
+`BLINK` and `RING` are the bounded-memory answers, and they are bounded for real: nothing
+upstream holds the rows. Deriving a blink table from an append-only `input_table` instead
+(`add_only_to_blink`) would give the same *semantics* while the input table went on retaining
+every row — Deephaven's own documentation warns that combination **increases** memory rather
+than saving it, which is why this module builds blink tables from a `TablePublisher`.
+
+`key-columns` and `KEYED` imply each other. Keys on a table that has none, or a keyed table with
+no keys, are configurations with no meaning, and §7 rejects both.
+
+### 3.3 Combinations the defaults do not reach
+
+Naming a type overrides the topic, and two of those overrides are useful rather than merely
+legal:
+
+- **SOW topic → `BLINK` or `RING`.** A live view of *updates* rather than of state: every
+  message the SOW sends, seen once. The SOW's `oof` removals have nowhere to land, so they are
+  counted (`ignoredRemovals`) and a warning is logged once at startup rather than being dropped
+  in silence.
+- **Journal topic → `KEYED`.** Latest-by-key over a log, with the whole log replayed from
+  `epoch` on every start.
+
+`publish-mode: DELTA` still requires `KEYED`, whatever the topic: a partial row needs a stored
+row to merge into.
 
 ## 4. FULL vs DELTA — two independent knobs
 
@@ -262,9 +306,14 @@ application with the full list rather than a stack trace:
 - `deephaven.table` and every column name is an identifier — the table name is interpolated into
   generated python
 - FIX tags are tag *numbers*
-- `sow: true` ⟹ `key-columns` non-empty; `sow: false` ⟹ `key-columns` empty
+- the resolved `table-type` (§3.2) and `key-columns` agree: `KEYED` requires them, every other
+  type forbids them. The message names the default when `table-type` was not configured, since
+  that is where a `sow`-shaped mistake surfaces
 - `key-columns` ⊆ mapped columns (plus the synthetic ones)
 - `publish-mode: DELTA` requires a keyed table
+- `table-type: BLINK` / `RING` requires `create-if-missing`: the only way into a blink table is
+  the `TablePublisher` the bootstrap creates, so turning the bootstrap off leaves nothing able to
+  publish at all
 - `subscription-mode: DELTA` requires a SOW topic **and** `publish-mode: DELTA` (§4)
 - synthetic columns must not collide with mapped ones
 - at least one field mapping
@@ -273,14 +322,33 @@ application with the full list rather than a stack trace:
 
 Two server APIs, split by what each is good for:
 
-- **Table creation — a python console session.** `input_table` is a server-side constructor with
-  no gRPC equivalent, so `TableBootstrapScript` generates a small python snippet and
-  `ConsoleSession.executeCode` runs it. Creation is guarded by a `try: <name> / except NameError`
-  so it is idempotent, and an existing table whose columns disagree with the current
-  configuration raises rather than accepting mismatched rows.
-- **Row publishing — Arrow Flight.** `FlightSession.addToInputTable` takes an Arrow batch
-  directly; `deleteFromInputTable` takes a batch of key columns. Rows never travel as generated
-  python.
+- **Table creation — a python console session.** `input_table` and `table_publisher` are
+  server-side constructors with no gRPC equivalent, so `TableBootstrapScript` generates a small
+  python snippet and `ConsoleSession.executeCode` runs it. Creation is guarded by a
+  `try: <name> / except NameError` so it is idempotent, and an existing table that disagrees
+  with the configuration raises rather than accepting mismatched rows — on **columns and their
+  order**, on **column types**, and on **keys**. All three are load-bearing: order because rows
+  are published positionally, types because a mismatch would otherwise surface much later inside
+  `addToInputTable` with nothing pointing at the configuration, and keys because a keyed table
+  adopted for an append-only connector would quietly collapse rows onto their keys.
+- **Row publishing — Arrow Flight.** Rows never travel as generated python, but *how* the batch
+  lands depends on the table type:
+  - **input tables** (`KEYED`, `APPEND_ONLY`) take it directly:
+    `FlightSession.addToInputTable`, and `deleteFromInputTable` for a batch of key columns.
+  - **publisher-backed tables** (`BLINK`, `RING`) cannot — a blink table is not an input table,
+    and the only way into one is the `TablePublisher` that created it. So the batch is uploaded
+    with `putExportManual`, bound into the script scope under a scratch name with
+    `Session.publish`, and moved into the publisher by one line of python. Three round trips per
+    *batch* rather than one, and the rows are still Arrow.
+
+The scratch name carries a per-batch sequence number. Two flushes of one connector can overlap —
+the scheduled one, and a full-buffer flush by a submitting thread — and a shared name would let
+one batch overwrite the other's rows before either was published. The generated python deletes
+the scratch global in a `finally`, so a failed `add` does not pin the rows in the script scope.
+
+An out-of-focus removal only means something for `KEYED`. For every other type `Connector` counts
+it as an `ignoredRemovals` and drops it, rather than letting it inflate `publishedRows` with a
+row that was never published.
 
 `TableSchema` is the single source of truth for column *order*: the generated `col_defs`, the
 `Object[]` a mapped row is built into, and the Arrow batch all index by the same positions.
@@ -327,7 +395,8 @@ Deephaven container. It is a test and demo affordance, not a production path.
 
 ## 11. Testing
 
-`./gradlew :amps-connectors:test` — 153 JUnit 5 tests, no servers required.
+`./gradlew :amps-connectors:test` — 175 JUnit 5 tests, no servers required, plus 6 opt-in
+tests that need one (`LiveTableTypeTest`, below).
 
 | Suite | Covers |
 |---|---|
@@ -336,18 +405,44 @@ Deephaven container. It is a test and demo affordance, not a production path.
 | `DelimitedRecordDecoderTest` / `JsonRecordDecoderTest` | delimiters, first-`=` split, dotted paths, explicit JSON null |
 | `TableSchemaTest` / `FieldMapperTest` | column order, allowlist behaviour, present-vs-null, composite keys |
 | `DeltaRowMergerTest` | merge, explicit clear, per-key independence, delete forgets the key |
-| `TableBootstrapScriptTest` | the generated python: keyed vs append-only, dtypes, idempotence, the column check |
+| `DeephavenTableTypeTest` | the four types, the default drawn from `sow`, and the schema each resolves to |
+| `TableBootstrapScriptTest` | the generated python for all four types, dtypes, idempotence, the column/type/key checks, the per-batch scratch name |
 | `RowBatcherTest` | size and timer flush, upsert/delete run ordering, failure is counted not thrown |
 | `ConnectorTest` | the per-message pipeline for all three formats |
 | `ConnectorManagerTest` | **the §6 lifecycle contract**: start, steady state, restart-rehydrate, unavailable, per-connector retry |
 | `EndToEndPipelineTest` | the whole application with the simulated source and a recording gateway |
 | `ApplicationYamlBindingTest` | the shipped `application.yml` binds, means what this doc says, and validates |
+| `LiveTableTypeTest` | **opt-in**: the generated python and both publish paths, against a real server |
+
+`LiveTableTypeTest` is the one suite the fakes cannot stand in for — a table type that has to be
+built out of generated python is only correct if a server says so. It is skipped unless you ask:
+
+```bash
+podman run -d --name dh -p 10000:10000 \
+  -e START_OPTS="-Ddeephaven.console.type=python \
+     -DAuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler" \
+  ghcr.io/deephaven/server:42.4
+./gradlew :amps-connectors:test --tests '*LiveTableTypeTest' -Damps.live=true
+```
+
+It asserts *in* python (`executeCode` reports failures, not values) that a keyed table upserts,
+an append-only table accumulates, a blink table receives its rows and retains none of them, a
+ring table keeps the last `capacity` and not the first, and that a mistyped or foreign existing
+table is refused rather than adopted.
 
 **Verified against a live server** (`ghcr.io/deephaven/server:42.4`, `--spring.profiles.active=demo`):
-all three tables created; the two SOW connectors settle at exactly their key counts (25 and 12
-rows) while the journal connector's table grows without bound — i.e. keyed-upsert and append-only
-semantics both confirmed on the server, not just in the fakes. Restarting the container while the
-connectors ran produced:
+all four tables created, and each type behaving as §3.2 claims —
+
+```
+amps_orders      rows=25      amps_orders      rows=25      keyed, = simulated key count
+amps_positions   rows=12      amps_positions   rows=12      keyed, = simulated key count
+amps_trades      rows=2195    amps_trades      rows=2497    append-only, unbounded
+amps_ticks       rows=5000    amps_ticks       rows=5000    ring, capped at ring-capacity
+```
+
+— the two samples 20 seconds apart. The ring table holding at exactly its capacity while the
+append-only table beside it kept growing is the whole point of the setting, measured rather than
+asserted. Restarting the container while the connectors ran produced:
 
 ```
 Deephaven probe failed, treating it as a restart: UNAUTHENTICATED: Authentication details invalid
@@ -355,4 +450,4 @@ Connected to Deephaven at localhost:10001 (generation 2)
 Deephaven generation 1 -> 2: restarting 3 connector(s) to rehydrate
 ```
 
-after which all three tables were re-created and refilled to the same counts.
+after which all the tables were re-created and refilled to the same counts.

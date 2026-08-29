@@ -526,8 +526,11 @@ map into Deephaven tables in the same server — so they appear in the IDE along
 
 - **Formats** — `FIX`, `NVFIX` and `JSON`, each with its own tag → column → type mapping. The
   mapping is an allowlist: an unmapped field is never published.
-- **SOW topic → keyed table**, replayed with `sow_and_subscribe`. **Journal topic → append-only
-  table**, resubscribed from the `epoch` bookmark so a restart replays everything.
+- **SOW topic**, replayed with `sow_and_subscribe`, vs **journal topic**, resubscribed from the
+  `epoch` bookmark so a restart replays everything.
+- **The Deephaven table type is yours to pick** — `KEYED`, `APPEND_ONLY`, `BLINK` or `RING`
+  (bounded to `ring-capacity` rows). Unset, it follows the topic: keyed for a SOW topic,
+  append-only for a journal topic.
 - **Delta** subscriptions and delta publishing, so a partial AMPS update merges over the stored
   row instead of blanking the columns it omits.
 - **Restarting Deephaven restarts the connectors.** A poll detects the new server, re-creates the
@@ -566,7 +569,7 @@ claude-code/
 │   ├── src/main/java/com/fix42/dashboard/dh/         #   publishers, dag, query api, app entry
 │   ├── parity/                    #   regenerates the python-vs-java golden the tests assert
 │   └── README.md                  #   what is ported, what is not, and how it is verified
-├── amps-connectors/               # Spring Boot: AMPS topics -> Deephaven input tables
+├── amps-connectors/               # Spring Boot: AMPS topics -> Deephaven tables
 │   ├── src/main/java/com/fix42/dashboard/amps/
 │   └── src/main/resources/application.yml   # the whole configuration surface
 ├── docker/
@@ -597,5 +600,5 @@ claude-code/
 | [04 — Features & API survey](docs/04-deephaven-features-api.md) | Kafka consumer, table publishers, listeners, `deephaven.ui`, app mode, `pydeephaven` |
 | [05 — Implementation & testing](docs/05-implementation-and-testing.md) | module APIs, scenario catalog, build layout, demo runbook |
 | [06 — State machine language choice](docs/06-state-machine-language-analysis.md) | python vs java for the stateful fold, with a measured throughput ceiling |
-| [07 — AMPS connectors](docs/07-amps-connectors.md) | the AMPS → Deephaven bridge: config model, SOW vs journal, delta handling, lifecycle |
+| [07 — AMPS connectors](docs/07-amps-connectors.md) | the AMPS → Deephaven bridge: config model, SOW vs journal, table types, delta handling, lifecycle |
 | [08 — On-demand executions](docs/08-on-demand-executions-idea.md) | **tabled idea, not a contract** — fetching executions from AMPS per click; why it was set aside, and the cheaper alternatives |

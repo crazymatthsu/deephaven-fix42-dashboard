@@ -66,10 +66,81 @@ class TableBootstrapScriptTest {
                 TableSchema.of(TestConnectors.fixOrders()), "orders-fix");
 
         assertThat(script)
-                .contains("_amps_have = list(_amps_existing_amps_orders.definition.keys())")
-                .contains("_amps_want = list(_amps_defs_amps_orders.keys())")
-                .contains("if _amps_have != _amps_want:")
+                .contains("_amps_have_amps_orders = list(_amps_existing_amps_orders"
+                        + ".definition.keys())")
+                .contains("_amps_want_amps_orders = list(_amps_defs_amps_orders.keys())")
+                .contains("if _amps_have_amps_orders != _amps_want_amps_orders:")
                 .contains("raise RuntimeError(");
+    }
+
+    @Test
+    @DisplayName("...and so are its column types and its keys")
+    void checksTheTypesAndKeysOfAnExistingTable() {
+        String script = TableBootstrapScript.createIfMissing(
+                TableSchema.of(TestConnectors.fixOrders()), "orders-fix");
+
+        assertThat(script)
+                .contains("_amps_existing_amps_orders.definition[n].data_type.j_name "
+                        + "!= _amps_defs_amps_orders[n].j_name")
+                .contains("disagrees with the connector on the type of column(s)")
+                .contains("_amps_keys_amps_orders = list(getattr(_amps_existing_amps_orders, "
+                        + "\"key_names\", []))")
+                .contains("if _amps_keys_amps_orders != [\"ClOrdID\"]:")
+                .contains("is keyed on %s but the connector is configured for %s");
+    }
+
+    @Test
+    @DisplayName("a blink table is created through a table publisher, not input_table")
+    void createsABlinkTableThroughAPublisher() {
+        String script = TableBootstrapScript.createIfMissing(
+                TableSchema.of(TestConnectors.jsonTicks()), "ticks-json");
+
+        assertThat(script)
+                .contains("from deephaven.stream.table_publisher import table_publisher")
+                .contains("_amps_blink_amps_ticks, _amps_pub_amps_ticks = table_publisher("
+                        + "\"amps-connectors:amps_ticks\", _amps_defs_amps_ticks)")
+                .contains("amps_ticks = _amps_blink_amps_ticks")
+                .doesNotContain("input_table")
+                .doesNotContain("ring_table");
+    }
+
+    @Test
+    @DisplayName("a ring table publishes the ring, and keeps the blink table reachable")
+    void createsARingTableOverTheBlinkTable() {
+        String script = TableBootstrapScript.createIfMissing(
+                TableSchema.of(TestConnectors.jsonTicksRing(5_000)), "ticks-json-ring");
+
+        assertThat(script)
+                .contains("from deephaven import ring_table")
+                .contains("_amps_blink_amps_ticks_ring, _amps_pub_amps_ticks_ring = "
+                        + "table_publisher(")
+                .contains("amps_ticks_ring = ring_table(_amps_blink_amps_ticks_ring, 5000)")
+                .contains("created ring table amps_ticks_ring (capacity 5000)");
+    }
+
+    @Test
+    @DisplayName("a blink table we do not hold the publisher for cannot be adopted")
+    void refusesToAdoptAForeignBlinkTable() {
+        String script = TableBootstrapScript.createIfMissing(
+                TableSchema.of(TestConnectors.jsonTicks()), "ticks-json");
+
+        assertThat(script)
+                .contains("elif \"_amps_pub_amps_ticks\" not in globals():")
+                .contains("already exists but was not created by this connector");
+    }
+
+    @Test
+    @DisplayName("one batch per publish, so overlapping flushes cannot clobber each other")
+    void namesEachPublishedBatchUniquely() {
+        assertThat(TableBootstrapScript.batchVariable("amps_ticks", 7))
+                .isEqualTo("_amps_batch_amps_ticks_7")
+                .isNotEqualTo(TableBootstrapScript.batchVariable("amps_ticks", 8));
+
+        assertThat(TableBootstrapScript.publishBatch("amps_ticks", "_amps_batch_amps_ticks_7"))
+                .isEqualTo("try:\n"
+                        + "    _amps_pub_amps_ticks.add(_amps_batch_amps_ticks_7)\n"
+                        + "finally:\n"
+                        + "    del _amps_batch_amps_ticks_7\n");
     }
 
     @Test

@@ -2,6 +2,7 @@ package com.fix42.dashboard.amps.mapping;
 
 import com.fix42.dashboard.amps.config.ConnectorProperties;
 import com.fix42.dashboard.amps.config.DeephavenTableProperties;
+import com.fix42.dashboard.amps.config.DeephavenTableType;
 import com.fix42.dashboard.amps.config.FieldMapping;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -9,7 +10,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * A connector's target table resolved from configuration: ordered columns plus key columns.
+ * A connector's target table resolved from configuration: its kind, ordered columns and keys.
  *
  * <p>Single source of truth for column <em>order</em>. The python that creates the table, the
  * {@code Object[]} a mapped row is built into, and the Arrow batch handed to Deephaven all
@@ -21,13 +22,22 @@ public final class TableSchema {
     private static final char KEY_SEPARATOR = (char) 0x1F;
 
     private final String tableName;
+    private final DeephavenTableType tableType;
+    private final int ringCapacity;
     private final List<ColumnSpec> columns;
     private final List<String> keyColumns;
     private final Map<String, Integer> indexByName;
     private final int[] keyIndexes;
 
-    private TableSchema(String tableName, List<ColumnSpec> columns, List<String> keyColumns) {
+    private TableSchema(
+            String tableName,
+            DeephavenTableType tableType,
+            int ringCapacity,
+            List<ColumnSpec> columns,
+            List<String> keyColumns) {
         this.tableName = tableName;
+        this.tableType = tableType;
+        this.ringCapacity = ringCapacity;
         this.columns = List.copyOf(columns);
         this.keyColumns = List.copyOf(keyColumns);
         Map<String, Integer> index = new HashMap<>();
@@ -44,6 +54,10 @@ public final class TableSchema {
      * <p>Column order is: every mapped field in configuration order, then the SOW-key column,
      * then the ingest-timestamp column, when those are configured.
      *
+     * <p>Key columns are kept only for a {@code KEYED} target, so a schema is internally
+     * consistent even for a configuration {@link com.fix42.dashboard.amps.config.ConnectorValidator}
+     * would reject -- there is no such thing here as a blink table with keys.
+     *
      * @param connector the connector configuration
      * @return the resolved schema
      */
@@ -59,7 +73,13 @@ public final class TableSchema {
         if (isSet(target.getIngestTimestampColumn())) {
             columns.add(ColumnSpec.ingestTimestamp(target.getIngestTimestampColumn().trim()));
         }
-        return new TableSchema(target.getTable(), columns, target.getKeyColumns());
+        DeephavenTableType type = target.resolveTableType(connector.getSource().isSow());
+        return new TableSchema(
+                target.getTable(),
+                type,
+                target.getRingCapacity(),
+                columns,
+                type.keyed() ? target.getKeyColumns() : List.of());
     }
 
     private static boolean isSet(String value) {
@@ -71,19 +91,29 @@ public final class TableSchema {
         return tableName;
     }
 
+    /** The kind of table to create and publish into. */
+    public DeephavenTableType tableType() {
+        return tableType;
+    }
+
+    /** Rows a {@code RING} target retains; meaningless for every other type. */
+    public int ringCapacity() {
+        return ringCapacity;
+    }
+
     /** The columns, in publish order. */
     public List<ColumnSpec> columns() {
         return columns;
     }
 
-    /** The key columns; empty for an append-only table. */
+    /** The key columns; empty for every type but {@code KEYED}. */
     public List<String> keyColumns() {
         return keyColumns;
     }
 
-    /** Whether the target is a keyed input table. */
+    /** Whether the target is a keyed input table -- the only type that supports removal. */
     public boolean keyed() {
-        return !keyColumns.isEmpty();
+        return tableType.keyed();
     }
 
     /** Number of columns. */

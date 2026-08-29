@@ -2,6 +2,7 @@ package com.fix42.dashboard.amps.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.fix42.dashboard.amps.mapping.TableSchema;
 import java.time.Duration;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
@@ -26,7 +27,7 @@ class ApplicationYamlBindingTest {
     @Test
     void bindsEveryExampleConnector() {
         assertThat(properties.getConnectors()).extracting(ConnectorProperties::getName)
-                .containsExactly("orders-fix", "positions-nvfix", "trades-json");
+                .containsExactly("orders-fix", "positions-nvfix", "trades-json", "ticks-json");
     }
 
     @Test
@@ -51,6 +52,7 @@ class ApplicationYamlBindingTest {
         assertThat(connector.getDeephaven().getTable()).isEqualTo("amps_orders");
         assertThat(connector.getDeephaven().getKeyColumns()).containsExactly("ClOrdID");
         assertThat(connector.getDeephaven().isKeyed()).isTrue();
+        assertThat(connector.getDeephaven().getTableType()).isEqualTo(DeephavenTableType.KEYED);
         assertThat(connector.getFields()).extracting(FieldMapping::getTag).contains("11", "55", "38");
         assertThat(fieldFor(connector, "60").getType()).isEqualTo(ColumnType.INSTANT);
         assertThat(fieldFor(connector, "38").getType()).isEqualTo(ColumnType.DOUBLE);
@@ -75,6 +77,17 @@ class ApplicationYamlBindingTest {
         assertThat(connector.getSource().getBookmark()).isEqualTo("epoch");
         assertThat(connector.getDeephaven().isKeyed()).isFalse();
         assertThat(fieldFor(connector, "execution.venue").getColumn()).isEqualTo("Venue");
+    }
+
+    @Test
+    @DisplayName("the ring example bounds its table at ring-capacity rows")
+    void bindsTheRingConnector() {
+        ConnectorProperties connector = connector("ticks-json");
+        assertThat(connector.getSource().isSow()).isFalse();
+        assertThat(connector.getDeephaven().getTableType()).isEqualTo(DeephavenTableType.RING);
+        assertThat(connector.getDeephaven().getRingCapacity()).isEqualTo(5_000);
+        assertThat(connector.getDeephaven().getKeyColumns()).isEmpty();
+        assertThat(TableSchema.of(connector).tableType().publisherBacked()).isTrue();
     }
 
     @Test

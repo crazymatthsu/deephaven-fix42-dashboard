@@ -113,27 +113,43 @@ AvgPx 185.522, chain C1,C2), and lookup tests. Target ≥40 tests.
 ## 4. Deephaven scripts `dh_app` (imports deephaven; runs only in server)
 
 Location `deephaven-scripts/src/dh_app/`. Config via env:
-`FIX42_KAFKA_BOOTSTRAP` (default `kafka:9092`), `FIX42_TOPIC` (`fix42.messages`).
+
+| Variable | Default | Applies to |
+|---|---|---|
+| `FIX42_SOURCE` | `kafka` | which source feeds `fix_raw`: `kafka` or `amps`. Anything else is a startup error, not a silent fallback |
+| `FIX42_KAFKA_BOOTSTRAP` | `kafka:9092` | kafka |
+| `FIX42_TOPIC` | `fix42.messages` | kafka; also the AMPS topic when `FIX42_AMPS_TOPIC` is unset |
+| `FIX42_AMPS_URI` | `tcp://amps:9007/amps/fix` | amps; comma/space separated for an HA pair |
+| `FIX42_AMPS_TOPIC` | `FIX42_TOPIC` | amps |
+| `FIX42_AMPS_BOOKMARK` | `epoch` | amps; `epoch` / `now` / `most_recent`, or a literal bookmark |
+| `FIX42_AMPS_FILTER` | *(none)* | amps; server-side content filter |
+| `FIX42_AMPS_CLIENT_NAME` | `dh-fix42-dashboard` | amps; the analogue of the Kafka group id |
+| `FIX42_AMPS_MAX_PENDING` | `250000` | amps; buffer bound between update graph cycles |
 
 ```python
-# schemas.py   — dict[str, DType] for the four publishers + errors (doc 01 §4/§6; single source of truth)
-# ingest.py    — build_fix_raw() -> blink table (doc 03 §2.1)
-# pipeline.py  — class Pipeline: wires publishers + listener (doc 03 §2.2/2.3);
-#                start(fix_raw) registers listener; holds all references;
-#                batches rows per cycle; errors -> ingest_errors publisher
-# dag.py       — build_derived(...) -> dict of all doc 03 §2.4 tables
-# query_api.py — get_by_order_id/get_by_clordid/get_by_execid/find_by_account/
-#                find_by_symbol/order_detail — resolve via index tables then filter
-#                order_state_latest (return live tables)
-# dashboard.py — build_dashboard(tables) -> ui.dashboard per doc 03 §2.6
-#                (3 linked panels + summary; defensive on_row_press)
-# app.py       — entrypoint: sys.path bootstrap, ingest → pipeline → dag →
-#                globals()[name] = table for every node + `fix42_dashboard`
+# schemas.py     — dict[str, DType] for the four publishers + errors (doc 01 §4/§6; single source of truth)
+# ingest.py      — fix_source() picks the source; build_fix_raw() -> blink table (doc 03 §2.1)
+# amps_ingest.py — AMPS bookmark_subscribe from EPOCH -> the same blink table (doc 03 §2.1)
+# pipeline.py    — class Pipeline: wires publishers + listener (doc 03 §2.2/2.3);
+#                  start(fix_raw) registers listener; holds all references;
+#                  batches rows per cycle; errors -> ingest_errors publisher
+# dag.py         — build_derived(...) -> dict of all doc 03 §2.4 tables
+# query_api.py   — get_by_order_id/get_by_clordid/get_by_execid/find_by_account/
+#                  find_by_symbol/order_detail — resolve via index tables then filter
+#                  order_state_latest (return live tables)
+# dashboard.py   — build_dashboard(tables) -> ui.dashboard per doc 03 §2.6
+#                  (3 linked panels + summary; defensive on_row_press)
+# app.py         — entrypoint: sys.path bootstrap, ingest → pipeline → dag →
+#                  globals()[name] = table for every node + `fix42_dashboard`
 ```
 
 `dh_app` contains **no business logic** — it adapts `fix42cache` rows to publisher
 batches. All business logic stays in the pure package where it is unit-tested.
-(`dh_app` correctness is covered by the integration test; no pytest for it.)
+(`dh_app` correctness is covered by the integration test; no pytest for it — with one
+exception: `ingest.py` and `amps_ingest.py` import `deephaven` and `AMPS` lazily, so
+source selection, AMPS config and the AMPS→update-graph hand-off *are* unit-tested in
+`tests/test_ingest_source.py`. `run_integration.sh` cannot cover them — it brings up
+`docker-compose.yml`, which has no AMPS service.)
 
 ## 5. Demo stack (`docker/`, podman)
 

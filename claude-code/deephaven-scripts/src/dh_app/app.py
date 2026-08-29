@@ -7,7 +7,7 @@ menu and is reachable from ``pydeephaven`` (``session.open_table("order_state_la
 
 Re-running the script is safe: the wired runtime is memoized on the ``dh_app``
 package object, which lives in ``sys.modules``, so a second execution re-exports the
-same tables instead of subscribing a second listener to Kafka.
+same tables instead of opening a second subscription to the source.
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ def main() -> Runtime:
     """Wire the application, or return the already-wired runtime.
 
     Idempotent by design: Application Mode plus a console ``exec`` of the same file
-    must not double-subscribe the Kafka listener.
+    must not double-subscribe the source listener.
 
     Returns:
         The :class:`Runtime` holding tables, query API and dashboard.
@@ -153,8 +153,7 @@ def _print_banner(runtime: Runtime) -> None:
     lines = [
         "=" * 78,
         "FIX 4.2 Order State Dashboard -- ready",
-        f"  kafka bootstrap : {ingest.kafka_bootstrap()}",
-        f"  topic           : {ingest.kafka_topic()} (seek to beginning)",
+        f"  source          : {ingest.source_description()}",
         f"  tables          : {', '.join(runtime.table_names)}",
         f"  query api       : {', '.join(sorted(runtime.api))}",
         f"  dashboard       : {'fix42_dashboard' if runtime.dashboard else 'unavailable (deephaven.ui missing) -- use the table panels'}",

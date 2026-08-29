@@ -10,7 +10,10 @@ Modules
 ``schemas``
     Frozen column names / Deephaven dtypes for the published streams.
 ``ingest``
-    Kafka source table (``fix_raw`` blink table).
+    Source selection for the ``fix_raw`` blink table: Kafka, or AMPS via
+    :mod:`dh_app.amps_ingest`.  Chosen with ``FIX42_SOURCE``.
+``amps_ingest``
+    AMPS transaction-log replay feeding the same ``fix_raw`` blink table.
 ``pipeline``
     The single stateful DAG node: a table listener folding raw FIX through the
     state machine and republishing normalized rows via ``TablePublisher``s.
@@ -23,12 +26,15 @@ Modules
 ``app``
     Entry point wiring everything together and exporting globals.
 
-Only :mod:`dh_app.schemas` is importable without Deephaven installed; every other
+:mod:`dh_app.schemas`, :mod:`dh_app.ingest` and :mod:`dh_app.amps_ingest` are
+importable without Deephaven installed (they import it lazily, inside the functions
+that need it, so configuration and source selection stay unit-testable); every other
 module imports ``deephaven`` at module scope and therefore only runs inside the
 Deephaven server.
 """
 
 __all__ = [
+    "amps_ingest",
     "app",
     "dag",
     "dashboard",

@@ -65,7 +65,7 @@ public final class TableSchema {
         DeephavenTableProperties target = connector.getDeephaven();
         List<ColumnSpec> columns = new ArrayList<>();
         for (FieldMapping field : connector.getFields()) {
-            columns.add(ColumnSpec.field(field.getColumn(), field.getType(), field.getTag()));
+            columns.add(ColumnSpec.field(field));
         }
         if (isSet(target.getSowKeyColumn())) {
             columns.add(ColumnSpec.sowKey(target.getSowKeyColumn().trim()));

@@ -10,6 +10,17 @@ import com.fix42.dashboard.amps.decode.JsonRecordDecoder;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
+import com.fix42.dashboard.amps.decode.RecordDecoder;
+import com.fix42.dashboard.amps.mapping.FieldMapper;
+import com.fix42.dashboard.amps.mapping.MappedRow;
+import com.fix42.dashboard.amps.mapping.TableSchema;
+import java.time.Instant;
+import java.util.HashSet;
+import java.util.Set;
+import com.fix42.dashboard.amps.config.ColumnType;
+import com.fix42.dashboard.amps.config.FieldMapping;
+import com.fix42.dashboard.amps.config.FixValueDecode;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class SimulatedAmpsSubscriberTest {
@@ -89,6 +100,80 @@ class SimulatedAmpsSubscriberTest {
                 .decode(payload);
         assertThat(fields).containsKeys(
                 connector.getFields().stream().map(f -> f.getTag()).toArray(String[]::new));
+    }
+
+    /**
+     * The records a SOW replay actually produces.
+     *
+     * <p>Deliberately not {@code encode(key, tick)} with values of the test's choosing: the
+     * runtime derives {@code key} from the same counter as {@code tick}, and calling encode
+     * directly hides the correlation that gives -- which is exactly how an index of
+     * {@code key + tick} looked fine here while addressing only half a table in the demo.
+     */
+    private static List<Map<String, String>> replay(ConnectorProperties connector) {
+        List<Map<String, String>> records = new ArrayList<>();
+        RecordDecoder decoder = new DelimitedRecordDecoder(TestConnectors.SOH);
+        SimulatedAmpsSubscriber source = new SimulatedAmpsSubscriber(connector);
+        source.start(record -> records.add(decoder.decode(record.data())));
+        source.close();
+        return records;
+    }
+
+    @Test
+    @DisplayName("a decoded field is given a code the mapping can actually decode")
+    void generatesCodesForDecodedFields() {
+        ConnectorProperties connector = TestConnectors.fixShapedOrders();
+        connector.getSource().setSimulatedKeys(8);
+        TableSchema schema = TableSchema.of(connector);
+        FieldMapper mapper = new FieldMapper(schema);
+
+        Set<Object> sides = new HashSet<>();
+        for (Map<String, String> fields : replay(connector)) {
+            sides.add(mapper.map(AmpsRecord.of("p"), fields, Instant.EPOCH)
+                    .values()[schema.indexOf("Side")]);
+        }
+        // Decoded names, not the "Side-N" a plain STRING field would have produced, and more
+        // than one of them -- an index correlated with the key count would deliver far fewer.
+        // Not specific names: a replay of N keys visits N of the table's entries, not all.
+        assertThat(sides).hasSizeGreaterThan(2)
+                .allSatisfy(side -> assertThat(FixValueDecode.SIDE.table().values())
+                        .contains(String.valueOf(side)));
+    }
+
+    @Test
+    @DisplayName("an even key count still cycles a two-entry table through both values")
+    void cyclesSmallTablesEvenlyForAnEvenKeyCount() {
+        ConnectorProperties connector = TestConnectors.jsonTrades();
+        connector.getSource().setSow(true);
+        connector.getSource().setSimulatedKeys(30);
+        connector.getDeephaven().setKeyColumns(List.of("TradeID"));
+        FieldMapping side = TestConnectors.field("side", "Side", ColumnType.STRING);
+        side.setValues(Map.of("B", "BUY", "S", "SELL"));
+        connector.setFields(List.of(
+                TestConnectors.field("tradeId", "TradeID", ColumnType.STRING), side));
+
+        List<Map<String, String>> records = new ArrayList<>();
+        RecordDecoder decoder = new JsonRecordDecoder(new ObjectMapper());
+        SimulatedAmpsSubscriber source = new SimulatedAmpsSubscriber(connector);
+        source.start(record -> records.add(decoder.decode(record.data())));
+        source.close();
+
+        assertThat(records).extracting(fields -> fields.get("side"))
+                .as("both codes appear across a replay")
+                .contains("B", "S");
+    }
+
+    @Test
+    @DisplayName("a defaulted field is left out often enough for the default to show")
+    void omitsDefaultedFieldsSometimes() {
+        ConnectorProperties connector = TestConnectors.fixShapedOrders();
+        connector.getSource().setSimulatedKeys(8);
+
+        List<Map<String, String>> records = replay(connector);
+        long withoutAccount = records.stream().filter(f -> !f.containsKey("1")).count();
+
+        assertThat(withoutAccount).as("some records omit the defaulted tag").isPositive();
+        assertThat(withoutAccount).as("but not all of them").isLessThan(records.size());
     }
 
     @Test

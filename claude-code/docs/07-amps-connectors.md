@@ -71,6 +71,8 @@ amps:
         flush-interval: 250ms
       fields:                    # the allowlist
         - { tag: "11", column: ClOrdID, type: STRING }
+        - { tag: "54", column: Side,    type: STRING, decode: SIDE }
+        - { tag: "1",  column: Account, type: STRING, default-value: DUMMY }
 ```
 
 Bound by `AmpsConnectorsProperties` (`@ConfigurationProperties("amps")`) and validated at
@@ -242,6 +244,9 @@ leaf under its bare name, so a flat document maps with `price` and a nested one 
 (`20240115-14:30:00.123`), ISO-8601, and bare epoch numbers whose unit follows from the digit
 count (10/13/16/19 → s/ms/µs/ns).
 
+What lands in the column is the raw value coerced to `type` — unless the mapping shapes it first
+with `decode`, `values` or `default-value` (§5.2).
+
 Two optional synthetic columns are appended after the mapped fields: `sow-key-column` (the AMPS
 SOW key of the message) and `ingest-timestamp-column` (when the connector processed it).
 
@@ -271,6 +276,82 @@ rows without describing them.
 missing is counted in `rejectedRecords` and dropped. Rendering the gap as text instead would
 give every such record the same key and collapse them onto one row of the table, which is why
 `TableSchema.rowKey` returns `null` the moment any key component is null.
+
+## 5.2 Shaping the value: `decode`, `values`, `default-value`
+
+Three optional per-field knobs sit between the payload and the column. All are off unless
+configured, so a mapping that names none of them behaves exactly as it always did.
+
+```yaml
+fields:
+  # 1 -> BUY, 2 -> SELL, 5 -> SELL_SHORT, ... the full FIX 4.2 table
+  - { tag: "54", column: Side,    type: STRING, decode: SIDE }
+  # a field the venue does not always send
+  - { tag: "1",  column: Account, type: STRING, default-value: DUMMY }
+  # a built-in table with one venue-specific code layered over it
+  - tag: "39"
+    column: OrdStatus
+    type: STRING
+    decode: ORD_STATUS
+    values: { "Z": VENUE_HELD }
+```
+
+### `decode` — a built-in FIX 4.2 code → name table
+
+A FIX enumerated value is a character chosen for the wire, not for a reader: `54=1` is a buy,
+`39=E` is a pending replace. `decode` names one of the tables in `FixValueDecode` and publishes
+the name instead:
+
+| `decode` | tag | | `decode` | tag |
+|---|---|---|---|---|
+| `SIDE` | 54 | | `HANDL_INST` | 21 |
+| `ORD_STATUS` | 39 | | `SETTLMNT_TYP` | 63 |
+| `EXEC_TYPE` | 150 | | `OPEN_CLOSE` | 77 |
+| `EXEC_TRANS_TYPE` | 20 | | `ORD_REJ_REASON` | 103 |
+| `ORD_TYPE` | 40 | | `CXL_REJ_REASON` | 102 |
+| `TIME_IN_FORCE` | 59 | | `CXL_REJ_RESPONSE_TO` | 434 |
+| `MSG_TYPE` | 35 | | | |
+
+These are the **full** FIX 4.2 tables, deliberately not shared with `fixcache.FixEnums` in
+`deephaven-app-java`. That one narrows the same tags to the subset the dashboard's state machine
+handles (doc 01) — a connector bridging an arbitrary topic has no such licence to drop values.
+
+**A code the table does not name passes through unchanged**, so an unrecognised value stays
+visible in the column rather than turning into a null. Since a table always yields a name,
+`decode` requires `type: STRING` (§7).
+
+### `values` — inline rewrites
+
+The general form, and not FIX-specific: an NVFIX or JSON feed that spells its side `B`/`S`, or a
+venue that deviates from the spec. Applied **over** `decode` when both are set, so a named table
+can be extended or corrected one code at a time. Unlike `decode` it carries no type restriction —
+rewriting `Y` to `1` for an `INT` column is a perfectly sensible normalisation, because the
+rewrite happens *before* coercion.
+
+### `default-value` — what to publish when the field is absent
+
+Written as the finished value, not as a wire code: it is coerced to the column's `type` but never
+passed through `decode`. A default that does not coerce is rejected at startup, not on the first
+message that needs it.
+
+Two things it deliberately does **not** do:
+
+- **A field the payload sends *empty* is not defaulted.** That is an explicit clear, and delta
+  publishing has to be able to tell it from an absent field (§4). Only a field the payload does
+  not carry at all gets the default.
+- **A default does not mark the field as present.** This is what keeps delta publishing correct:
+  the value seeds a key's first row, and every later message that omits the field still reads as
+  "unchanged" rather than overwriting the stored value with the default.
+
+  ```
+  in:  Account=ACC-1 Symbol=AAPL Quantity=100          -> Currency defaults to USD
+  in:  Account=ACC-1 Symbol=AAPL Currency=EUR          -> Currency is EUR
+  in:  Account=ACC-1 Symbol=AAPL Quantity=150          -> Currency stays EUR, not USD
+  ```
+
+A **key column may not have a default** (§7). Every record missing that key would share the
+default and collapse onto one row of the table — the exact failure `TableSchema.rowKey` returns
+null to prevent (§5.1).
 
 ## 6. Deephaven lifecycle → connector lifecycle
 
@@ -315,6 +396,9 @@ application with the full list rather than a stack trace:
   the `TablePublisher` the bootstrap creates, so turning the bootstrap off leaves nothing able to
   publish at all
 - `subscription-mode: DELTA` requires a SOW topic **and** `publish-mode: DELTA` (§4)
+- `decode` requires `type: STRING`; an inline `values` map does not, because it is applied
+  before coercion
+- `default-value` coerces to its column's type, and is not set on a key column
 - synthetic columns must not collide with mapped ones
 - at least one field mapping
 
@@ -390,12 +474,22 @@ connector's **own** field mappings — nesting dotted JSON tags so a mapping lik
 topic. Decode, mapping, delta merge, batching and the Deephaven publish all run exactly as they
 do against a real server; only the bytes' origin differs.
 
+It also honours the §5.2 knobs, so the demo shows them working rather than inert: a field with a
+code → value table gets one of its **codes** (`BUY`, not `Side-3`), and a field with a
+`default-value` is left out of one record in four so the default has something to cover.
+
+Both index on the emitted `tick` alone, not on `key + tick`. The runtime derives `key` from the
+same counter as `tick`, so their sum has a fixed parity for an even `simulated-keys` — an index
+built on it addressed only half of a two-entry table, and fired the omission on every record or
+none. `SimulatedAmpsSubscriberTest` drives a real replay rather than calling `encode` with values
+of its own choosing, because that correlation is invisible to a test that picks both.
+
 That is what makes the `demo` profile and the end-to-end tests runnable with nothing but a
 Deephaven container. It is a test and demo affordance, not a production path.
 
 ## 11. Testing
 
-`./gradlew :amps-connectors:test` — 175 JUnit 5 tests, no servers required, plus 6 opt-in
+`./gradlew :amps-connectors:test` — 197 JUnit 5 tests, no servers required, plus 6 opt-in
 tests that need one (`LiveTableTypeTest`, below).
 
 | Suite | Covers |
@@ -405,6 +499,7 @@ tests that need one (`LiveTableTypeTest`, below).
 | `DelimitedRecordDecoderTest` / `JsonRecordDecoderTest` | delimiters, first-`=` split, dotted paths, explicit JSON null |
 | `TableSchemaTest` / `FieldMapperTest` | column order, allowlist behaviour, present-vs-null, composite keys |
 | `DeltaRowMergerTest` | merge, explicit clear, per-key independence, delete forgets the key |
+| `ValueShapingTest` | §5.2: decode, inline overrides, pass-through of unknown codes, defaults, and that a default seeds a delta's base row without ever clobbering it |
 | `DeephavenTableTypeTest` | the four types, the default drawn from `sow`, and the schema each resolves to |
 | `TableBootstrapScriptTest` | the generated python for all four types, dtypes, idempotence, the column/type/key checks, the per-batch scratch name |
 | `RowBatcherTest` | size and timer flush, upsert/delete run ordering, failure is counted not thrown |

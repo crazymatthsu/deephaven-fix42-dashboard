@@ -41,7 +41,7 @@ Any setting can be overridden on the command line, e.g. a Deephaven on another p
 ./gradlew :amps-connectors:test
 ```
 
-175 tests, no AMPS server and no Deephaven server required. Six more check the generated
+197 tests, no AMPS server and no Deephaven server required. Six more check the generated
 python against a real server and are skipped unless you ask for them:
 
 ```bash
@@ -103,6 +103,36 @@ amps:
         - { tag: Id,    column: Id,    type: STRING }
         - { tag: Price, column: Price, type: DOUBLE }
 ```
+
+### Making values readable, and filling in the gaps
+
+Three optional per-field knobs sit between the payload and the column:
+
+```yaml
+      fields:
+        # 1 -> BUY, 2 -> SELL, 5 -> SELL_SHORT, ... (the full FIX 4.2 table)
+        - { tag: "54", column: Side,    type: STRING, decode: SIDE }
+        # published when the payload does not carry the field at all
+        - { tag: "1",  column: Account, type: STRING, default-value: DUMMY }
+        # inline rewrites, applied over `decode` -- for a feed the tables do not cover
+        - tag: side
+          column: Side
+          type: STRING
+          values: { "B": BUY, "S": SELL }
+```
+
+`decode` names a built-in FIX 4.2 code → name table: `SIDE` `ORD_STATUS` `EXEC_TYPE`
+`EXEC_TRANS_TYPE` `ORD_TYPE` `TIME_IN_FORCE` `MSG_TYPE` `HANDL_INST` `SETTLMNT_TYP` `OPEN_CLOSE`
+`ORD_REJ_REASON` `CXL_REJ_REASON` `CXL_REJ_RESPONSE_TO`. A code the table does not name passes
+through unchanged, so an unrecognised value stays visible instead of becoming null.
+
+`default-value` is written as the finished value, not a wire code — it is coerced to `type` but
+never passed through `decode`, and a default that does not coerce is rejected at startup. Two
+deliberate limits: a field the payload sends **empty** is not defaulted (that is an explicit
+clear), and a **key column** may not have one, since every record missing the key would then
+share the default and collapse onto a single row.
+
+Full reference: [docs 07 §5.2](../docs/07-amps-connectors.md).
 
 To key on the SOW key AMPS assigns — the case for a topic with a `KeyGenerator`, where the key
 cannot be rebuilt from the record body — name the SOW key column in `key-columns`:

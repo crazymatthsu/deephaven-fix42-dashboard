@@ -6,9 +6,11 @@ import com.fix42.dashboard.amps.config.ConnectorProperties;
 import com.fix42.dashboard.amps.config.DeephavenTableProperties;
 import com.fix42.dashboard.amps.config.DeephavenTableType;
 import com.fix42.dashboard.amps.config.FieldMapping;
+import com.fix42.dashboard.amps.config.FixValueDecode;
 import com.fix42.dashboard.amps.config.SourceFormat;
 import com.fix42.dashboard.amps.config.UpdateMode;
 import java.util.List;
+import java.util.Map;
 
 /** Builders for the connector configurations the tests exercise. */
 public final class TestConnectors {
@@ -79,6 +81,29 @@ public final class TestConnectors {
         connector.getDeephaven().setTable("amps_ticks_ring");
         connector.getDeephaven().setTableType(DeephavenTableType.RING);
         connector.getDeephaven().setRingCapacity(capacity);
+        return connector;
+    }
+
+    /**
+     * A FIX connector whose fields exercise the value-shaping knobs: a decoded enum, an inline
+     * rewrite over that decode, and a defaulted field.
+     */
+    public static ConnectorProperties fixShapedOrders() {
+        ConnectorProperties connector = base("orders-shaped", SourceFormat.FIX, "Orders", true);
+        connector.getDeephaven().setTable("amps_shaped");
+        connector.getDeephaven().setKeyColumns(List.of("ClOrdID"));
+        FieldMapping side = field("54", "Side", ColumnType.STRING);
+        side.setDecode(FixValueDecode.SIDE);
+        FieldMapping status = field("39", "OrdStatus", ColumnType.STRING);
+        status.setDecode(FixValueDecode.ORD_STATUS);
+        // A venue that reuses a spare code, layered over the built-in table.
+        status.setValues(Map.of("Z", "VENUE_HELD"));
+        FieldMapping account = field("1", "Account", ColumnType.STRING);
+        account.setDefaultValue("DUMMY");
+        FieldMapping qty = field("38", "OrderQty", ColumnType.DOUBLE);
+        qty.setDefaultValue("0");
+        connector.setFields(List.of(
+                field("11", "ClOrdID", ColumnType.STRING), account, side, status, qty));
         return connector;
     }
 

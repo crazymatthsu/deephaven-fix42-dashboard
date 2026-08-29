@@ -78,15 +78,32 @@ amps:
         max-batch-rows: 5000
         flush-interval: 250ms
       # Allowlist: a tag absent from this list is never published, whatever AMPS sends.
+      #
+      # Two optional per-field knobs shape the value on its way to the column:
+      #   decode:        a built-in FIX 4.2 code -> name table, so 54=1 lands as BUY rather
+      #                  than 1. A code the table does not name passes through unchanged.
+      #   values:        inline code -> value rewrites, applied over `decode` when both are
+      #                  set. For a feed the built-in tables do not cover, or a venue that
+      #                  deviates from them.
+      #   default-value: what to publish when the payload does not carry the field at all.
+      #                  Written as the finished value, not a wire code -- it is coerced to
+      #                  `type` but never passed through `decode`. A field the payload sends
+      #                  *empty* is not defaulted: that is an explicit clear.
       fields:
         - { tag: "11",  column: ClOrdID,      type: STRING }
         - { tag: "37",  column: OrderID,      type: STRING }
-        - { tag: "1",   column: Account,      type: STRING }
+        # Not every venue stamps an account. Rather than a null column, publish a placeholder.
+        - { tag: "1",   column: Account,      type: STRING, default-value: DUMMY }
         - { tag: "55",  column: Symbol,       type: STRING }
-        - { tag: "54",  column: Side,         type: STRING }
+        # 1 -> BUY, 2 -> SELL, 5 -> SELL_SHORT, ... (the full FIX 4.2 table)
+        - { tag: "54",  column: Side,         type: STRING, decode: SIDE }
         - { tag: "38",  column: OrderQty,     type: DOUBLE }
         - { tag: "44",  column: Price,        type: DOUBLE }
-        - { tag: "39",  column: OrdStatus,    type: STRING }
+        # 0 -> NEW, 1 -> PARTIALLY_FILLED, 2 -> FILLED, E -> PENDING_REPLACE, ...
+        - { tag: "39",  column: OrdStatus,    type: STRING, decode: ORD_STATUS,
+            default-value: UNKNOWN }
+        - { tag: "40",  column: OrdType,      type: STRING, decode: ORD_TYPE }
+        - { tag: "59",  column: TimeInForce,  type: STRING, decode: TIME_IN_FORCE }
         - { tag: "14",  column: CumQty,       type: DOUBLE }
         - { tag: "151", column: LeavesQty,    type: DOUBLE }
         - { tag: "6",   column: AvgPx,        type: DOUBLE }
@@ -167,10 +184,16 @@ amps:
         - { tag: tradeId,           column: TradeID,   type: STRING }
         - { tag: orderId,           column: OrderID,   type: STRING }
         - { tag: symbol,            column: Symbol,    type: STRING }
-        - { tag: side,              column: Side,      type: STRING }
+        # `values` is the inline form of the same idea, and is not FIX-specific: this feed
+        # spells its side as B/S, which no built-in table covers.
+        - tag: side
+          column: Side
+          type: STRING
+          values: { "B": BUY, "S": SELL }
         - { tag: quantity,          column: Quantity,  type: DOUBLE }
         - { tag: price,             column: Price,     type: DOUBLE }
-        - { tag: "execution.venue", column: Venue,     type: STRING }
+        # A trade with no venue on it is still a trade; label it rather than publishing null.
+        - { tag: "execution.venue", column: Venue,     type: STRING, default-value: UNKNOWN }
         - { tag: tradeTime,         column: TradeTime, type: INSTANT }
 
     # ---------------------------------------------------------------------------------

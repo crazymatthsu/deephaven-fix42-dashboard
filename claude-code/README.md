@@ -526,6 +526,9 @@ map into Deephaven tables in the same server — so they appear in the IDE along
 
 - **Formats** — `FIX`, `NVFIX` and `JSON`, each with its own tag → column → type mapping. The
   mapping is an allowlist: an unmapped field is never published.
+- **Readable values** — `decode: SIDE` publishes `54=1` as `BUY` from the built-in FIX 4.2
+  tables, `values: {...}` rewrites inline for a feed they do not cover, and `default-value`
+  fills a column the payload leaves out.
 - **SOW topic**, replayed with `sow_and_subscribe`, vs **journal topic**, resubscribed from the
   `epoch` bookmark so a restart replays everything.
 - **The Deephaven table type is yours to pick** — `KEYED`, `APPEND_ONLY`, `BLINK` or `RING`

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.fix42.dashboard.amps.mapping.TableSchema;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -77,6 +78,30 @@ class ApplicationYamlBindingTest {
         assertThat(connector.getSource().getBookmark()).isEqualTo("epoch");
         assertThat(connector.getDeephaven().isKeyed()).isFalse();
         assertThat(fieldFor(connector, "execution.venue").getColumn()).isEqualTo("Venue");
+    }
+
+    @Test
+    @DisplayName("the FIX example decodes its enumerated tags and defaults its account")
+    void bindsTheValueShapingKnobs() {
+        ConnectorProperties connector = connector("orders-fix");
+        assertThat(fieldFor(connector, "54").getDecode()).isEqualTo(FixValueDecode.SIDE);
+        assertThat(fieldFor(connector, "39").getDecode()).isEqualTo(FixValueDecode.ORD_STATUS);
+        assertThat(fieldFor(connector, "40").getDecode()).isEqualTo(FixValueDecode.ORD_TYPE);
+        assertThat(fieldFor(connector, "1").getDefaultValue()).isEqualTo("DUMMY");
+        assertThat(fieldFor(connector, "39").getDefaultValue()).isEqualTo("UNKNOWN");
+        assertThat(fieldFor(connector, "54").resolveValueTable())
+                .containsEntry("1", "BUY")
+                .containsEntry("2", "SELL");
+    }
+
+    @Test
+    @DisplayName("the JSON example spells its side B/S, which an inline values map covers")
+    void bindsAnInlineValuesMap() {
+        ConnectorProperties connector = connector("trades-json");
+        assertThat(fieldFor(connector, "side").getValues())
+                .containsExactlyInAnyOrderEntriesOf(Map.of("B", "BUY", "S", "SELL"));
+        assertThat(fieldFor(connector, "side").getDecode()).isNull();
+        assertThat(fieldFor(connector, "execution.venue").getDefaultValue()).isEqualTo("UNKNOWN");
     }
 
     @Test

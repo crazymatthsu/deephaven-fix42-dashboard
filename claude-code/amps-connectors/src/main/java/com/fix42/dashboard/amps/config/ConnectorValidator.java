@@ -78,6 +78,7 @@ public final class ConnectorValidator {
                     && !field.getTag().chars().allMatch(Character::isDigit)) {
                 errors.add(id + "FIX tag '" + field.getTag() + "' is not a tag number");
             }
+            errors.addAll(validateValueShaping(id, field, target.getKeyColumns()));
         }
 
         String sowKeyColumn = target.getSowKeyColumn();
@@ -134,6 +135,43 @@ public final class ConnectorValidator {
         }
         if (connector.getFields().isEmpty()) {
             errors.add(id + "no fields configured, so nothing would ever be published");
+        }
+        return errors;
+    }
+
+    /**
+     * The {@code decode} / {@code values} / {@code default-value} rules for one field mapping.
+     *
+     * <p>The {@code default-value} coercion is checked here so a bad one joins the readable
+     * list, but {@link com.fix42.dashboard.amps.mapping.ColumnSpec#field} coerces it too and
+     * will refuse the same configuration on its own -- whichever runs first names the column.
+     */
+    private static List<String> validateValueShaping(
+            String id, FieldMapping field, List<String> keyColumns) {
+        List<String> errors = new ArrayList<>();
+        String column = field.getColumn();
+
+        // A built-in table always yields a name; nothing but a string column can hold one.
+        // An inline `values` map is not restricted, because rewriting "Y" to "1" for an INT
+        // column is a perfectly sensible normalisation.
+        if (field.getDecode() != null && field.getType() != ColumnType.STRING) {
+            errors.add(id + "column '" + column + "': decode=" + field.getDecode()
+                    + " publishes a name, so type must be STRING, not " + field.getType());
+        }
+        if (field.getDefaultValue() != null) {
+            // A defaulted key column would give every record that omits the key the *same*
+            // key, collapsing them onto one row -- the exact failure TableSchema.rowKey
+            // returns null to prevent.
+            if (keyColumns.contains(column)) {
+                errors.add(id + "column '" + column + "' is a key column, so it must not set "
+                        + "default-value: every record missing the key would share the default "
+                        + "and collapse onto one row");
+            }
+            try {
+                field.getType().coerce(field.getDefaultValue());
+            } catch (IllegalArgumentException e) {
+                errors.add(id + "column '" + column + "': default-value " + e.getMessage());
+            }
         }
         return errors;
     }

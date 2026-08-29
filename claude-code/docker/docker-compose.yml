@@ -4,6 +4,9 @@
 #   podman compose -f docker/docker-compose.yml up -d
 #   podman compose -f docker/docker-compose.yml down -v
 #
+# The Deephaven service runs ONE app out of docker/apps/, selected with DH_APP:
+#   DH_APP=example-minimal podman compose -f docker/docker-compose.yml up -d
+#
 # Image tags are pinned to versions that were pulled and inspected on this machine:
 #   apache/kafka:3.9.1          (official Apache Kafka image, KRaft mode)
 #   ghcr.io/deephaven/server:42.4  (== :latest at time of writing; python 3.12, JDK 21)
@@ -67,25 +70,41 @@ services:
       start_period: 15s
 
   # ---------------------------------------------------------------------------
-  # Deephaven server — runs the dashboard scripts in Application Mode.
+  # Deephaven server — runs ONE app from docker/apps/ in Application Mode.
   #
-  # /scripts  = deephaven-scripts/src  (fix42cache + dh_app python packages)
-  # /app.d    = this folder's app.d    (dashboard.app descriptor + loader.py)
+  # Which app is chosen by DH_APP, which names a folder under docker/apps/:
+  #
+  #     podman compose -f docker/docker-compose.yml up -d                    # fix42-dashboard
+  #     DH_APP=example-minimal podman compose -f docker/docker-compose.yml up -d
+  #
+  # Only the selected folder is mounted at /app.d, so Deephaven sees that app's
+  # .app descriptors and no others. Adding an app is adding a folder — see
+  # docker/apps/README.md.
+  #
+  # /scripts     = deephaven-scripts/src  (fix42cache + dh_app python packages)
+  # /dh-app-lib  = apps/_lib              (loader shared by every app)
+  # /app.d       = apps/${DH_APP}         (the selected app, and only it)
   #
   # PYTHONPATH=/scripts is deliberate: app-mode scripts are evaluated with
   # __file__ UNSET (verified on 42.4), so a script cannot bootstrap sys.path from
   # its own location. Setting PYTHONPATH makes `import fix42cache` / `import dh_app`
-  # work no matter how app.py is written.
+  # work no matter how an entrypoint is written.
+  #
+  # DH_PORT and DH_CONTAINER exist so a second app can run *beside* this one
+  # rather than replacing it -- see docker/apps/README.md.
   # ---------------------------------------------------------------------------
   deephaven:
     image: ghcr.io/deephaven/server:42.4
-    container_name: fix42-deephaven
+    container_name: "${DH_CONTAINER:-fix42-deephaven}"
     ports:
-      - "10000:10000"
+      - "${DH_PORT:-10000}:10000"
     volumes:
       - ../deephaven-scripts/src:/scripts:ro,z
-      - ./app.d:/app.d:ro,z
+      - ./apps/_lib:/dh-app-lib:ro,z
+      - ./apps/${DH_APP:-fix42-dashboard}:/app.d:ro,z
     environment:
+      # Echoed into the container so app scripts and log lines can name themselves.
+      DH_APP: "${DH_APP:-fix42-dashboard}"
       START_OPTS: >-
         -Xmx4g
         -Ddeephaven.console.type=python

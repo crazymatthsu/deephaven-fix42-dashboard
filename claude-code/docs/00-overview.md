@@ -95,6 +95,7 @@ claude-code/
 ├── amps-connectors/            # Spring Boot: AMPS topics -> Deephaven input tables (doc 07)
 │   └── src/main/{java,resources}/  # connectors + application.yml
 ├── docker/                     # podman-compose stack: kafka (KRaft) + deephaven (+ui)
+│   └── apps/<name>/            # one folder per deephaven app; pick with DH_APP
 ├── integration-test/           # e2e: generator → kafka → deephaven, asserted via pydeephaven
 └── README.md                   # build + demo runbook
 ```

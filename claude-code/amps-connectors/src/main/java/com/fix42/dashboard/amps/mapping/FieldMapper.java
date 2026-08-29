@@ -9,7 +9,11 @@ import java.util.Map;
  *
  * <p>Strictly an allowlist: only columns the schema declares are produced, so a payload field
  * with no mapping is dropped rather than published (doc 07 section 5). A mapped field that the
- * payload does not carry comes out {@code null} and not-present.
+ * payload does not carry comes out {@code null} and not-present -- or as its configured
+ * {@code default-value}, still not-present (doc 07 section 5.2).
+ *
+ * <p>A field the payload does carry is rewritten through the column's code -> value table, if
+ * it has one, before being coerced: that is what turns {@code 54=1} into {@code BUY}.
  */
 public final class FieldMapper {
 
@@ -46,12 +50,19 @@ public final class FieldMapper {
                     if (raw != null) {
                         present[i] = true;
                         try {
-                            values[i] = column.type().coerce(raw);
+                            values[i] = column.type().coerce(column.rewrite(raw));
                         } catch (IllegalArgumentException e) {
                             throw new IllegalArgumentException(
                                     "column " + column.name() + " (tag " + column.sourceTag()
                                             + "): " + e.getMessage(), e);
                         }
+                    } else {
+                        // A configured default fills the value but is deliberately NOT marked
+                        // present. Delta publishing has to keep reading an omitted field as
+                        // "unchanged", so the default seeds a key's first row and never
+                        // overwrites what a later message left alone. Null when none is set,
+                        // which is what the column got before defaults existed.
+                        values[i] = column.defaultValue();
                     }
                 }
                 case SOW_KEY -> {

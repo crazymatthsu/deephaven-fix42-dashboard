@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fix42.dashboard.amps.TestConnectors;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -67,6 +68,50 @@ class ConnectorValidatorTest {
         connector.getDeephaven().setTableType(DeephavenTableType.RING);
         assertThat(ConnectorValidator.validate(connector))
                 .anyMatch(error -> error.contains("resolves to RING"));
+    }
+
+    @Test
+    void acceptsTheValueShapingExample() {
+        assertThat(ConnectorValidator.validate(TestConnectors.fixShapedOrders())).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a built-in decode publishes a name, so it needs a STRING column")
+    void rejectsADecodeOnANonStringColumn() {
+        ConnectorProperties connector = TestConnectors.fixOrders();
+        FieldMapping qty = connector.getFields().get(2);
+        qty.setDecode(FixValueDecode.SIDE);
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("decode=SIDE publishes a name, so type must be "
+                        + "STRING, not DOUBLE"));
+    }
+
+    @Test
+    @DisplayName("an inline values map carries no such restriction")
+    void allowsInlineValuesOnANonStringColumn() {
+        ConnectorProperties connector = TestConnectors.fixOrders();
+        connector.getFields().get(2).setValues(Map.of("Y", "1", "N", "0"));
+        assertThat(ConnectorValidator.validate(connector)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a default that does not coerce is listed, not thrown")
+    void rejectsADefaultThatDoesNotCoerce() {
+        ConnectorProperties connector = TestConnectors.fixOrders();
+        connector.getFields().get(2).setDefaultValue("not-a-number");
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("column 'OrderQty': default-value")
+                        && error.contains("not a valid DOUBLE"));
+    }
+
+    @Test
+    @DisplayName("a defaulted key column would collapse every keyless record onto one row")
+    void rejectsADefaultOnAKeyColumn() {
+        ConnectorProperties connector = TestConnectors.fixOrders();
+        connector.getFields().get(0).setDefaultValue("DUMMY");
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("column 'ClOrdID' is a key column, so it must "
+                        + "not set default-value"));
     }
 
     @Test

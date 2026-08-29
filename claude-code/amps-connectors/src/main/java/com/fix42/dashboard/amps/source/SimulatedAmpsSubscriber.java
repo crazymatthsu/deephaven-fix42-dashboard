@@ -94,6 +94,9 @@ public class SimulatedAmpsSubscriber implements AmpsSubscriber {
         }
         StringBuilder payload = new StringBuilder();
         for (FieldMapping field : fields) {
+            if (omit(field, tick)) {
+                continue;
+            }
             payload.append(field.getTag()).append('=').append(value(field, key, tick))
                     .append(separator);
         }
@@ -108,6 +111,9 @@ public class SimulatedAmpsSubscriber implements AmpsSubscriber {
     private Map<String, Object> jsonTree(List<FieldMapping> fields, int key, long tick) {
         Map<String, Object> root = new LinkedHashMap<>();
         for (FieldMapping field : fields) {
+            if (omit(field, tick)) {
+                continue;
+            }
             String[] path = field.getTag().split("\\.");
             Map<String, Object> node = root;
             for (int i = 0; i < path.length - 1; i++) {
@@ -146,7 +152,36 @@ public class SimulatedAmpsSubscriber implements AmpsSubscriber {
         return "{" + String.join(",", members) + "}";
     }
 
+    /**
+     * Leave a defaulted field out of one record in four.
+     *
+     * <p>A {@code default-value} exists to cover a field the payload does not carry, so a
+     * simulator that always emits every mapping could never show it working. Demo affordance
+     * only -- a real feed decides for itself what it sends.
+     *
+     * <p>Keyed on {@code tick} alone. The caller derives {@code key} from the same counter, so
+     * {@code key + tick} has a fixed parity for an even {@code simulated-keys} and would make
+     * this fire on every record or none.
+     */
+    private static boolean omit(FieldMapping field, long tick) {
+        return field.getDefaultValue() != null && Math.floorMod(tick, 4L) == 0L;
+    }
+
+    /**
+     * One synthetic value for a mapping.
+     *
+     * <p>A mapping with a code -> value table gets one of its <em>codes</em>, so the configured
+     * decode has something to decode and the demo shows {@code BUY} rather than a synthetic
+     * string passing through untouched.
+     */
     private String value(FieldMapping field, int key, long tick) {
+        Map<String, String> table = field.resolveValueTable();
+        if (!table.isEmpty()) {
+            // Cycles on tick alone, for the reason given on omit(): key is a function of the
+            // same counter, so key + tick cannot address an even-sized table evenly.
+            List<String> codes = List.copyOf(table.keySet());
+            return codes.get((int) Math.floorMod(tick, codes.size()));
+        }
         return switch (field.getType()) {
             case STRING -> field.getColumn() + "-" + key;
             case CHAR -> String.valueOf((char) ('A' + (key % 26)));

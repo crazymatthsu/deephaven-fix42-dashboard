@@ -16,10 +16,14 @@ What is asserted (doc 05 s6):
   6. restarting the Deephaven container reproduces an identical cache
      (replay idempotence -- doc 03 s3.3).
 
-Rerun semantics: the topic is a journal and the pipeline is idempotent by design
-(seek-to-beginning + id binding + ExecID dedupe, doc 01 s3 / doc 03 s3.3). Rerunning
-without ``down -v`` replays the same chain keys and converges to the same rows, so
-assertions here match on **expected keys**, never on total row counts.
+Rerun semantics: replay idempotence (doc 01 s3 / doc 03 s3.3) is about re-*reading* the
+journal -- the same records rebuild the same cache, which is what test 6 above asserts.
+It does not make a second *publish* a no-op: the generator restarts its venue-side
+counters at ORD-0001 on every invocation, so publishing onto a topic that still holds an
+earlier batch folds both batches into one chain and no expected file describes the
+result. ``run_integration.sh`` empties the topic before generating for exactly that
+reason. Assertions here still match on **expected keys** rather than total row counts, so
+a chain that reached the topic some other way is tolerated rather than fatal.
 """
 
 from __future__ import annotations

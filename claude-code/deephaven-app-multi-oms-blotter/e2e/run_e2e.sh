@@ -98,6 +98,20 @@ dh_log() { "$CONTAINER_CLI" logs "$DH_CONTAINER_NAME" 2>&1 || true; }
 dh_log_has() { local logs; logs="$(dh_log)"; grep -qE "$1" <<<"$logs"; }
 dh_log_show() { local logs; logs="$(dh_log)"; grep -E -A "${2:-12}" "$1" <<<"$logs" || true; }
 
+# An endpoint-only wait cannot tell "slow JVM" from "container deleted out from
+# under us" (another process tearing down the shared fix42 stack): both look like
+# connection-refused until the deadline, and the timeout message then blames the
+# wrong thing. So the wait loops below also poll container *existence* -- a
+# vanished container fails immediately, naming the real cause. In that case the
+# EXIT trap must NOT `down -v` either: the compose project name is shared, so any
+# fix42 stack running by then belongs to whoever replaced ours.
+STACK_VANISHED=0
+dh_container_exists() { "$CONTAINER_CLI" container inspect "$DH_CONTAINER_NAME" >/dev/null 2>&1; }
+stack_vanished() {
+  STACK_VANISHED=1
+  die "container $DH_CONTAINER_NAME no longer exists -- it was removed while this suite waited $1. Another process (or session) likely tore down or reclaimed the shared fix42 stack; re-run once it is free."
+}
+
 # ---------------------------------------------------------------------------
 # 2. Stack lifecycle. Only ever the two services this suite needs -- `down -v`
 #    is scoped to the compose project, so unrelated containers on the same
@@ -105,7 +119,9 @@ dh_log_show() { local logs; logs="$(dh_log)"; grep -E -A "${2:-12}" "$1" <<<"$lo
 # ---------------------------------------------------------------------------
 cleanup() {
   local rc=$?
-  if [[ "$KEEP_STACK" == "1" ]]; then
+  if [[ "$STACK_VANISHED" == "1" ]]; then
+    warn "skipping teardown: our container vanished mid-run, so any fix42 stack running now belongs to another process"
+  elif [[ "$KEEP_STACK" == "1" ]]; then
     log "KEEP_STACK=1 -- leaving the stack up (IDE: $DH_URL/ide -> multi_oms_blotter)"
     printf '    tear down later with: DH_APP=%s %s -f %s down -v\n' \
       "$DH_APP" "${COMPOSE_CMD[*]}" "$COMPOSE_FILE"
@@ -129,6 +145,7 @@ compose up -d kafka deephaven
 log "waiting for Deephaven at $DH_URL (timeout ${STACK_TIMEOUT}s)"
 deadline=$(( $(date +%s) + STACK_TIMEOUT ))
 until code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "$DH_URL" 2>/dev/null) && [[ "$code" != "000" ]]; do
+  dh_container_exists || stack_vanished "for HTTP on $DH_URL"
   if (( $(date +%s) > deadline )); then
     warn "last 50 log lines from $DH_CONTAINER_NAME:"
     dh_log | tail -50 >&2
@@ -147,6 +164,7 @@ APP_FAILED="\[$DH_APP\] ERROR|\[multi-oms\] FAILED|Traceback \(most recent call 
 log "waiting for the app-mode banner"
 banner_deadline=$(( $(date +%s) + 120 ))
 until dh_log_has "$BANNER|$APP_FAILED"; do
+  dh_container_exists || stack_vanished "for the app-mode banner"
   if (( $(date +%s) > banner_deadline )); then
     warn "no [multi-oms] banner after 120s -- continuing; pytest will report what is missing"
     break

@@ -196,6 +196,23 @@ class RowModelTest {
     }
 
     @Test
+    @DisplayName("DOCUMENTED DEVIATION: a MsgSeqNum beyond 64 bits becomes a null SeqNum")
+    void oversizedSeqNumBecomesNull() {
+        // python's int() is unbounded, so it holds 7...7 (500 digits) here. SeqNum is a Deephaven
+        // long column, which cannot represent that either way -- python only discovers it later,
+        // when the batch is built, and fails the whole batch into ingest_errors. A null cell says
+        // "no usable sequence number" and keeps the message's other 34 columns.
+        String raw = FixTestMessages.buildFix("D", Map.of(11, "C1", 34, "7".repeat(500)));
+        assertNull(MessageRow.fromFields(FixParser.parseFix(raw), "C1", raw, null).seqNum());
+
+        // Everything a long CAN hold parses identically to python.
+        String inRange = FixTestMessages.buildFix("D", Map.of(11, "C1", 34, "777777777777777777"));
+        assertEquals(
+                777777777777777777L,
+                MessageRow.fromFields(FixParser.parseFix(inRange), "C1", inRange, null).seqNum());
+    }
+
+    @Test
     void messageRowRecordsBadChecksumWithoutRejecting() {
         String raw = "35=D|11=C1|10=001|";
         var rendered = MessageRow.fromFields(FixParser.parseFix(raw), "C1", raw, null).toRow();

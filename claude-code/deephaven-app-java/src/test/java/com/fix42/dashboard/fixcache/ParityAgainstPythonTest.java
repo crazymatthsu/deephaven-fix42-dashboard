@@ -167,7 +167,12 @@ class ParityAgainstPythonTest {
                 case '\b' -> out.append("\\b");
                 case '\f' -> out.append("\\f");
                 default -> {
-                    if (c < 0x20) {
+                    // python's json.dumps defaults to ensure_ascii=True, so it escapes every
+                    // non-ASCII code unit as well as the controls. A corpus message carrying a
+                    // non-breaking space or an Arabic-Indic digit would otherwise differ here for
+                    // encoding reasons alone, which is exactly the kind of false failure that
+                    // erodes trust in a golden test.
+                    if (c < 0x20 || c > 0x7e) {
                         out.append(String.format(Locale.ROOT, "\\u%04x", (int) c));
                     } else {
                         out.append(c);

@@ -161,7 +161,7 @@ public final class MessageRow {
             return null;
         }
         try {
-            return Double.valueOf(PyFloat.parse(raw.strip()));
+            return Double.valueOf(PyFloat.parse(PyDigits.strip(raw)));
         } catch (NumberFormatException notANumber) {
             return null;
         }
@@ -184,7 +184,7 @@ public final class MessageRow {
             return null;
         }
         try {
-            return Long.valueOf(PyInt.parse(raw.strip()).longValueExact());
+            return Long.valueOf(PyInt.parse(PyDigits.strip(raw)).longValueExact());
         } catch (NumberFormatException | ArithmeticException notAnInt) {
             return null;
         }

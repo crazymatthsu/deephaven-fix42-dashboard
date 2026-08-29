@@ -195,15 +195,24 @@ public final class AmpsConfig {
         return uris;
     }
 
-    /** Parses a positive int, falling back to {@code fallback} on anything unusable. */
+    /**
+     * Parses a positive int, falling back to {@code fallback} on anything unusable.
+     *
+     * <p>python's {@code int()} is unbounded and accepts digit-group underscores, and the buffer
+     * bound is only ever compared against a list length -- so a value past {@code Integer.MAX_VALUE}
+     * saturates rather than falling back, which is what "effectively unbounded" means on this side.
+     */
     static int positiveInt(String value, int fallback) {
         if (value == null) {
             return fallback;
         }
         try {
-            int parsed = Integer.parseInt(value.strip());
-            return parsed > 0 ? parsed : fallback;
-        } catch (NumberFormatException unusable) {
+            java.math.BigInteger parsed = new java.math.BigInteger(value.strip().replace("_", ""));
+            if (parsed.signum() <= 0) {
+                return fallback;
+            }
+            return parsed.bitLength() > 31 ? Integer.MAX_VALUE : parsed.intValueExact();
+        } catch (NumberFormatException | ArithmeticException unusable) {
             return fallback;
         }
     }

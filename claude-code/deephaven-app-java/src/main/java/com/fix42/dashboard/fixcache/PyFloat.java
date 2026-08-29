@@ -1,7 +1,5 @@
 package com.fix42.dashboard.fixcache;
 
-import java.util.regex.Pattern;
-
 /**
  * {@code float(str)} with python's acceptance rules, for FIX numeric tag values.
  *
@@ -13,16 +11,17 @@ import java.util.regex.Pattern;
  * <em>less</em> permissive in two: python accepts {@code inf}/{@code nan} spellings and digit-group
  * underscores.
  *
- * <p>The pattern below is python's float grammar, so both implementations accept exactly the same
- * strings.
+ * <p>The grammar below is python's, scanned rather than matched with a regex -- see {@link PyDigits}
+ * for why that distinction is load-bearing.
+ *
+ * <pre>
+ * [+-]? ( inf | infinity | nan | number )
+ * number: run ['.' [run]] [exponent] | '.' run [exponent]
+ * exponent: [eE] [+-]? run
+ * run: digit (['_'] digit)*
+ * </pre>
  */
 final class PyFloat {
-
-    private static final Pattern PY_FLOAT = Pattern.compile(
-            "[+-]?(?:(?:inf(?:inity)?|nan)"
-                    + "|(?:\\d(?:_?\\d)*(?:\\.(?:\\d(?:_?\\d)*)?)?|\\.\\d(?:_?\\d)*)"
-                    + "(?:[eE][+-]?\\d(?:_?\\d)*)?)",
-            Pattern.CASE_INSENSITIVE);
 
     private PyFloat() {}
 
@@ -34,21 +33,54 @@ final class PyFloat {
      * @throws NumberFormatException if python's {@code float()} would raise {@code ValueError}
      */
     static double parse(String text) {
-        if (!PY_FLOAT.matcher(text).matches()) {
+        int n = text.length();
+        int i = 0;
+        boolean negative = false;
+        if (i < n && (text.charAt(i) == '+' || text.charAt(i) == '-')) {
+            negative = text.charAt(i) == '-';
+            i++;
+        }
+
+        String magnitude = text.substring(i);
+        if (PyDigits.equalsIgnoreCaseAscii(magnitude, "inf")
+                || PyDigits.equalsIgnoreCaseAscii(magnitude, "infinity")) {
+            return negative ? Double.NEGATIVE_INFINITY : Double.POSITIVE_INFINITY;
+        }
+        if (PyDigits.equalsIgnoreCaseAscii(magnitude, "nan")) {
+            return Double.NaN;
+        }
+
+        int at = i;
+        int integerEnd = PyDigits.scanRun(text, at);
+        boolean hasInteger = integerEnd > 0;
+        if (hasInteger) {
+            at = integerEnd;
+        }
+        if (at < n && text.charAt(at) == '.') {
+            at++;
+            int fractionEnd = PyDigits.scanRun(text, at);
+            if (fractionEnd > 0) {
+                at = fractionEnd;
+            } else if (!hasInteger) {
+                throw new NumberFormatException(text); // "." with digits on neither side
+            }
+        } else if (!hasInteger) {
             throw new NumberFormatException(text);
         }
-        String normalized = text.replace("_", "");
-        String bare = normalized.startsWith("+") || normalized.startsWith("-")
-                ? normalized.substring(1)
-                : normalized;
-        double magnitude;
-        if (bare.equalsIgnoreCase("inf") || bare.equalsIgnoreCase("infinity")) {
-            magnitude = Double.POSITIVE_INFINITY;
-        } else if (bare.equalsIgnoreCase("nan")) {
-            magnitude = Double.NaN;
-        } else {
-            magnitude = Double.parseDouble(bare);
+        if (at < n && (text.charAt(at) == 'e' || text.charAt(at) == 'E')) {
+            int exponentAt = at + 1;
+            if (exponentAt < n && (text.charAt(exponentAt) == '+' || text.charAt(exponentAt) == '-')) {
+                exponentAt++;
+            }
+            int exponentEnd = PyDigits.scanRun(text, exponentAt);
+            if (exponentEnd < 0) {
+                throw new NumberFormatException(text); // an exponent marker with no digits
+            }
+            at = exponentEnd;
         }
-        return normalized.startsWith("-") ? -magnitude : magnitude;
+        if (at != n) {
+            throw new NumberFormatException(text);
+        }
+        return Double.parseDouble(PyDigits.toAsciiDigits(text));
     }
 }

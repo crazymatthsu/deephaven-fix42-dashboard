@@ -77,7 +77,10 @@ public final class PyNum {
      */
     public static String format6g(double value) {
         if (value == 0.0) {
-            return "0";
+            // python keeps the sign of negative zero here: format(-0.0, '.6g') is "-0".
+            // num() never reaches this -- -0.0 is integral, and str(int(-0.0)) is "0" in both
+            // languages -- but format6g is meaningful on its own.
+            return Double.doubleToRawLongBits(value) == 0L ? "0" : "-0";
         }
         BigDecimal rounded = new BigDecimal(value).round(MC);
         // Decimal exponent of the rounded value: floor(log10(|rounded|)), computed exactly.

@@ -96,8 +96,8 @@ public final class OrderStateMachine {
         Map<Integer, String> fields;
         try {
             fields = FixParser.parseFix(raw);
-        } catch (RuntimeException exc) { // parseFix is total; defensive, like the python original
-            return Result.error("unparseable: " + exc.getClass().getSimpleName() + ": " + exc.getMessage());
+        } catch (RuntimeException | StackOverflowError exc) { // parseFix is total; defensive
+            return Result.error("unparseable: " + exceptionType(exc) + ": " + exc.getMessage());
         }
         if (fields.isEmpty()) {
             return Result.error("unparseable: no FIX fields found");
@@ -121,7 +121,11 @@ public final class OrderStateMachine {
     public Result processFields(Map<Integer, String> fields, String raw) {
         try {
             return applyFields(fields, raw);
-        } catch (RuntimeException exc) { // defensive: process() must never raise
+        } catch (RuntimeException | StackOverflowError exc) {
+            // StackOverflowError is caught alongside RuntimeException on purpose. python's analogue
+            // is RecursionError, which IS an Exception and so is swallowed by the python original's
+            // blanket except -- and an Error escaping here would sail past the Deephaven listener's
+            // catch and kill the stream permanently rather than failing one message.
             return Result.error("internal error: " + exceptionType(exc) + ": " + exc.getMessage());
         }
     }
@@ -1068,7 +1072,7 @@ public final class OrderStateMachine {
             return null;
         }
         try {
-            return Double.valueOf(PyFloat.parse(raw.strip()));
+            return Double.valueOf(PyFloat.parse(PyDigits.strip(raw)));
         } catch (NumberFormatException notANumber) {
             return null;
         }
@@ -1093,7 +1097,7 @@ public final class OrderStateMachine {
      * <p>A {@link PyException} carries the python type it stands in for; anything else is a genuine
      * Java failure and reports its own class name.
      */
-    private static String exceptionType(RuntimeException exc) {
+    private static String exceptionType(Throwable exc) {
         return exc instanceof PyException py ? py.pyType() : exc.getClass().getSimpleName();
     }
 

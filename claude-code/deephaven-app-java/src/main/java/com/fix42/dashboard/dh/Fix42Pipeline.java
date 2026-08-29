@@ -58,8 +58,10 @@ public final class Fix42Pipeline {
     private TableUpdateListener listener;
     private Table source;
     private ColumnSource<String> rawColumn;
-    private long processed;
-    private long failed;
+    // Written on the update-graph thread, read from a console or client thread (the shim exposes
+    // them on the banner and for diagnostics), so publish the writes.
+    private volatile long processed;
+    private volatile long failed;
 
     /** Creates the publishers and captures the execution context, with a fresh state machine. */
     public Fix42Pipeline() {
@@ -169,7 +171,10 @@ public final class Fix42Pipeline {
                     ColumnIterator<String> raw = ChunkedColumnIterator.make(rawColumn, added)) {
                 processBatch(raw);
             }
-        } catch (Exception listenerFailure) { // a listener exception would kill the stream
+        } catch (Throwable listenerFailure) {
+            // Throwable, not Exception: anything escaping onUpdate fails the listener and every
+            // node downstream of it, for the life of the process. One poisonous message must cost
+            // one message.
             listenerFailure.printStackTrace();
         }
     }
@@ -197,7 +202,10 @@ public final class Fix42Pipeline {
                 continue;
             }
 
-            if (result.error() != null) {
+            // python's `if error:` is falsy for "" as well as None. No code path produces an empty
+            // error today, but matching the test keeps the two folds identical by construction
+            // rather than by audit.
+            if (result.error() != null && !result.error().isEmpty()) {
                 errorRows.add(errorRow(raw, result.error()));
                 failed++;
                 continue;

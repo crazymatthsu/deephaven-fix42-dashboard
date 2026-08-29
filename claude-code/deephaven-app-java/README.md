@@ -88,10 +88,33 @@ semantics wherever the JDK's differ in a way that would change a published colum
 | `PyInt` | `Long.parseLong` rejects python's digit-group underscores. |
 | `PyStrptime` | `%m`/`%d`/`%H`/`%M`/`%S` accept **one or two** digits, so python reads `2024011-14:30:00` as 2024-01-01; `DateTimeFormatter` rejects it. `java.time` also accepts proleptic year 0, which `datetime` does not. |
 | `PyException` | python's `int(nan)` raises `ValueError` *after* the chain has been mutated, and the machine reports it as `Result.error`. Reproduced, so the two agree even on pathological input. |
+| `PyDigits.strip` | `String.strip()` strips `Character.isWhitespace`, which by definition excludes the non-breaking spaces (U+00A0, U+2007, U+202F) and U+0085 NEL — all of which python strips. A value padded with one would parse in python and read as *absent* here. Verified to match python across all 65,536 BMP code points. |
+| `PyDigits.isDigit` | python's `float()`/`int()` accept any Unicode decimal digit, so `38=١٢٣` is a quantity of 123. Also matched across the whole BMP. |
 
-One deliberate, documented deviation: a `34 MsgSeqNum` too large for a signed 64-bit integer
-becomes a null `SeqNum` here, where python holds an unbounded int that the Deephaven `long` column
-cannot represent either way. Every in-range value parses identically. See `MessageRow.optLong`.
+`PyDigits` also exists for a reason that is not about semantics: the obvious regex for a python
+digit run, `\d(?:_?\d)*`, is implemented by `java.util.regex` with one stack frame per repetition,
+so a FIX field carrying a few thousand digits threw `StackOverflowError`. That is an `Error`, not a
+`RuntimeException` — it sailed past the state machine's catch *and* the Deephaven listener's, which
+would have killed the stream permanently where python merely raises `ValueError`. The scanners are
+O(n) with a constant stack, the catches now include `StackOverflowError`, and the listener catches
+`Throwable`.
+
+### The two deliberate deviations
+
+Both are cases where python **raises** rather than reading a value differently, both are pinned by
+tests rather than only described, and neither changes any value the two implementations both read.
+
+1. **A `34 MsgSeqNum` beyond signed 64 bits** becomes a null `SeqNum`, where python holds an
+   unbounded int that the Deephaven `long` column cannot represent either way — python only
+   discovers that later, when the batch is built, and fails the whole batch into `ingest_errors`.
+   Every in-range value parses identically (`MessageRow.optLong`, `RowModelTest`).
+2. **A tag python's `int()` raises on** — a digit run longer than an `int`, or a character where
+   `str.isdigit()` is true but `int()` still raises (`Numeric_Type=Digit` but not `Decimal`, such as
+   the superscripts). python's `parse_fix` calls `int(tag_text)` unguarded, so the whole message
+   becomes unparseable; this parser skips that one field and reads the rest. `java.lang.Character`
+   exposes no `Numeric_Type` accessor, so matching it means shipping a Unicode table for the 95 BMP
+   code points involved — not a trade worth making on an ASCII wire protocol (`FixParser.asTag`,
+   `FixParserTest`).
 
 ## Tests
 

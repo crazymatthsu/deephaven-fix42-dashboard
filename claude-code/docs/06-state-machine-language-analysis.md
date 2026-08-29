@@ -49,9 +49,11 @@ dashboard is genuinely Python-only — §3.)*
 - The cache must serve non-Deephaven JVM consumers directly.
 
 One correction the port itself supplies to row 1 of the table above ("Deephaven integration"): the
-Java path needs **no** custom image and **no** jpy glue. A jar on `EXTRA_CLASSPATH` and a
-`.app` descriptor are the whole deployment. A ~30-line python shim is still wanted, but for
-visibility rather than interop — see the module README on `open_table` tickets and `deephaven.ui`.
+Java path needs **no custom image** — a jar on `EXTRA_CLASSPATH` plus a `.app` descriptor is the
+whole deployment. The row's other half stands, with a smaller scope than it implies: there *is* a
+jpy shim, but it is ~30 lines that bind Java tables into the script session and it carries no
+business logic. It is there for visibility, not interop — `pydeephaven`'s `open_table` resolves
+scope tickets only, and `deephaven.ui` is python-only. See the module README.
 
 ## 3. Escape hatch (deliberate design)
 

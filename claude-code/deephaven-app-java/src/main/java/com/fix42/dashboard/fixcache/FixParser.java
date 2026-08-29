@@ -56,7 +56,7 @@ public final class FixParser {
             if (equals < 0) {
                 continue;
             }
-            Integer tag = asTag(segment.substring(0, equals).strip());
+            Integer tag = asTag(PyDigits.strip(segment.substring(0, equals)));
             if (tag == null) {
                 continue;
             }
@@ -121,15 +121,15 @@ public final class FixParser {
         }
 
         int valueEnd = text.indexOf(SOH, valueAt);
-        String declared = (valueEnd < 0 ? text.substring(valueAt) : text.substring(valueAt, valueEnd)).strip();
-        if (!isAsciiDigits(declared)) {
+        String declared = PyDigits.strip(valueEnd < 0 ? text.substring(valueAt) : text.substring(valueAt, valueEnd));
+        if (!isDigits(declared)) {
             return Boolean.FALSE;
         }
         int computed = 0;
         for (byte b : text.substring(0, bodyEnd).getBytes(StandardCharsets.UTF_8)) {
             computed += (b & 0xFF);
         }
-        java.math.BigInteger declaredValue = new java.math.BigInteger(declared);
+        java.math.BigInteger declaredValue = PyInt.parse(declared);
         return declaredValue.equals(java.math.BigInteger.valueOf(computed % 256));
     }
 
@@ -145,7 +145,7 @@ public final class FixParser {
         if (value == null || value.isEmpty()) {
             return null;
         }
-        return PyStrptime.parseUtc(value.strip());
+        return PyStrptime.parseUtc(PyDigits.strip(value));
     }
 
     // ------------------------------------------------------------------ helpers
@@ -178,23 +178,55 @@ public final class FixParser {
     }
 
     /**
-     * python's {@code tag_text.isdigit()} then {@code int(tag_text)}, restricted to ASCII digits and
-     * to values that fit an {@code int} (a longer run of digits cannot be a FIX tag).
+     * python's {@code tag_text.isdigit()} then {@code int(tag_text)}.
+     *
+     * <p>The length test is applied to the tag's <em>value</em>, not to the raw text: a FIX dialect
+     * that zero-pads its tags sends {@code 0000000035=D}, which python reads as tag 35, and a test
+     * on the raw length would silently drop the field -- taking the whole message's state effect
+     * with it when the dropped field is tag 35.
+     *
+     * <p>Two documented limits, both about a tag python <em>raises</em> on rather than one it reads
+     * differently. python's {@code parse_fix} calls {@code int(tag_text)} unguarded, so a
+     * {@code ValueError} there propagates out and makes the <em>whole message</em> unparseable;
+     * this parser skips the field and reads the rest. That happens for:
+     *
+     * <ol>
+     *   <li>a digit run genuinely longer than an {@code int}, which cannot key the
+     *       {@code Map<Integer, String>} this parser returns at all;
+     *   <li>a character where python's {@code str.isdigit()} is true but {@code int()} still
+     *       raises -- {@code Numeric_Type=Digit} but not {@code Decimal}, such as the superscripts.
+     *       {@code java.lang.Character} exposes no {@code Numeric_Type} accessor, so reproducing
+     *       that set means shipping a Unicode table for the 95 BMP code points involved; on an
+     *       ASCII wire protocol that is not a trade worth making.
+     * </ol>
+     *
+     * <p>Both are asserted in {@code FixParserTest} so the deviation is pinned, not merely
+     * described. Every tag either implementation actually <em>reads</em> is read identically,
+     * including zero-padded and non-ASCII decimal digits.
      */
     private static Integer asTag(String tagText) {
-        if (!isAsciiDigits(tagText) || tagText.length() > 9) {
+        if (!isDigits(tagText)) {
             return null;
         }
-        return Integer.valueOf(tagText);
+        String digits = PyDigits.toAsciiDigits(tagText);
+        int firstSignificant = 0;
+        while (firstSignificant < digits.length() - 1 && digits.charAt(firstSignificant) == '0') {
+            firstSignificant++;
+        }
+        String significant = digits.substring(firstSignificant);
+        if (significant.length() > 9) {
+            return null;
+        }
+        return Integer.valueOf(significant);
     }
 
-    private static boolean isAsciiDigits(String text) {
+    /** Every character is a Unicode decimal digit, as python's {@code str.isdigit()} requires. */
+    private static boolean isDigits(String text) {
         if (text.isEmpty()) {
             return false;
         }
         for (int i = 0; i < text.length(); i++) {
-            char c = text.charAt(i);
-            if (c < '0' || c > '9') {
+            if (!PyDigits.isDigit(text.charAt(i))) {
                 return false;
             }
         }

@@ -96,7 +96,13 @@ try:
             )
         }
     )
-    _dashboard_status = "fix42_dashboard (python deephaven.ui over the java tables)"
+    # build_dashboard RETURNS None when deephaven.ui is missing; it does not raise, so the banner
+    # has to test the value rather than rely on reaching this line.
+    _dashboard_status = (
+        "fix42_dashboard (python deephaven.ui over the java tables)"
+        if fix42_dashboard is not None
+        else "unavailable (deephaven.ui not installed) -- use the table panels"
+    )
 except Exception as exc:  # noqa: BLE001 - the dashboard is garnish; the tables are the contract
     fix42_dashboard = None
     _dashboard_status = "unavailable (%r) -- use the table panels" % (exc,)

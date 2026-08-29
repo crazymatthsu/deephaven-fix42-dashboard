@@ -3,6 +3,7 @@ package com.fix42.dashboard.fixcache;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -208,6 +209,58 @@ class FixParserTest {
     @DisplayName("java.time would accept proleptic year 0; python's datetime does not")
     void parseTransactTimeRejectsYearZero() {
         assertNull(FixParser.parseTransactTime("00000101-00:00:00"));
+    }
+
+    // ------------------------------------------------------------------ tag parsing
+
+    @Test
+    @DisplayName("a zero-padded tag reads as its value, the way python's int() does")
+    void parseFixReadsZeroPaddedTags() {
+        assertEquals("D", FixParser.parseFix("0000000035=D|0000000011=C1").get(35));
+        assertEquals("C1", FixParser.parseFix("0000000035=D|0000000011=C1").get(11));
+        assertEquals("D", FixParser.parseFix("035=D").get(35));
+        assertEquals("x", FixParser.parseFix("0=x").get(0));
+        assertEquals("x", FixParser.parseFix("0000=x").get(0));
+    }
+
+    @Test
+    @DisplayName("non-ASCII decimal digits are tags too, as python's int() accepts them")
+    void parseFixReadsUnicodeDecimalDigitTags() {
+        // Arabic-Indic 35 and fullwidth 11.
+        assertEquals("D", FixParser.parseFix("\u0663\u0665=D").get(35));
+        assertEquals("C1", FixParser.parseFix("\uff11\uff11=C1").get(11));
+    }
+
+    @Test
+    @DisplayName("python's str.strip() removes non-breaking spaces; String.strip() does not")
+    void parseFixStripsTheWhitespacePythonStrips() {
+        // U+00A0 NBSP, U+0085 NEL, U+2007 FIGURE SPACE, U+202F NARROW NBSP.
+        for (String pad : new String[] {"\u00a0", "\u0085", "\u2007", "\u202f", " ", "\t"}) {
+            assertEquals("D", FixParser.parseFix(pad + "35" + pad + "=D").get(35), "pad=" + pad);
+        }
+    }
+
+    @Test
+    @DisplayName("DOCUMENTED DEVIATION: a tag python raises on is skipped here, not fatal")
+    void tagsPythonRaisesOnAreSkippedRatherThanFatal() {
+        // python's parse_fix calls int(tag_text) unguarded, so both of these raise ValueError out
+        // of parse_fix and make the WHOLE message unparseable. This parser drops the one field and
+        // reads the rest. See FixParser.asTag for why the second case is not worth reproducing.
+        Map<Integer, String> beyondInt = FixParser.parseFix("12345678901=zz|35=D|11=C1");
+        assertEquals(Map.of(35, "D", 11, "C1"), beyondInt);
+
+        Map<Integer, String> superscript = FixParser.parseFix("\u00b2=x|35=D|11=C1");
+        assertEquals(Map.of(35, "D", 11, "C1"), superscript);
+    }
+
+    @Test
+    @DisplayName("a very long digit run must not blow the stack (it is an Error, not an Exception)")
+    void longDigitRunsAreStackSafe() {
+        String raw = "35=D|11=LONG|1=A|55=S|54=1|40=2|59=0|38=" + "1".repeat(100_000);
+        Result result = new OrderStateMachine(new FakeClock()).process(raw);
+        // python overflows the float and reports it the same way; the point is that nothing escapes.
+        assertNotNull(result.error());
+        assertTrue(result.error().contains("OverflowError"), result.error());
     }
 
     @Test

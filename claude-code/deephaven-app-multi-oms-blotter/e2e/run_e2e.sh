@@ -98,6 +98,30 @@ dh_log() { "$CONTAINER_CLI" logs "$DH_CONTAINER_NAME" 2>&1 || true; }
 dh_log_has() { local logs; logs="$(dh_log)"; grep -qE "$1" <<<"$logs"; }
 dh_log_show() { local logs; logs="$(dh_log)"; grep -E -A "${2:-12}" "$1" <<<"$logs" || true; }
 
+# An endpoint-only wait cannot tell "slow JVM" from "container deleted out from
+# under us" (another process tearing down the shared fix42 stack): both look like
+# connection-refused until the deadline, and the timeout message then blames the
+# wrong thing. So the wait loops below also poll container *existence* -- a
+# vanished container fails immediately, naming the real cause.
+#
+# The EXIT trap must not blindly `down -v` either: the compose project name is
+# shared, so after a mid-run reclaim that teardown would land on whoever replaced
+# our stack. The trap therefore tears down only when $DH_CONTAINER_NAME is still
+# the exact container THIS run started (id captured after `up`; a restart -- the
+# suite's own restart test included -- preserves the id, only an outside recreate
+# changes it). Decision table: no id captured -> tear down (reap our own partial
+# `up`); id matches -> tear down; id differs or container gone -> skip. The skip
+# can leak OUR kafka when the stack merely vanished and nothing replaced it --
+# a deliberate leak-over-reap trade-off: every entry point here starts with
+# `down -v`, which reaps a leaked stack for free, while reaping a live successor
+# stack costs someone else their run.
+DH_CID=""
+dh_container_exists() { "$CONTAINER_CLI" container inspect "$DH_CONTAINER_NAME" >/dev/null 2>&1; }
+current_dh_cid() { "$CONTAINER_CLI" container inspect --format '{{.Id}}' "$DH_CONTAINER_NAME" 2>/dev/null || true; }
+stack_vanished() {
+  die "container $DH_CONTAINER_NAME no longer exists -- it was removed while this suite waited $1. Another process (or session) likely tore down or reclaimed the shared fix42 stack; re-run once it is free."
+}
+
 # ---------------------------------------------------------------------------
 # 2. Stack lifecycle. Only ever the two services this suite needs -- `down -v`
 #    is scoped to the compose project, so unrelated containers on the same
@@ -110,8 +134,14 @@ cleanup() {
     printf '    tear down later with: DH_APP=%s %s -f %s down -v\n' \
       "$DH_APP" "${COMPOSE_CMD[*]}" "$COMPOSE_FILE"
   else
-    log "tearing down the stack"
-    compose down -v >/dev/null 2>&1 || true
+    local now_cid
+    now_cid="$(current_dh_cid)"
+    if [[ -z "$DH_CID" || "$now_cid" == "$DH_CID" ]]; then
+      log "tearing down the stack"
+      compose down -v >/dev/null 2>&1 || true
+    else
+      warn "skipping teardown: $DH_CONTAINER_NAME is not the container this run started (vanished or recreated by another process). If nothing replaced the stack this can leak our kafka -- the next run's 'down -v' reaps it."
+    fi
   fi
   exit "$rc"
 }
@@ -125,10 +155,15 @@ compose down -v >/dev/null 2>&1 || true
 log "starting stack (kafka + deephaven)"
 compose up -d kafka deephaven
 
+# Pin this run's Deephaven container id -- the EXIT trap's teardown condition.
+DH_CID="$(current_dh_cid)"
+[[ -n "$DH_CID" ]] || warn "could not capture the $DH_CONTAINER_NAME container id; teardown will proceed unconditionally"
+
 # `up -d` returns once containers are created; wait for Deephaven to actually serve.
 log "waiting for Deephaven at $DH_URL (timeout ${STACK_TIMEOUT}s)"
 deadline=$(( $(date +%s) + STACK_TIMEOUT ))
 until code=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "$DH_URL" 2>/dev/null) && [[ "$code" != "000" ]]; do
+  dh_container_exists || stack_vanished "for HTTP on $DH_URL"
   if (( $(date +%s) > deadline )); then
     warn "last 50 log lines from $DH_CONTAINER_NAME:"
     dh_log | tail -50 >&2
@@ -147,6 +182,7 @@ APP_FAILED="\[$DH_APP\] ERROR|\[multi-oms\] FAILED|Traceback \(most recent call 
 log "waiting for the app-mode banner"
 banner_deadline=$(( $(date +%s) + 120 ))
 until dh_log_has "$BANNER|$APP_FAILED"; do
+  dh_container_exists || stack_vanished "for the app-mode banner"
   if (( $(date +%s) > banner_deadline )); then
     warn "no [multi-oms] banner after 120s -- continuing; pytest will report what is missing"
     break

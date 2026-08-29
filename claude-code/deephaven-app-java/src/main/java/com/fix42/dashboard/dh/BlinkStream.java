@@ -41,6 +41,7 @@ final class BlinkStream {
     private final List<Function<List<Map<String, Object>>, ColumnHolder<?>>> builders;
     private final TableDefinition definition;
     private final TablePublisher publisher;
+    private final Table table;
 
     BlinkStream(String name, TableDefinition definition) {
         this.name = name;
@@ -62,15 +63,21 @@ final class BlinkStream {
                 /* onShutdownCallback */ null,
                 ExecutionContext.getContext().getUpdateGraph(),
                 CHUNK_SIZE);
+        // Take the strong reference ONCE, here. StreamToBlinkTableAdapter.table() reads the table
+        // out of a WeakReference and nulls its own strong field on the way past, so the caller of
+        // the first table() call becomes the only thing keeping the blink table alive. Re-deriving
+        // it per call would leave this class holding no reference to the very tables its javadoc
+        // promises to hold, and a later call could return null after a collection.
+        this.table = publisher.table();
     }
 
     String name() {
         return name;
     }
 
-    /** The blink table this publisher feeds. */
+    /** The blink table this publisher feeds; the same instance for the life of this stream. */
     Table table() {
-        return publisher.table();
+        return table;
     }
 
     /** Publishes {@code rows} as one batch. A no-op when there is nothing to publish. */

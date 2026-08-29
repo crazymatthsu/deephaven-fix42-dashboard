@@ -137,7 +137,15 @@ public final class Fix42Pipeline {
         return tables();
     }
 
-    /** Unsubscribes the listener (best effort; used by tests and reloads). */
+    /**
+     * Unsubscribes the listener (best effort; used by tests and reloads).
+     *
+     * <p>The listener was created with {@code retain=true}, so it also sits in
+     * {@code InstrumentedTableUpdateListenerAdapter}'s static retention cache until it is destroyed;
+     * removing the subscription does not evict it. The app wires exactly one pipeline per process
+     * and memoizes it, so that is a bounded one-off rather than a leak -- but a caller that started
+     * and stopped pipelines in a loop would accumulate them.
+     */
     public void stop() {
         TableUpdateListener current = listener;
         listener = null;

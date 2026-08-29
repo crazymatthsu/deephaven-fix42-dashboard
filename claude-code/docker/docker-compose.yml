@@ -128,10 +128,15 @@ services:
       FIX42_TOPIC: "fix42.messages"
       # To read an AMPS transaction log instead, set FIX42_SOURCE: "amps" and point
       # these at your own broker. AMPS is commercial software with no public image, so
-      # there is no AMPS service in this file, and the AMPS python client is not in the
-      # Deephaven image either -- it has to be installed:
-      #   podman exec fix42-deephaven pip install amps-python-client
-      # See the "AMPS transaction log as the source" section of the README.
+      # there is no AMPS service in this file, and its client is not in the Deephaven
+      # image either -- it has to be supplied. Which client depends on the app:
+      #   DH_APP=fix42-dashboard        (python)  podman exec fix42-deephaven \
+      #                                             pip install amps-python-client
+      #   DH_APP=fix42-dashboard-java   (java)    drop ONE amps-client-<version>.jar into
+      #                                             deephaven-app-java/build/deploy/libs
+      #                                             (mounted at /apps/libs) and recreate
+      # See the "AMPS transaction log as the source" section of the README, and
+      # deephaven-app-java/README.md for the java side.
       #
       # FIX42_AMPS_URI: "tcp://amps:9007/amps/fix"   # comma-separated for an HA pair
       # FIX42_AMPS_TOPIC: "fix42.messages"           # defaults to FIX42_TOPIC

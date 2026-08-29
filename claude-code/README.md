@@ -439,6 +439,7 @@ DH_APP=fix42-dashboard-java podman compose -f docker/docker-compose.yml up -d
 |---|---|
 | `fix42-dashboard` *(default)* | The full FIX 4.2 pipeline — `order_state_latest`, `executions`, `order_events`, `fix_messages`, the query API, `fix42_dashboard` |
 | `fix42-dashboard-java` | **The same pipeline, built in Java** against the Deephaven engine API (`:deephaven-app-java`). Identical table names, columns and values; build the jar first with `./gradlew :deephaven-app-java:assemble` |
+| `multi-oms-blotter` | **A different pipeline**: four OMS drop-copy tapes linked across hubs and reconciled per edge — `orders_recon`, `oms_breaks`, `chain_recon`, `orders_tree`, `multi_oms_blotter`. See [Multi-OMS drop-copy blotter](#multi-oms-drop-copy-blotter) |
 | `example-minimal` | One table, `example_heartbeat`. The copy-me template; it imports nothing from the repo, so it proves the switch on its own |
 
 Because only the selected folder is mounted, apps cannot leak into each other — bring up
@@ -459,6 +460,56 @@ DH_APP=example-minimal DH_PORT=10001 DH_CONTAINER=dh-example \
 
 That leaves `fix42-dashboard` on `:10000` and the second app on `:10001`, sharing one
 broker. Remove it with `podman rm -f dh-example`.
+
+---
+
+## Multi-OMS drop-copy blotter
+
+The second real app in `docker/apps/`. Where the dashboard above folds **one** FIX 4.2 tape,
+this one folds **four** — the drop-copy of a single flow as it is routed through four OMS
+hubs, each with its own `ClOrdID` / `OrderID` / `ExecID` space:
+
+```
+OMS-A  ──►  OMS-B-parent  ──►  OMS-B-child (1..n per parent)  ──►  OMS-C (1 per child)
+             16666=A.ClOrdID     16667=B-parent.ClOrdID           16668=B-child.ClOrdID
+```
+
+Each downstream order's `35=D` carries a **configurable** tag naming its upstream order, so
+the hubs are linked by data rather than by convention. One `kc.consume` and one
+`OrderStateMachine` per hub — `fix42cache` is reused **unchanged**; the only new state is a
+per-hub sticky `{OrderKey: ExtOrdID}` map. Everything after the fold is declarative: an
+`(Oms, Id) → GlobalKey` index over every id ever seen, `K−1` iterated joins that resolve each
+order's `RootKey` (the chain id) and `Depth`, a rollup per parent over its **direct** children,
+and `orders_recon` — one row per order per hub with `DeltaCumQty` / `DeltaLeavesQty` /
+`DeltaNotional` and a `BreakKind` (`QTY_BREAK`, `NOTIONAL_BREAK`, `DANGLING`, `NO_LINK` red;
+`UNROUTED` amber). Reconciliation is strictly **per edge**, never a hop against its whole
+subtree, so a break is attributed to the system that owns it.
+
+```bash
+DH_APP=multi-oms-blotter podman compose -f docker/docker-compose.yml up -d
+./gradlew :fix-mock-generator:run \
+  --args="--multi-oms --seed 42 --orders 12 --children 3 --rate 200"
+open http://localhost:10000/ide     # Panels ▸ multi_oms_blotter
+```
+
+The dashboard is a flat filterable, paged blotter with a **breaks only** toggle beside a
+chain panel: click any hop and the whole family lights up, upstream *and* downstream, with
+that hop's own executions and events below. `orders_tree` is the hierarchical companion
+panel. Because linking is a join and not a fold, an order whose parent tape has not arrived
+yet is `DANGLING` and **heals** into `LINKED` when the parent shows up, with no replay.
+
+The generator's `--multi-oms` mode scripts six family shapes (`clean_fill`,
+`working_fanout`, `partial_route`, `missed_fill`, `dangling_child`, `late_parent`) and
+`--emit-expected` writes what each hub-order must end up as — which is the oracle the
+module's own e2e asserts against:
+
+```bash
+bash deephaven-app-multi-oms-blotter/e2e/run_e2e.sh   # down -v → up → generate → pytest → down
+```
+
+Runbook, recon semantics and the `MULTIOMS_*` configuration surface:
+[deephaven-app-multi-oms-blotter/README.md](deephaven-app-multi-oms-blotter/README.md).
+Design and contract: [docs/09-multi-oms-blotter.md](docs/09-multi-oms-blotter.md).
 
 ---
 
@@ -558,7 +609,7 @@ Design and contract: [docs/07-amps-connectors.md](docs/07-amps-connectors.md).
 ```
 claude-code/
 ├── docs/                          # analysis & design — the binding contracts
-│   ├── 00-overview.md … 08-on-demand-executions-idea.md
+│   ├── 00-overview.md … 09-multi-oms-blotter.md
 ├── settings.gradle.kts            # gradle multi-module root (Java 21 toolchain)
 ├── build.gradle.kts
 ├── fix-mock-generator/            # Java 21: FIX builder + scenario engine + Kafka CLI
@@ -572,6 +623,11 @@ claude-code/
 │   ├── src/main/java/com/fix42/dashboard/dh/         #   publishers, dag, query api, app entry
 │   ├── parity/                    #   regenerates the python-vs-java golden the tests assert
 │   └── README.md                  #   what is ported, what is not, and how it is verified
+├── deephaven-app-multi-oms-blotter/  # python: 4 OMS drop-copy tapes, linked and reconciled
+│   ├── src/multi_oms/             #   config, linking, ingest, pipeline, dag, query api, dashboard
+│   ├── tests/                     #   pytest unit suite (pure python, no deephaven)
+│   ├── e2e/                       #   run_e2e.sh + pydeephaven assertions against the live DAG
+│   └── README.md                  #   runbook, recon semantics, MULTIOMS_* configuration
 ├── amps-connectors/               # Spring Boot: AMPS topics -> Deephaven tables
 │   ├── src/main/java/com/fix42/dashboard/amps/
 │   └── src/main/resources/application.yml   # the whole configuration surface
@@ -581,6 +637,7 @@ claude-code/
 │       ├── _lib/loader.py         #   shared app-mode loader, mounted at /dh-app-lib
 │       ├── fix42-dashboard/       #   the default app (.app descriptor + main.py)
 │       ├── fix42-dashboard-java/  #   the java build of the same app (jpy shim + .app)
+│       ├── multi-oms-blotter/     #   the multi-OMS drop-copy blotter (.app + main.py)
 │       └── example-minimal/       #   copy-me template, no repo dependencies
 ├── integration-test/
 │   ├── run_integration.sh         # up → generate → pytest → down
@@ -605,3 +662,4 @@ claude-code/
 | [06 — State machine language choice](docs/06-state-machine-language-analysis.md) | python vs java for the stateful fold, with a measured throughput ceiling |
 | [07 — AMPS connectors](docs/07-amps-connectors.md) | the AMPS → Deephaven bridge: config model, SOW vs journal, table types, delta handling, lifecycle |
 | [08 — On-demand executions](docs/08-on-demand-executions-idea.md) | **tabled idea, not a contract** — fetching executions from AMPS per click; why it was set aside, and the cheaper alternatives |
+| [09 — Multi-OMS drop-copy blotter](docs/09-multi-oms-blotter.md) | **the contract** for the second app: hub topology, cross-hub linking, per-edge reconciliation and the break taxonomy, dashboard, generator mode, e2e scope |

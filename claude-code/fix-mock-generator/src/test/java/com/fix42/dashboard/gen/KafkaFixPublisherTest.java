@@ -91,6 +91,51 @@ class KafkaFixPublisherTest {
     }
 
     @Test
+    @DisplayName("the per-message overload routes each hub's tape to that hub's topic")
+    void perMessageTopicRouting() {
+        MockProducer<String, String> producer = mockProducer();
+        MultiOmsScenarioEngine.GeneratedBatch batch = MultiOmsTestFix.batch(42L, 3, 8, "all");
+
+        try (KafkaFixPublisher publisher = new KafkaFixPublisher(producer, TOPIC)) {
+            for (MultiOmsScenarioEngine.EmittedMessage emitted : batch.messages()) {
+                publisher.publish(emitted.topic(), emitted.chainKey(),
+                        FixSerializer.serialize(emitted.message()));
+            }
+            assertEquals(batch.messages().size(), publisher.publishedCount());
+        }
+
+        List<ProducerRecord<String, String>> records = producer.history();
+        assertEquals(batch.messages().size(), records.size());
+        for (int i = 0; i < records.size(); i++) {
+            MultiOmsScenarioEngine.EmittedMessage emitted = batch.messages().get(i);
+            ProducerRecord<String, String> record = records.get(i);
+            assertEquals(emitted.topic(), record.topic(), "each message goes to its own hub topic");
+            assertEquals(MultiOmsTestFix.hub(emitted.oms()).topic(), record.topic());
+            assertEquals(emitted.chainKey(), record.key(), "key must be the hub order's D ClOrdID");
+            assertEquals(FixSerializer.serialize(emitted.message()), record.value());
+        }
+
+        assertEquals(Set.copyOf(MultiOmsTopology.topics()),
+                records.stream().map(ProducerRecord::topic).collect(Collectors.toSet()));
+        assertTrue(records.stream().noneMatch(r -> TOPIC.equals(r.topic())),
+                "the constructor topic is never used once every message routes itself");
+    }
+
+    @Test
+    @DisplayName("the single-argument overload still targets the constructor topic")
+    void defaultTopicOverloadIsUnchanged() {
+        MockProducer<String, String> producer = mockProducer();
+        try (KafkaFixPublisher publisher = new KafkaFixPublisher(producer, TOPIC)) {
+            publisher.publish("ORD-0001", "raw-a");
+            publisher.publish("other.topic", "ORD-0002", "raw-b");
+        }
+        assertEquals(List.of(TOPIC, "other.topic"),
+                producer.history().stream().map(ProducerRecord::topic).toList());
+        assertEquals(List.of("ORD-0001", "ORD-0002"),
+                producer.history().stream().map(ProducerRecord::key).toList());
+    }
+
+    @Test
     @DisplayName("close() flushes and closes the underlying producer")
     void closeFlushesAndCloses() {
         MockProducer<String, String> producer = mockProducer();

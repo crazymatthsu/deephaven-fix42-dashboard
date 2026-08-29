@@ -16,7 +16,11 @@ import java.util.stream.Collectors;
  * <pre>{@code
  * ./gradlew :fix-mock-generator:run --args="--dry-run --orders 3 --seed 42"
  * ./gradlew :fix-mock-generator:run --args="--seed 42 --orders 12 --rate 200"
+ * ./gradlew :fix-mock-generator:run --args="--multi-oms --dry-run --orders 3 --seed 42 --children 2"
  * }</pre>
+ *
+ * <p>Two modes share the flag set: the default single-tape mode of doc 05 §2.1, and
+ * {@code --multi-oms}, which generates the correlated four-hub drop-copy tapes of doc 09 §8.
  */
 public final class GeneratorMain {
 
@@ -41,6 +45,8 @@ public final class GeneratorMain {
      * @param dryRun           print pipe-rendered messages to stdout instead of publishing
      * @param emitExpected     write the expected final per-chain state as JSON to this path
      * @param help             print usage and exit
+     * @param multiOms         generate the four correlated multi-OMS tapes instead of one tape
+     * @param children         multi-OMS only: maximum fan-out per {@code OMS-B-parent}
      */
     public record Config(
             String bootstrapServers,
@@ -53,7 +59,9 @@ public final class GeneratorMain {
             boolean listScenarios,
             boolean dryRun,
             Path emitExpected,
-            boolean help) {}
+            boolean help,
+            boolean multiOms,
+            int children) {}
 
     public static void main(String[] args) {
         int exit;
@@ -86,17 +94,29 @@ public final class GeneratorMain {
         boolean dryRun = false;
         Path emitExpected = null;
         boolean help = false;
+        boolean multiOms = false;
+        int children = MultiOmsScenarioEngine.DEFAULT_MAX_CHILDREN;
+        boolean topicGiven = false;
+        boolean childrenGiven = false;
 
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
             switch (arg) {
                 case "--bootstrap-servers" -> bootstrap = value(args, ++i, arg);
-                case "--topic" -> topic = value(args, ++i, arg);
+                case "--topic" -> {
+                    topic = value(args, ++i, arg);
+                    topicGiven = true;
+                }
                 case "--orders" -> orders = parseInt(value(args, ++i, arg), arg);
                 case "--seed" -> seed = parseLong(value(args, ++i, arg), arg);
                 case "--rate" -> rate = parseDouble(value(args, ++i, arg), arg);
                 case "--scenario" -> scenario = value(args, ++i, arg);
                 case "--emit-expected" -> emitExpected = Path.of(value(args, ++i, arg));
+                case "--children" -> {
+                    children = parseInt(value(args, ++i, arg), arg);
+                    childrenGiven = true;
+                }
+                case "--multi-oms" -> multiOms = true;
                 case "--loop" -> loop = true;
                 case "--list-scenarios" -> listScenarios = true;
                 case "--dry-run" -> dryRun = true;
@@ -108,14 +128,31 @@ public final class GeneratorMain {
         if (orders <= 0) {
             throw new IllegalArgumentException("--orders must be positive, got " + orders);
         }
-        if (!ScenarioCatalog.ALL.equalsIgnoreCase(scenario)) {
-            ScenarioCatalog.fromCliName(scenario);
+        if (multiOms) {
+            if (topicGiven) {
+                throw new IllegalArgumentException(
+                        "--topic is not valid with --multi-oms: the topology fixes one topic per hub ("
+                                + String.join(", ", MultiOmsTopology.topics()) + ")");
+            }
+            if (children < 1) {
+                throw new IllegalArgumentException("--children must be at least 1, got " + children);
+            }
+            if (!MultiOmsScenarioCatalog.ALL.equalsIgnoreCase(scenario)) {
+                MultiOmsScenarioCatalog.fromCliName(scenario);
+            }
+        } else {
+            if (childrenGiven) {
+                throw new IllegalArgumentException("--children is only valid with --multi-oms");
+            }
+            if (!ScenarioCatalog.ALL.equalsIgnoreCase(scenario)) {
+                ScenarioCatalog.fromCliName(scenario);
+            }
         }
         if (loop && emitExpected != null) {
             throw new IllegalArgumentException("--emit-expected cannot be combined with --loop");
         }
         return new Config(bootstrap, topic, orders, seed, rate, scenario,
-                loop, listScenarios, dryRun, emitExpected, help);
+                loop, listScenarios, dryRun, emitExpected, help, multiOms, children);
     }
 
     /** Executes the parsed configuration; returns the process exit code. */
@@ -125,10 +162,18 @@ public final class GeneratorMain {
             return 0;
         }
         if (cfg.listScenarios()) {
-            listScenarios(out);
+            if (cfg.multiOms()) {
+                listMultiOmsScenarios(out);
+            } else {
+                listScenarios(out);
+            }
             return 0;
         }
+        return cfg.multiOms() ? runMultiOms(cfg, out) : runSingleTape(cfg, out);
+    }
 
+    /** The single-tape mode of doc 05 §2.1: one chain per order, one topic. */
+    private static int runSingleTape(Config cfg, PrintStream out) throws IOException {
         ScenarioEngine engine = new ScenarioEngine(cfg.seed());
         long pauseNanos = cfg.rate() > 0 ? (long) (1_000_000_000L / cfg.rate()) : 0;
 
@@ -163,23 +208,93 @@ public final class GeneratorMain {
         return 0;
     }
 
+    /**
+     * The multi-OMS mode of doc 09 §8: four correlated drop-copy tapes per family, each routed to
+     * its hub's own topic. {@code --topic} is rejected by {@link #parseArgs} here because the
+     * topology fixes the destinations.
+     */
+    private static int runMultiOms(Config cfg, PrintStream out) throws IOException {
+        MultiOmsScenarioEngine engine = new MultiOmsScenarioEngine(cfg.seed(), cfg.children());
+        long pauseNanos = cfg.rate() > 0 ? (long) (1_000_000_000L / cfg.rate()) : 0;
+
+        if (cfg.dryRun()) {
+            MultiOmsScenarioEngine.GeneratedBatch batch = engine.generate(cfg.orders(), cfg.scenario());
+            for (MultiOmsScenarioEngine.EmittedMessage emitted : batch.messages()) {
+                out.println(emitted.topic() + "\t"
+                        + FixSerializer.renderPipe(FixSerializer.serialize(emitted.message())));
+            }
+            writeExpectedOms(cfg, batch);
+            System.err.printf(Locale.ROOT,
+                    "generated %d messages across %d families / %d hub orders "
+                            + "(seed %d, scenario %s, children %d)%n",
+                    batch.messages().size(), batch.chains().size(), batch.expectedOrders().size(),
+                    cfg.seed(), cfg.scenario(), cfg.children());
+            return 0;
+        }
+
+        try (KafkaFixPublisher publisher =
+                new KafkaFixPublisher(cfg.bootstrapServers(), MultiOmsTopology.OMS_A.topic())) {
+            long batchNo = 0;
+            do {
+                MultiOmsScenarioEngine.GeneratedBatch batch = engine.generate(cfg.orders(), cfg.scenario());
+                for (MultiOmsScenarioEngine.EmittedMessage emitted : batch.messages()) {
+                    publisher.publish(emitted.topic(), emitted.chainKey(),
+                            FixSerializer.serialize(emitted.message()));
+                    pace(pauseNanos);
+                }
+                publisher.flush();
+                writeExpectedOms(cfg, batch);
+                batchNo++;
+                System.err.printf(Locale.ROOT,
+                        "batch %d: published %d messages across %d families to %s (%s, seed %d)%n",
+                        batchNo, batch.messages().size(), batch.chains().size(),
+                        String.join(", ", MultiOmsTopology.topics()), cfg.bootstrapServers(), cfg.seed());
+            } while (cfg.loop() && !Thread.currentThread().isInterrupted());
+        }
+        return 0;
+    }
+
+    private static void writeExpectedOms(Config cfg, MultiOmsScenarioEngine.GeneratedBatch batch)
+            throws IOException {
+        if (cfg.emitExpected() == null) {
+            return;
+        }
+        Path target = prepare(cfg.emitExpected());
+        List<ExpectedOmsOrder> orders = batch.expectedOrders();
+        Files.writeString(target, toOmsJson(orders), StandardCharsets.UTF_8);
+        System.err.println("wrote expected state for " + orders.size() + " hub orders across "
+                + batch.chains().size() + " families to " + target);
+    }
+
     private static void writeExpected(Config cfg, ScenarioEngine.GeneratedBatch batch, PrintStream out)
             throws IOException {
         if (cfg.emitExpected() == null) {
             return;
         }
-        Path target = cfg.emitExpected().toAbsolutePath();
+        Path target = prepare(cfg.emitExpected());
+        Files.writeString(target, toJson(batch.expectedStates()), StandardCharsets.UTF_8);
+        System.err.println("wrote expected state for " + batch.chains().size() + " chains to " + target);
+    }
+
+    private static Path prepare(Path path) throws IOException {
+        Path target = path.toAbsolutePath();
         if (target.getParent() != null) {
             Files.createDirectories(target.getParent());
         }
-        Files.writeString(target, toJson(batch.expectedStates()), StandardCharsets.UTF_8);
-        System.err.println("wrote expected state for " + batch.chains().size() + " chains to " + target);
+        return target;
     }
 
     /** Renders the expected per-chain final states as a JSON array. */
     public static String toJson(List<ExpectedChainState> states) {
         return states.stream()
                 .map(ExpectedChainState::toJson)
+                .collect(Collectors.joining(",\n  ", "[\n  ", "\n]\n"));
+    }
+
+    /** Renders the expected per-hub-order blotter rows as a JSON array (doc 09 §8). */
+    public static String toOmsJson(List<ExpectedOmsOrder> orders) {
+        return orders.stream()
+                .map(ExpectedOmsOrder::toJson)
                 .collect(Collectors.joining(",\n  ", "[\n  ", "\n]\n"));
     }
 
@@ -192,6 +307,24 @@ public final class GeneratorMain {
         out.printf(Locale.ROOT, "%-22s  weighted mix; every scenario appears at least once%n", ScenarioCatalog.ALL);
     }
 
+    private static void listMultiOmsScenarios(PrintStream out) {
+        out.println("multi-OMS topology: "
+                + MultiOmsTopology.HUBS.stream()
+                        .map(hub -> hub.isRoot()
+                                ? hub.name() + " (" + hub.topic() + ")"
+                                : hub.name() + " (" + hub.topic() + ", " + hub.linkTag() + "="
+                                        + hub.upstream() + ".ClOrdID)")
+                        .collect(Collectors.joining(" -> ")));
+        out.println();
+        out.println("scenario                script");
+        out.println("----------------------  --------------------------------------------------------------");
+        for (MultiOmsScenarioCatalog scenario : MultiOmsScenarioCatalog.values()) {
+            out.printf(Locale.ROOT, "%-22s  %s%n", scenario.cliName(), scenario.script());
+        }
+        out.printf(Locale.ROOT, "%-22s  weighted mix; every scenario appears at least once%n",
+                MultiOmsScenarioCatalog.ALL);
+    }
+
     private static void usage(PrintStream out) {
         out.println("""
                 fix-mock-generator — FIX 4.2 mock order flow for the Deephaven dashboard
@@ -199,15 +332,20 @@ public final class GeneratorMain {
                 Usage: GeneratorMain [flags]
 
                   --bootstrap-servers <host:port>  Kafka bootstrap servers (default localhost:19092)
-                  --topic <name>                   destination topic (default fix42.messages)
-                  --orders <n>                     order chains to generate (default 20)
+                  --topic <name>                   destination topic (default fix42.messages;
+                                                   rejected with --multi-oms, which fixes one topic per hub)
+                  --orders <n>                     order chains (families with --multi-oms) to generate (default 20)
                   --seed <n>                       RNG seed (default random; identical seeds replay identically)
                   --rate <msgs/sec>                publish pacing (default 50; ignored by --dry-run)
                   --scenario all|<name>            scenario selection (default all)
+                  --multi-oms                      generate the correlated 4-hub drop-copy tapes (doc 09 §8)
+                  --children <n>                   --multi-oms only: max fan-out per OMS-B-parent (default 3)
                   --loop                           regenerate batches forever
                   --list-scenarios                 print the scenario catalog and exit
                   --dry-run                        print pipe-rendered messages to stdout, no Kafka
-                  --emit-expected <file>           write expected final per-chain state as JSON
+                                                   (--multi-oms prefixes each line with "<topic>\\t")
+                  --emit-expected <file>           write expected final state as JSON (per chain, or
+                                                   per hub order with --multi-oms)
                   -h, --help                       print this help""");
     }
 

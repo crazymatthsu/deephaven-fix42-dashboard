@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multi-oms-blotter"
+version = "0.1.0"
+description = "Multi-OMS drop-copy blotter: cross-hub FIX 4.2 order linking and per-edge reconciliation for Deephaven"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "deephaven-fix42-dashboard" }]
+# Stdlib-only by contract (doc 09 section 10). `deephaven` and `fix42cache` are
+# supplied by the server container and the /scripts mount respectively, never by
+# pip -- which is exactly why the unit suite runs on a bare host python.
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

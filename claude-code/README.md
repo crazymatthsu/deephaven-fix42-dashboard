@@ -450,3 +450,4 @@ claude-code/
 | [05 — Implementation & testing](docs/05-implementation-and-testing.md) | module APIs, scenario catalog, build layout, demo runbook |
 | [06 — State machine language choice](docs/06-state-machine-language-analysis.md) | python vs java for the stateful fold, with a measured throughput ceiling |
 | [07 — AMPS connectors](docs/07-amps-connectors.md) | the AMPS → Deephaven bridge: config model, SOW vs journal, delta handling, lifecycle |
+| [08 — On-demand executions](docs/08-on-demand-executions-idea.md) | **tabled idea, not a contract** — fetching executions from AMPS per click; why it was set aside, and the cheaper alternatives |

@@ -117,10 +117,10 @@ These came out of the exploration and hold whether or not the idea is ever reviv
   `ORDER_GRID_LEAD_COLUMNS` already carries in the orders grid.
 - **`executions_latest` and `execid_index` derive from `executions_blink`, not from `executions`.**
   The append-only node can therefore be removed without breaking either of them, or `get_by_execid`.
-- **`TableBootstrapScript.createIfMissing` compares column names and order only.** A dtype or
-  `key_cols` mismatch between a schema declaration and `application.yml` passes silently and fails
-  later at `addToInputTable`. Worth hardening on its own merits — see
-  [doc 07 §8](07-amps-connectors.md).
+- ~~**`TableBootstrapScript.createIfMissing` compares column names and order only.**~~ *Fixed.*
+  A dtype or `key_cols` mismatch used to pass silently and fail later at `addToInputTable`; the
+  generated python now checks column types and keys as well as names and order
+  ([doc 07 §8](07-amps-connectors.md)).
 - **`FlightDeephavenGateway.deleteRows` returns early when the schema is not keyed.** Any on-demand
   table that needs row removal must be a keyed input table; an append-only one has no removal path
   and would grow exactly as much as the table being replaced.

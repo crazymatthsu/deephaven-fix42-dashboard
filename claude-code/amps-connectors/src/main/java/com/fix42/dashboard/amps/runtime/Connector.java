@@ -11,6 +11,7 @@ import com.fix42.dashboard.amps.mapping.TableSchema;
 import com.fix42.dashboard.amps.source.AmpsRecord;
 import com.fix42.dashboard.amps.source.AmpsSubscriber;
 import java.time.Clock;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
@@ -42,6 +43,7 @@ public final class Connector implements AutoCloseable {
 
     private final AtomicLong received = new AtomicLong();
     private final AtomicLong rejected = new AtomicLong();
+    private final AtomicLong ignoredRemovals = new AtomicLong();
 
     private volatile AmpsSubscriber subscriber;
     private volatile boolean started;
@@ -124,10 +126,19 @@ public final class Connector implements AutoCloseable {
                 properties.getName(),
                 properties.getFormat(),
                 properties.getSource().getTopic(),
-                schema.keyed() ? "keyed" : "append-only",
+                schema.tableType().name().toLowerCase(Locale.ROOT).replace('_', '-'),
                 schema.tableName(),
                 schema.size(),
                 properties.getDeephaven().getPublishMode());
+        if (properties.getSource().isSow() && !schema.keyed()) {
+            // Legal, and sometimes what you want -- a live view of updates rather than of state
+            // -- but the SOW's removals have nowhere to land, so say so rather than dropping
+            // them in silence.
+            log.warn("[{}] {} is a {} table, so out-of-focus messages from SOW topic {} "
+                            + "cannot be applied and will be ignored",
+                    properties.getName(), schema.tableName(), schema.tableType(),
+                    properties.getSource().getTopic());
+        }
     }
 
     /** Unsubscribe, flush what is buffered, and release the subscriber. */
@@ -155,6 +166,13 @@ public final class Connector implements AutoCloseable {
     void onRecord(AmpsRecord record) {
         received.incrementAndGet();
         try {
+            if (record.action() == AmpsRecord.Action.DELETE && !schema.keyed()) {
+                // Nothing to remove from: an append-only table forbids deletion and a blink or
+                // ring table has already let the row go. Counted, not published, so
+                // publishedRows keeps meaning "rows that reached Deephaven".
+                ignoredRemovals.incrementAndGet();
+                return;
+            }
             Map<String, String> fields = record.action() == AmpsRecord.Action.DELETE
                     ? decodeQuietly(record)
                     : decoder.decode(record.data());
@@ -196,6 +214,11 @@ public final class Connector implements AutoCloseable {
     /** Records that could not be decoded or mapped. */
     public long rejectedRecords() {
         return rejected.get();
+    }
+
+    /** Removals dropped because the target table has no keys to remove by. */
+    public long ignoredRemovals() {
+        return ignoredRemovals.get();
     }
 
     /** Rows successfully published to Deephaven. */

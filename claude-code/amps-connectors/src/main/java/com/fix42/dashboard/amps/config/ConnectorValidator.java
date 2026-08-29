@@ -97,19 +97,30 @@ public final class ConnectorValidator {
             }
         }
 
-        // A SOW topic is a keyed store; an update for a key must land on that key's row.
-        if (source.isSow() && !target.isKeyed()) {
-            errors.add(id + "source.sow=true requires deephaven.key-columns "
-                    + "(a SOW topic maps to a keyed table)");
+        // KEYED and key-columns imply each other: keys with nothing to key, or a keyed table
+        // with no keys, are both configurations with no meaning.
+        DeephavenTableType type = target.resolveTableType(source.isSow());
+        String because = target.getTableType() == null
+                ? " (source.sow=" + source.isSow() + " defaults deephaven.table-type to " + type + ")"
+                : "";
+        if (type.keyed() && !target.isKeyed()) {
+            errors.add(id + "deephaven.table-type=KEYED requires deephaven.key-columns" + because);
         }
-        // A journal topic has no keys: every message is a new row.
-        if (!source.isSow() && target.isKeyed()) {
-            errors.add(id + "source.sow=false must not set deephaven.key-columns "
-                    + "(a journal topic maps to an append-only table)");
+        if (!type.keyed() && target.isKeyed()) {
+            errors.add(id + "deephaven.key-columns is only meaningful for table-type=KEYED, "
+                    + "but this connector resolves to " + type + because);
         }
         // Merging a partial row requires somewhere to merge it into.
-        if (target.getPublishMode() == UpdateMode.DELTA && !target.isKeyed()) {
+        if (target.getPublishMode() == UpdateMode.DELTA && !type.keyed()) {
             errors.add(id + "deephaven.publish-mode=DELTA requires a keyed table");
+        }
+        // A blink table can only be written through the TablePublisher that created it, and the
+        // only thing that creates one is the bootstrap. Turning the bootstrap off leaves nothing
+        // able to publish, ever -- so say so now rather than on the first batch.
+        if (type.publisherBacked() && !target.isCreateIfMissing()) {
+            errors.add(id + "deephaven.table-type=" + type
+                    + " requires deephaven.create-if-missing, because the only way into a blink "
+                    + "table is the TablePublisher the bootstrap creates");
         }
         if (source.getSubscriptionMode() == UpdateMode.DELTA && !source.isSow()) {
             errors.add(id + "source.subscription-mode=DELTA requires a SOW topic");

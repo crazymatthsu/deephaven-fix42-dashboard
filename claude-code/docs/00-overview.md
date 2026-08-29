@@ -100,7 +100,7 @@ claude-code/
 │   ├── src/main/java/com/fix42/dashboard/fixcache/  # state machine (no deephaven imports)
 │   ├── src/main/java/com/fix42/dashboard/dh/        # publishers, DAG, query api, app entry
 │   └── parity/                 # regenerates the python-vs-java golden asserted by the tests
-├── amps-connectors/            # Spring Boot: AMPS topics -> Deephaven input tables (doc 07)
+├── amps-connectors/            # Spring Boot: AMPS topics -> Deephaven tables (doc 07)
 │   └── src/main/{java,resources}/  # connectors + application.yml
 ├── docker/                     # podman-compose stack: kafka (KRaft) + deephaven (+ui)
 │   └── apps/<name>/            # one folder per deephaven app; pick with DH_APP
@@ -130,5 +130,5 @@ claude-code/
 - [04 — Deephaven features & API survey](04-deephaven-features-api.md)
 - [05 — Implementation plan, build & testing](05-implementation-and-testing.md) *(module APIs, scenario catalog, demo runbook)*
 - [06 — State machine language choice: Python vs Java](06-state-machine-language-analysis.md) *(trade-offs + measured in-container throughput ceiling)*
-- [07 — AMPS connectors](07-amps-connectors.md) *(AMPS → Deephaven bridge: config model, SOW vs journal, delta handling, lifecycle)*
+- [07 — AMPS connectors](07-amps-connectors.md) *(AMPS → Deephaven bridge: config model, SOW vs journal, table types, delta handling, lifecycle)*
 - [08 — On-demand executions from AMPS](08-on-demand-executions-idea.md) *(**tabled idea, not a contract** — explored and set aside: two sources of truth, partial memory win)*

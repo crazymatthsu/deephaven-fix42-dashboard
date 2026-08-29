@@ -17,21 +17,56 @@ class ConnectorValidatorTest {
     }
 
     @Test
-    @DisplayName("a SOW topic must map to a keyed table")
+    void acceptsTheBlinkAndRingConnectors() {
+        assertThat(ConnectorValidator.validate(TestConnectors.jsonTicks())).isEmpty();
+        assertThat(ConnectorValidator.validate(TestConnectors.jsonTicksRing(5_000))).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a SOW topic defaults to KEYED, which needs key columns")
     void requiresKeyColumnsForSowTopics() {
         ConnectorProperties connector = TestConnectors.fixOrders();
         connector.getDeephaven().setKeyColumns(List.of());
         assertThat(ConnectorValidator.validate(connector))
-                .anyMatch(error -> error.contains("source.sow=true requires deephaven.key-columns"));
+                .anyMatch(error -> error.contains("table-type=KEYED requires deephaven.key-columns")
+                        && error.contains("source.sow=true defaults"));
     }
 
     @Test
-    @DisplayName("a journal topic must map to an append-only table")
+    @DisplayName("a journal topic defaults to APPEND_ONLY, which cannot have key columns")
     void rejectsKeyColumnsForJournalTopics() {
         ConnectorProperties connector = TestConnectors.jsonTrades();
         connector.getDeephaven().setKeyColumns(List.of("TradeID"));
         assertThat(ConnectorValidator.validate(connector))
-                .anyMatch(error -> error.contains("must not set deephaven.key-columns"));
+                .anyMatch(error -> error.contains("key-columns is only meaningful for "
+                        + "table-type=KEYED, but this connector resolves to APPEND_ONLY"));
+    }
+
+    @Test
+    @DisplayName("an explicit table-type overrides what the topic implies")
+    void allowsAKeyedTableOverAJournalTopic() {
+        ConnectorProperties connector = TestConnectors.jsonTrades();
+        connector.getDeephaven().setTableType(DeephavenTableType.KEYED);
+        connector.getDeephaven().setKeyColumns(List.of("TradeID"));
+        assertThat(ConnectorValidator.validate(connector)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a SOW topic may be rendered as a blink table, without keys")
+    void allowsABlinkTableOverASowTopic() {
+        ConnectorProperties connector = TestConnectors.fixOrders();
+        connector.getDeephaven().setTableType(DeephavenTableType.BLINK);
+        connector.getDeephaven().setKeyColumns(List.of());
+        assertThat(ConnectorValidator.validate(connector)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("keys on a table that has none is a configuration with no meaning")
+    void rejectsKeyColumnsOnABlinkTable() {
+        ConnectorProperties connector = TestConnectors.fixOrders();
+        connector.getDeephaven().setTableType(DeephavenTableType.RING);
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("resolves to RING"));
     }
 
     @Test
@@ -47,6 +82,29 @@ class ConnectorValidatorTest {
     void rejectsDeltaPublishIntoAnAppendOnlyTable() {
         ConnectorProperties connector = TestConnectors.jsonTrades();
         connector.getDeephaven().setPublishMode(UpdateMode.DELTA);
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("publish-mode=DELTA requires a keyed table"));
+    }
+
+    @Test
+    @DisplayName("a blink table with the bootstrap turned off could never be published into")
+    void rejectsPublisherBackedTypesWithoutCreateIfMissing() {
+        ConnectorProperties connector = TestConnectors.jsonTicks();
+        connector.getDeephaven().setCreateIfMissing(false);
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("table-type=BLINK requires deephaven.create-if-missing"));
+
+        ConnectorProperties inputTable = TestConnectors.jsonTrades();
+        inputTable.getDeephaven().setCreateIfMissing(false);
+        assertThat(ConnectorValidator.validate(inputTable)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("there is nowhere to merge a delta into a blink table either")
+    void rejectsDeltaPublishIntoABlinkTable() {
+        ConnectorProperties connector = TestConnectors.nvfixPositions();
+        connector.getDeephaven().setTableType(DeephavenTableType.BLINK);
+        connector.getDeephaven().setKeyColumns(List.of());
         assertThat(ConnectorValidator.validate(connector))
                 .anyMatch(error -> error.contains("publish-mode=DELTA requires a keyed table"));
     }

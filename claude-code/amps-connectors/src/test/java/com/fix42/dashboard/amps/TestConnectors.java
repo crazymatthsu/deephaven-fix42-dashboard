@@ -4,6 +4,7 @@ import com.fix42.dashboard.amps.config.AmpsSourceProperties;
 import com.fix42.dashboard.amps.config.ColumnType;
 import com.fix42.dashboard.amps.config.ConnectorProperties;
 import com.fix42.dashboard.amps.config.DeephavenTableProperties;
+import com.fix42.dashboard.amps.config.DeephavenTableType;
 import com.fix42.dashboard.amps.config.FieldMapping;
 import com.fix42.dashboard.amps.config.SourceFormat;
 import com.fix42.dashboard.amps.config.UpdateMode;
@@ -57,6 +58,27 @@ public final class TestConnectors {
                 field("symbol", "Symbol", ColumnType.STRING),
                 field("quantity", "Quantity", ColumnType.LONG),
                 field("execution.venue", "Venue", ColumnType.STRING)));
+        return connector;
+    }
+
+    /** A JSON connector over a journal topic, published into a blink table. */
+    public static ConnectorProperties jsonTicks() {
+        ConnectorProperties connector = base("ticks-json", SourceFormat.JSON, "Ticks", false);
+        connector.getDeephaven().setTable("amps_ticks");
+        connector.getDeephaven().setTableType(DeephavenTableType.BLINK);
+        connector.setFields(List.of(
+                field("symbol", "Symbol", ColumnType.STRING),
+                field("price", "Price", ColumnType.DOUBLE)));
+        return connector;
+    }
+
+    /** The same feed kept as a bounded tail instead: a ring table over the blink table. */
+    public static ConnectorProperties jsonTicksRing(int capacity) {
+        ConnectorProperties connector = jsonTicks();
+        connector.setName("ticks-json-ring");
+        connector.getDeephaven().setTable("amps_ticks_ring");
+        connector.getDeephaven().setTableType(DeephavenTableType.RING);
+        connector.getDeephaven().setRingCapacity(capacity);
         return connector;
     }
 

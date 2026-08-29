@@ -68,6 +68,10 @@ amps:
         simulated-keys: 25
       deephaven:
         table: amps_orders
+        # KEYED | APPEND_ONLY | BLINK | RING. Omitting it follows the topic -- KEYED for a
+        # SOW topic, APPEND_ONLY for a journal topic -- which is what this one would pick
+        # anyway; it is spelled out here because the choice is now yours to make.
+        table-type: KEYED
         publish-mode: FULL
         key-columns: [ClOrdID]
         ingest-timestamp-column: IngestTs
@@ -107,6 +111,7 @@ amps:
         simulated-keys: 12
       deephaven:
         table: amps_positions
+        table-type: KEYED          # required: a delta publish needs a row to merge into
         publish-mode: DELTA
         key-columns: [Account, Symbol]
         ingest-timestamp-column: IngestTs
@@ -151,6 +156,7 @@ amps:
         simulated-keys: 30
       deephaven:
         table: amps_trades
+        table-type: APPEND_ONLY
         publish-mode: FULL
         key-columns: []
         ingest-timestamp-column: IngestTs
@@ -166,3 +172,42 @@ amps:
         - { tag: price,             column: Price,     type: DOUBLE }
         - { tag: "execution.venue", column: Venue,     type: STRING }
         - { tag: tradeTime,         column: TradeTime, type: INSTANT }
+
+    # ---------------------------------------------------------------------------------
+    # The same journal topic shape, kept as a bounded tail instead of a growing log.
+    #
+    # RING publishes a ring_table over a blink table: the connector's rows go into the
+    # blink table through its TablePublisher, and only the latest `ring-capacity` of them
+    # are retained. Memory is bounded for real -- unlike a ring over an append-only input
+    # table, where the input table would go on holding every row underneath it.
+    #
+    # Use BLINK instead when nothing should be retained at all: downstream aggregations
+    # see each row exactly once, which is what a blink table is for.
+    # ---------------------------------------------------------------------------------
+    - name: ticks-json
+      enabled: true
+      format: JSON
+      source:
+        driver: ${amps-source-driver}
+        host: localhost
+        port: 9007
+        topic: Ticks
+        sow: false
+        subscription-mode: FULL
+        bookmark: epoch
+        simulated-rate: 40
+        simulated-keys: 50
+      deephaven:
+        table: amps_ticks
+        table-type: RING
+        ring-capacity: 5000        # rows retained; ignored by every other table type
+        publish-mode: FULL
+        key-columns: []            # a ring table has no keys, so this must stay empty
+        ingest-timestamp-column: IngestTs
+        max-batch-rows: 2000
+        flush-interval: 250ms
+      fields:
+        - { tag: symbol,   column: Symbol,   type: STRING }
+        - { tag: price,    column: Price,    type: DOUBLE }
+        - { tag: size,     column: Size,     type: LONG }
+        - { tag: tickTime, column: TickTime, type: INSTANT }

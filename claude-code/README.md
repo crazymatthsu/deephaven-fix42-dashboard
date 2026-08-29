@@ -17,7 +17,7 @@ DK trades) so the whole thing is reproducible from a cold start in about two min
   ┌───────────────────────────┐                    ┌───────────────────────────────────────────────┐
   │  fix-mock-generator       │  raw FIX 4.2       │  Deephaven server (python, app mode)          │
   │  Java 21 · Gradle         │  SOH tag=value     │                                               │
-  │                           │                    │   kc.consume(...)  ──►  fix_raw  (blink)      │
+  │                           │                    │   kc.consume / AMPS ──►  fix_raw  (blink)     │
   │  scenario engine          ├──► Kafka topic ───►│        │                                      │
   │  KafkaProducer CLI        │   fix42.messages   │        ▼  table listener (THE stateful node)  │
   │                           │   key = ChainKey   │   FixStateMachine  (fix42cache, pure python)  │
@@ -38,6 +38,12 @@ DK trades) so the whole thing is reproducible from a cold start in about two min
                                                    └───────────────────────────────────────────────┘
                                                               http://localhost:10000/ide
 ```
+
+`fix_raw` is fed by either Kafka or an AMPS transaction log, selected with
+`FIX42_SOURCE` — see [AMPS transaction log as the source](#amps-transaction-log-as-the-source-optional).
+Both replay their journal from the beginning on every boot, which is what makes a
+Deephaven restart rebuild the identical cache; nothing downstream can tell the
+difference, because the state-machine listener reads exactly one column, `RawFix`.
 
 Exactly one node in the graph is stateful. FIX chain resolution — amend chains
 (`ClOrdID → OrigClOrdID`), late-arriving `OrderID`, per-request reject reverts, `ExecID`
@@ -375,6 +381,74 @@ compose implementation ignores conditions, the Kafka consumer simply retries, an
 **Cache looks stale after a restart** — it rebuilds by replaying the topic from offset 0,
 which takes a moment on a large backlog. Watch row counts settle in `order_state_latest`.
 
+**`FIX42_SOURCE='...' is not a known source`** — the app refuses to start rather than
+falling back to Kafka. A deployment that meant to read AMPS and silently got Kafka would
+look perfectly healthy while rebuilding a cache from the wrong journal.
+
+**`ModuleNotFoundError: No module named 'AMPS'`** — `FIX42_SOURCE=amps` but the AMPS
+python client is not in the Deephaven image. Install it (see the section below); note a
+`pip install` into a running container does not survive `compose down`.
+
+**AMPS connects but no rows arrive** — the topic name or the filter does not match. The
+banner prints exactly what was subscribed, and every connection transition is logged:
+```bash
+podman logs fix42-deephaven | grep -E 'AMPS (subscribed|connection state)'
+```
+
+---
+
+## AMPS transaction log as the source (optional)
+
+The pipeline reads raw FIX from Kafka by default. Set `FIX42_SOURCE=amps` and it reads the
+same raw FIX from an AMPS transaction log instead — everything downstream is unchanged,
+because the state-machine listener only ever reads the `RawFix` column.
+
+```yaml
+# docker/docker-compose.yml, the deephaven service
+environment:
+  FIX42_SOURCE: "amps"
+  FIX42_AMPS_URI: "tcp://amps:9007/amps/fix"   # comma-separated for an HA pair
+  FIX42_AMPS_TOPIC: "fix42.messages"           # defaults to FIX42_TOPIC
+  FIX42_AMPS_BOOKMARK: "epoch"                 # epoch | now | most_recent | literal
+```
+
+The `epoch` bookmark is the AMPS analogue of Kafka's seek-to-beginning: the subscription
+replays the whole transaction log and then cuts over to live messages on that same
+subscription, so a restart deterministically rebuilds the cache exactly as the Kafka path
+does. Ordering comes from the transaction log's own sequence — a single total order per
+topic, which does not depend on how the publisher keyed anything. A mid-life disconnect
+resumes at the last bookmark instead of replaying, and the duplicates a resume can deliver
+are absorbed by the same `ExecID` dedupe and idempotent id binding the Kafka replay
+already relies on.
+
+Two prerequisites, neither of which the demo stack can supply:
+
+- **An AMPS server.** AMPS is commercial software with no public image, so `docker-compose.yml`
+  has no AMPS service. Point the URI at your own broker.
+- **The AMPS python client**, which is not in the Deephaven image. It is a commercial
+  binary wheel, published on PyPI for `manylinux` x86_64 and aarch64:
+  ```bash
+  podman exec fix42-deephaven pip install amps-python-client
+  ```
+  That does not survive a `compose down`; bake it into a derived image to keep it.
+
+This was verified against a live AMPS 5.3.5.135 broker: an `epoch` replay of a journalled
+`fix` topic rebuilt 25 executions and 7 orders, and a second cold start over the same
+journal produced a byte-identical cache. Two caveats worth knowing. AMPS `fix` messages
+arrive as **bodies only** — no `8=FIX.4.2` header, no `10=` checksum — which the lenient
+`fix42cache` parser handles by design. And the filter syntax was not exercised.
+
+Because the client is not bundled, `dh_app.ingest` and `dh_app.amps_ingest` import both
+`deephaven` and `AMPS` lazily — a Kafka deployment never touches the AMPS import, and
+source selection, configuration and the AMPS→update-graph hand-off stay unit-tested with
+neither installed (`deephaven-scripts/tests/test_ingest_source.py`).
+
+Design and contract: [docs/03-deephaven-dag.md §2.1](docs/03-deephaven-dag.md).
+
+> Not to be confused with the next section. **This** replaces where the FIX 4.2 pipeline
+> gets its raw messages. **`amps-connectors`** is a separate application that bridges
+> *other* AMPS topics into *their own* Deephaven tables, and does not touch this pipeline.
+
 ---
 
 ## AMPS connectors (optional)
@@ -420,7 +494,7 @@ claude-code/
 │   └── src/{main,test}/java/com/fix42/dashboard/gen/
 ├── deephaven-scripts/             # python module, gradle-wrapped pytest
 │   ├── src/fix42cache/            #   pure python: tags, parser, model, state machine
-│   ├── src/dh_app/                #   deephaven server scripts: ingest, dag, api, dashboard
+│   ├── src/dh_app/                #   deephaven server scripts: ingest (kafka|amps), dag, api, dashboard
 │   └── tests/                     #   pytest unit suite
 ├── amps-connectors/               # Spring Boot: AMPS topics -> Deephaven input tables
 │   ├── src/main/java/com/fix42/dashboard/amps/

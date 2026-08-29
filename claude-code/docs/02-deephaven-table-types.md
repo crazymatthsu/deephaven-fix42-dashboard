@@ -69,7 +69,7 @@ DAG uses and why.
 
 | Role in this project | Table type | Why |
 |---|---|---|
-| Kafka ingest `fix_raw` | **blink** | Unbounded stream; listener consumes each row once; no retention needed upstream of the state machine. |
+| Ingest `fix_raw` (Kafka `kc.consume`, or AMPS via `TablePublisher`) | **blink** | Unbounded stream; listener consumes each row once; no retention needed upstream of the state machine. Blink either way, so the source switch (doc 03 §2.1) changes nothing about memory. |
 | State-machine outputs (`order_state_blink`, `executions_blink`, `order_events_blink`, `fix_messages_blink`) | **blink** via `TablePublisher` | Imperative injection point; bounded memory; feeds both aggregations and append materializations. |
 | **Latest-state cache `order_state_latest`** | **`last_by("OrderKey")` over blink** | The core trick: per-key latest row retained by the aggregation (blink semantics), memory O(#orders), updates in-place per cycle — exactly "latest order state cache". |
 | Executions history `executions` | **append-only** (`blink_to_append_only`) | Panel scrolls full history; bust/correct/DK re-emissions preserved as an audit trail. |

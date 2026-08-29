@@ -36,7 +36,7 @@ Two implementation halves:
 | Half | Language | Role |
 |---|---|---|
 | `fix-mock-generator` | Java 21 (Gradle module) | Builds valid FIX 4.2 messages, generates realistic order lifecycles for every required scenario, publishes them to Kafka. |
-| `deephaven-scripts` | Python (Gradle-wrapped submodule) | `fix42cache` — pure-python FIX parser + order state machine (no Deephaven imports, unit-testable). `dh_app` — Deephaven server scripts: ingestion, DAG, query API, dashboard. |
+| `deephaven-scripts` | Python (Gradle-wrapped submodule) | `fix42cache` — pure-python FIX parser + order state machine (no Deephaven imports, unit-testable). `dh_app` — Deephaven server scripts: ingestion (Kafka or an AMPS transaction log, `FIX42_SOURCE`), DAG, query API, dashboard. |
 
 **Key architectural decision — hybrid DAG.** Deephaven's declarative table operations
 (`where`, `last_by`, joins, aggregations) cannot express FIX chain resolution
@@ -90,7 +90,7 @@ claude-code/
 ├── deephaven-scripts/          # python submodule (gradle-wrapped pytest)
 │   ├── pyproject.toml
 │   ├── src/fix42cache/         # pure python: tags, parser, model, state machine
-│   ├── src/dh_app/             # deephaven server scripts: ingest, dag, query api, dashboard
+│   ├── src/dh_app/             # deephaven server scripts: ingest (kafka|amps), dag, query api, dashboard
 │   └── tests/                  # pytest unit tests
 ├── amps-connectors/            # Spring Boot: AMPS topics -> Deephaven input tables (doc 07)
 │   └── src/main/{java,resources}/  # connectors + application.yml

@@ -47,12 +47,15 @@ amps:
   connectors:
     - name: orders-fix           # unique; also the default AMPS client name
       enabled: true
-      format: FIX                # FIX | NVFIX | JSON
+      format: FIX                # FIX | NVFIX | JSON | COMPOSITE
+      composite-parts: []        # COMPOSITE only: each part's format, in wire order (s5.3)
       source:
         driver: AMPS             # AMPS | SIMULATED
         host: localhost          # or an explicit `uri:`
         port: 9007
         transport: tcp
+        message-type: ""         # URI message type; defaults to the format's name. COMPOSITE
+                                 # requires it: the server-registered composite type name
         topic: Orders
         sow: true                # SOW topic (keyed) vs journal topic (append-only)
         subscription-mode: FULL  # FULL | DELTA
@@ -73,6 +76,11 @@ amps:
         - { tag: "11", column: ClOrdID, type: STRING }
         - { tag: "54", column: Side,    type: STRING, decode: SIDE }
         - { tag: "1",  column: Account, type: STRING, default-value: DUMMY }
+      explode:                   # optional: a row per member of an object field (s5.4)
+        tag: value
+        key-column: Symbol
+        fields:
+          - { tag: qty, column: Qty, type: DOUBLE }
 ```
 
 Bound by `AmpsConnectorsProperties` (`@ConfigurationProperties("amps")`) and validated at
@@ -353,6 +361,105 @@ A **key column may not have a default** (§7). Every record missing that key wou
 default and collapse onto one row of the table — the exact failure `TableSchema.rowKey` returns
 null to prevent (§5.1).
 
+## 5.3 Composite message types: `format: COMPOSITE`
+
+AMPS composite message types (`composite-local` / `composite-global` server modules) carry
+several length-prefixed **parts** in one message, each part of a constituent type — say JSON
+metadata alongside a FIX body. Two things make them different from every other format:
+
+- **The framing is binary** (a 4-byte length prefix per part), so `AmpsClientSubscriber` cannot
+  hand the payload on as one string. It unframes the message with the client's own
+  `CompositeMessageParser` — reading the raw message, not `getData()` — and delivers the parts
+  on `AmpsRecord.parts()`; `CompositeRecordDecoder` then decodes each part with the decoder for
+  its configured format.
+- **Tags are part-indexed**: `0.orderId` is part 0's `orderId`, `1.54` is part 1's FIX tag 54 —
+  deliberately the same addressing as the `/0/orderId` XPaths AMPS itself uses to filter and
+  SOW-key these topics. An **unprefixed** tag reads from the merged namespace (the first part
+  carrying it wins, the same first-writer rule as JSON's bare-name aliases), which is the
+  natural spelling against a `composite-global` topic — one merged namespace is exactly what
+  that module gives filters server-side. Both spellings work against both modules; the module
+  choice changes server-side filter/key semantics, not the connector's decoding.
+
+```yaml
+- name: orders-composite
+  format: COMPOSITE
+  composite-parts: [JSON, FIX]         # the server type's constituent list, in order
+  source:
+    message-type: composite-json-fix   # the server-REGISTERED name; goes in the URI
+    topic: orders.composite
+  fields:
+    - { tag: "0.orderId", column: OrderId, type: STRING }
+    - { tag: "1.54",      column: Side,    type: STRING, decode: SIDE }
+```
+
+`message-type` (or a full `uri`) is **required**: `composite` is a module, not an AMPS message
+type name — the URI has to name whatever the server config registered:
+
+```xml
+<MessageType>
+  <Name>composite-json-fix</Name>
+  <Module>composite-local</Module>
+  <MessageType>json</MessageType>
+  <MessageType>fix</MessageType>
+</MessageType>
+```
+
+Part-count mismatches are not errors, in either direction: a message with fewer parts than
+configured simply lacks those parts' fields (absent, like any field a payload omitted), and
+parts beyond the configured list are unmapped by definition — the field list is an allowlist.
+Everything downstream of the decoder — value shaping, delta, batching, all four table types —
+is format-agnostic and applies to composite connectors unchanged.
+
+## 5.4 One row per map entry: `explode`
+
+A JSON field that is itself a map with **dynamic keys** —
+
+```json
+{"key": "portfolio-1", "value": {"AAPL": {"qty": 250}, "MSFT": {"qty": 100}}}
+```
+
+— cannot be mapped by a static column list: the member names are data. (This is the "nested"
+map-of-maps representation; its flattened sibling — one record per `(outerKey, innerKey)` pair
+on a composite SOW key, as in amps-demo's `cache.nested.entries` — is already tabular and needs
+none of this.) `explode` publishes one Deephaven row per member:
+
+```yaml
+fields:
+  - { tag: key, column: OuterKey, type: STRING }   # repeats on every member row
+deephaven:
+  key-columns: [OuterKey, Symbol]                  # must include the explode key column
+explode:
+  tag: value             # the object whose members become rows; must resolve to JSON
+  key-column: Symbol     # the member's name
+  fields:                # resolved inside each member's value
+    - { tag: qty, column: Qty,      type: DOUBLE }
+    - { tag: ".", column: Position, type: STRING } # "." = the member value itself
+```
+
+Mechanically each member goes through the ordinary `FieldMapper` over an augmented copy of the
+decoded fields — the member name and its flattened value registered under synthetic tags only
+the explode columns read — so member rows get everything a plain row gets: `decode`/`values`
+rewrites, `default-value`, presence flags, key building. Member names are treated as data, never
+as paths: `"BRK.B"` is one member, not a nesting.
+
+**Deletion is the part that needs machinery.** On a keyed target, `RecordExploder` remembers
+which members each record last published (by AMPS SOW key when the topic has one, else by the
+record-level key columns):
+
+- a member missing from the record's next publish → that member's row is **deleted**
+- `"value": null` (an explicit clear) → **every** member row is deleted
+- the record leaving the SOW (`sow_delete`, out-of-focus) → every member row is deleted; if the
+  record was never tracked (a restart), the members named by the delete's own payload are used
+- a payload that omits the exploded field entirely → nothing changes, like any absent field
+
+The memory is per-connector, one entry per live record, cleared on every restart — the replay
+that follows rebuilds it. Non-keyed targets skip tracking entirely: nothing can be deleted from
+an append-only, blink or ring table anyway (§3.2).
+
+`explode` needs the **whole** record every time, so `subscription-mode: DELTA` is refused with
+it (§7): a delta that omitted the map would be indistinguishable from the map emptying. Delta
+*publishing* is fine — each member row merges independently under its own key.
+
 ## 6. Deephaven lifecycle → connector lifecycle
 
 > *"when starting or restarting deephaven server, it needs to start or restart AMPS connectors as
@@ -401,6 +508,16 @@ application with the full list rather than a stack trace:
 - `default-value` coerces to its column's type, and is not set on a key column
 - synthetic columns must not collide with mapped ones
 - at least one field mapping
+- `format: COMPOSITE` requires `composite-parts` (which must not nest `COMPOSITE`) and an
+  explicit `message-type` or `uri` — `composite` is a module, not a type name (§5.3);
+  `composite-parts` on any other format is refused as dead configuration
+- a part-indexed tag must name a declared part, and a tag into a `FIX` part must be a tag
+  number after its prefix
+- `explode` requires a JSON payload to enumerate (`format: JSON`, or `COMPOSITE` with the
+  exploded tag in a JSON part) and `subscription-mode: FULL` (§5.4); its `key-column` is an
+  identifier, collides with nothing, and — on a keyed table — appears in `key-columns`, since
+  member rows share every other key value; its fields follow the same tag/column/shaping rules
+  as ordinary mappings
 
 ## 8. How rows actually reach Deephaven
 
@@ -452,8 +569,8 @@ amps-connectors/
 └── src/main/java/com/fix42/dashboard/amps/
     ├── AmpsConnectorsApplication.java  # headless boot app (spring.main.keep-alive holds the JVM open)
     ├── config/                         # the application.yml model + ConnectorValidator
-    ├── decode/                         # RecordDecoder: delimited (fix/nvfix) + json
-    ├── mapping/                        # TableSchema, FieldMapper, MappedRow, DeltaRowMerger
+    ├── decode/                         # RecordDecoder: delimited (fix/nvfix) + json + composite
+    ├── mapping/                        # TableSchema, FieldMapper, MappedRow, DeltaRowMerger, RecordExploder
     ├── deephaven/                      # DeephavenGateway, FlightDeephavenGateway, TableBootstrapScript
     ├── source/                         # AmpsSubscriber: AmpsClientSubscriber + SimulatedAmpsSubscriber
     └── runtime/                        # Connector, ConnectorManager, RowBatcher, DeephavenLifecycleMonitor
@@ -484,12 +601,18 @@ built on it addressed only half of a two-entry table, and fired the omission on 
 none. `SimulatedAmpsSubscriberTest` drives a real replay rather than calling `encode` with values
 of its own choosing, because that correlation is invisible to a test that picks both.
 
+A `COMPOSITE` connector's mappings are routed to the part their index prefix names and each
+part is rendered in its own format, handed over unframed — the shape the real subscriber
+produces after `CompositeMessageParser`. An `explode` connector gets an object at its tag whose
+membership **shifts across ticks** (each candidate member sits out one tick in five), so the
+exploder's vanish-deletes run in the demo rather than only its upserts.
+
 That is what makes the `demo` profile and the end-to-end tests runnable with nothing but a
 Deephaven container. It is a test and demo affordance, not a production path.
 
 ## 11. Testing
 
-`./gradlew :amps-connectors:test` — 197 JUnit 5 tests, no servers required, plus 6 opt-in
+`./gradlew :amps-connectors:test` — 237 JUnit 5 tests, no servers required, plus 6 opt-in
 tests that need one (`LiveTableTypeTest`, below).
 
 | Suite | Covers |
@@ -497,6 +620,8 @@ tests that need one (`LiveTableTypeTest`, below).
 | `ColumnTypeTest` | alias parsing, coercion per type, the three timestamp encodings, blank-is-null |
 | `ConnectorValidatorTest` | every §7 rule, including the destructive DELTA/FULL combination |
 | `DelimitedRecordDecoderTest` / `JsonRecordDecoderTest` | delimiters, first-`=` split, dotted paths, explicit JSON null |
+| `CompositeRecordDecoderTest` / `CompositeWireRoundTripTest` | §5.3: part-indexed tags, bare aliases, part-count leniency; the 60East builder → parser framing contract the subscriber relies on |
+| `RecordExploderTest` | §5.4: member rows, `.` scalars, dotted member names, vanish/clear/OOF deletion, SOW-key vs key-column identity, unkeyed targets |
 | `TableSchemaTest` / `FieldMapperTest` | column order, allowlist behaviour, present-vs-null, composite keys |
 | `DeltaRowMergerTest` | merge, explicit clear, per-key independence, delete forgets the key |
 | `ValueShapingTest` | §5.2: decode, inline overrides, pass-through of unknown codes, defaults, and that a default seeds a delta's base row without ever clobbering it |

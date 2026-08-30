@@ -7,10 +7,12 @@ import com.fix42.dashboard.amps.deephaven.DeephavenGateway;
 import com.fix42.dashboard.amps.mapping.DeltaRowMerger;
 import com.fix42.dashboard.amps.mapping.FieldMapper;
 import com.fix42.dashboard.amps.mapping.MappedRow;
+import com.fix42.dashboard.amps.mapping.RecordExploder;
 import com.fix42.dashboard.amps.mapping.TableSchema;
 import com.fix42.dashboard.amps.source.AmpsRecord;
 import com.fix42.dashboard.amps.source.AmpsSubscriber;
 import java.time.Clock;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
@@ -35,6 +37,7 @@ public final class Connector implements AutoCloseable {
     private final TableSchema schema;
     private final RecordDecoder decoder;
     private final FieldMapper mapper;
+    private final RecordExploder exploder;
     private final DeltaRowMerger merger;
     private final RowBatcher batcher;
     private final DeephavenGateway gateway;
@@ -67,6 +70,9 @@ public final class Connector implements AutoCloseable {
         this.subscriberSupplier = subscriberSupplier;
         this.clock = clock;
         this.mapper = new FieldMapper(schema);
+        this.exploder = properties.getExplode() == null
+                ? null
+                : new RecordExploder(properties.getExplode(), schema, mapper);
         this.merger = properties.getDeephaven().getPublishMode() == UpdateMode.DELTA
                 ? new DeltaRowMerger(schema)
                 : null;
@@ -108,6 +114,9 @@ public final class Connector implements AutoCloseable {
         if (merger != null) {
             // The replay that follows is authoritative; anything remembered is from the last life.
             merger.clear();
+        }
+        if (exploder != null) {
+            exploder.clear();
         }
         batcher.discard();
         batcher.start();
@@ -175,17 +184,19 @@ public final class Connector implements AutoCloseable {
             }
             Map<String, String> fields = record.action() == AmpsRecord.Action.DELETE
                     ? decodeQuietly(record)
-                    : decoder.decode(record.data());
-            MappedRow row = mapper.map(record, fields, clock.instant());
-            if (merger != null) {
-                row = merger.merge(row);
+                    : decoder.decode(record);
+            List<MappedRow> rows = exploder != null
+                    ? exploder.explode(record, fields, clock.instant())
+                    : List.of(mapper.map(record, fields, clock.instant()));
+            for (MappedRow mapped : rows) {
+                MappedRow row = merger != null ? merger.merge(mapped) : mapped;
+                if (row.rowKey() == null && schema.keyed()) {
+                    rejected.incrementAndGet();
+                    log.debug("[{}] dropping record with no key value", properties.getName());
+                    continue;
+                }
+                batcher.submit(row);
             }
-            if (row.rowKey() == null && schema.keyed()) {
-                rejected.incrementAndGet();
-                log.debug("[{}] dropping record with no key value", properties.getName());
-                return;
-            }
-            batcher.submit(row);
         } catch (RuntimeException e) {
             long count = rejected.incrementAndGet();
             if (count <= 10 || count % 1_000 == 0) {
@@ -200,7 +211,7 @@ public final class Connector implements AutoCloseable {
      */
     private Map<String, String> decodeQuietly(AmpsRecord record) {
         try {
-            return decoder.decode(record.data());
+            return decoder.decode(record);
         } catch (RuntimeException e) {
             return Map.of();
         }

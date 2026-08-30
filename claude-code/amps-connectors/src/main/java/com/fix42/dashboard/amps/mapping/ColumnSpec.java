@@ -43,6 +43,21 @@ public record ColumnSpec(
      *     type -- deliberately at construction, so the problem surfaces at startup
      */
     public static ColumnSpec field(FieldMapping mapping) {
+        return field(mapping, mapping.getTag());
+    }
+
+    /**
+     * A column fed by a mapped payload field, read under a tag other than the configured one.
+     * {@code RecordExploder} uses this to resolve a member-relative mapping from the synthetic
+     * per-member tag it registers the value under.
+     *
+     * @param mapping the configured mapping
+     * @param sourceTag the tag to read the value from
+     * @return the resolved column
+     * @throws IllegalArgumentException if {@code default-value} does not coerce to the column
+     *     type -- deliberately at construction, so the problem surfaces at startup
+     */
+    public static ColumnSpec field(FieldMapping mapping, String sourceTag) {
         ColumnType type = mapping.getType();
         Object coercedDefault;
         try {
@@ -53,7 +68,7 @@ public record ColumnSpec(
             throw new IllegalArgumentException("column " + mapping.getColumn()
                     + ": default-value " + e.getMessage(), e);
         }
-        return new ColumnSpec(mapping.getColumn(), type, Origin.FIELD, mapping.getTag(),
+        return new ColumnSpec(mapping.getColumn(), type, Origin.FIELD, sourceTag,
                 mapping.resolveValueTable(), coercedDefault);
     }
 

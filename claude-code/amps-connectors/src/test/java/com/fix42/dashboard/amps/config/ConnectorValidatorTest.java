@@ -219,6 +219,117 @@ class ConnectorValidatorTest {
     }
 
     @Test
+    void acceptsTheCompositeAndExplodeExamples() {
+        assertThat(ConnectorValidator.validate(TestConnectors.compositeOrders())).isEmpty();
+        assertThat(ConnectorValidator.validate(TestConnectors.jsonPortfolios())).isEmpty();
+    }
+
+    @Test
+    void rejectsCompositeWithoutParts() {
+        ConnectorProperties connector = TestConnectors.compositeOrders();
+        connector.setCompositeParts(List.of());
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("format=COMPOSITE requires composite-parts"));
+    }
+
+    @Test
+    void rejectsNestedCompositeParts() {
+        ConnectorProperties connector = TestConnectors.compositeOrders();
+        connector.setCompositeParts(List.of(SourceFormat.JSON, SourceFormat.COMPOSITE));
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("cannot themselves be COMPOSITE"));
+    }
+
+    @Test
+    @DisplayName("'composite' is not an AMPS type name; the registered name must be given")
+    void requiresAMessageTypeForComposite() {
+        ConnectorProperties connector = TestConnectors.compositeOrders();
+        connector.getSource().setMessageType(null);
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("requires source.message-type"));
+
+        connector.getSource().setUri("tcp://localhost:9007/amps/my-composite");
+        assertThat(ConnectorValidator.validate(connector)).isEmpty();
+    }
+
+    @Test
+    void rejectsCompositePartsOnOtherFormats() {
+        ConnectorProperties connector = TestConnectors.jsonTrades();
+        connector.setCompositeParts(List.of(SourceFormat.JSON));
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("only meaningful for format=COMPOSITE"));
+    }
+
+    @Test
+    void rejectsATagBeyondTheDeclaredParts() {
+        ConnectorProperties connector = TestConnectors.compositeOrders();
+        connector.getFields().get(0).setTag("2.orderId");
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("references part 2")
+                        && error.contains("declares only 2"));
+    }
+
+    @Test
+    void rejectsANonNumericTagIntoAFixPart() {
+        ConnectorProperties connector = TestConnectors.compositeOrders();
+        connector.getFields().get(2).setTag("1.Side");
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("part 1 is FIX")
+                        && error.contains("'Side' is not a tag number"));
+    }
+
+    @Test
+    void rejectsExplodeOnADelimitedFormat() {
+        ConnectorProperties connector = TestConnectors.jsonPortfolios();
+        connector.setFormat(SourceFormat.NVFIX);
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("explode requires a JSON object"));
+    }
+
+    @Test
+    void rejectsExplodeUnderADeltaSubscription() {
+        ConnectorProperties connector = TestConnectors.jsonPortfolios();
+        connector.getSource().setSubscriptionMode(UpdateMode.DELTA);
+        connector.getDeephaven().setPublishMode(UpdateMode.DELTA);
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains(
+                        "explode requires source.subscription-mode=FULL"));
+    }
+
+    @Test
+    @DisplayName("a keyed explode target must key on the member name")
+    void requiresTheExplodeKeyColumnAmongTheKeys() {
+        ConnectorProperties connector = TestConnectors.jsonPortfolios();
+        connector.getDeephaven().setKeyColumns(List.of("OuterKey"));
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains(
+                        "key-columns must include explode.key-column 'Symbol'"));
+    }
+
+    @Test
+    void rejectsExplodeColumnCollisions() {
+        ConnectorProperties connector = TestConnectors.jsonPortfolios();
+        connector.getExplode().setKeyColumn("OuterKey");
+        connector.getDeephaven().setKeyColumns(List.of("OuterKey"));
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains(
+                        "explode.key-column 'OuterKey' collides"));
+    }
+
+    @Test
+    void explodeTagMustSitInAJsonPart() {
+        ConnectorProperties connector = TestConnectors.compositeOrders();
+        ExplodeProperties explode = new ExplodeProperties();
+        explode.setTag("1.value");
+        explode.setKeyColumn("Member");
+        connector.setExplode(explode);
+        connector.getDeephaven().setKeyColumns(List.of("OrderId", "Member"));
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("must sit in a JSON part")
+                        && error.contains("part 1 is FIX"));
+    }
+
+    @Test
     void rejectsDuplicateConnectorNames() {
         AmpsConnectorsProperties properties = new AmpsConnectorsProperties();
         properties.setConnectors(List.of(TestConnectors.fixOrders(), TestConnectors.fixOrders()));

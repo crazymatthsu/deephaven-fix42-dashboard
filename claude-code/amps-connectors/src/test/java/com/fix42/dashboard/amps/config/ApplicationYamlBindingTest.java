@@ -28,7 +28,8 @@ class ApplicationYamlBindingTest {
     @Test
     void bindsEveryExampleConnector() {
         assertThat(properties.getConnectors()).extracting(ConnectorProperties::getName)
-                .containsExactly("orders-fix", "positions-nvfix", "trades-json", "ticks-json");
+                .containsExactly("orders-fix", "positions-nvfix", "trades-json", "ticks-json",
+                        "portfolios-json", "orders-composite");
     }
 
     @Test
@@ -113,6 +114,34 @@ class ApplicationYamlBindingTest {
         assertThat(connector.getDeephaven().getRingCapacity()).isEqualTo(5_000);
         assertThat(connector.getDeephaven().getKeyColumns()).isEmpty();
         assertThat(TableSchema.of(connector).tableType().publisherBacked()).isTrue();
+    }
+
+    @Test
+    @DisplayName("the explode example keys on the member name and maps inside its value")
+    void bindsTheExplodeConnector() {
+        ConnectorProperties connector = connector("portfolios-json");
+        ExplodeProperties explode = connector.getExplode();
+        assertThat(explode).isNotNull();
+        assertThat(explode.getTag()).isEqualTo("value");
+        assertThat(explode.getKeyColumn()).isEqualTo("Symbol");
+        assertThat(explode.getFields()).extracting(FieldMapping::getTag)
+                .containsExactly("qty", "px", ".");
+        assertThat(connector.getDeephaven().getKeyColumns())
+                .containsExactly("OuterKey", "Symbol");
+        assertThat(TableSchema.of(connector).columns()).hasSize(6);
+    }
+
+    @Test
+    @DisplayName("the composite example names its parts and its server-registered type")
+    void bindsTheCompositeConnector() {
+        ConnectorProperties connector = connector("orders-composite");
+        assertThat(connector.getFormat()).isEqualTo(SourceFormat.COMPOSITE);
+        assertThat(connector.getCompositeParts())
+                .containsExactly(SourceFormat.JSON, SourceFormat.FIX);
+        assertThat(connector.getSource().getMessageType()).isEqualTo("composite-json-fix");
+        assertThat(connector.getSource().resolveUri(connector.getFormat()))
+                .isEqualTo("tcp://localhost:9007/amps/composite-json-fix");
+        assertThat(fieldFor(connector, "1.54").getDecode()).isEqualTo(FixValueDecode.SIDE);
     }
 
     @Test

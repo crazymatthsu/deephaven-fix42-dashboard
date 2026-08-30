@@ -54,7 +54,7 @@ podman run -d --name dh -p 10000:10000 \
 
 ## Configure
 
-The shipped `src/main/resources/application.yml` is a worked example of all three formats and
+The shipped `src/main/resources/application.yml` is a worked example of all four formats and
 four table types:
 
 | Connector | Format | AMPS topic | Deephaven table |
@@ -63,6 +63,8 @@ four table types:
 | `positions-nvfix` | NVFIX, **delta** subscription and publish | `Positions` (SOW) | `amps_positions`, **keyed** on `Account`+`Symbol` |
 | `trades-json` | JSON, from the `epoch` bookmark | `Trades` (journal) | `amps_trades`, **append-only** |
 | `ticks-json` | JSON, from the `epoch` bookmark | `Ticks` (journal) | `amps_ticks`, **ring**, 5 000 rows |
+| `portfolios-json` | JSON with **`explode`**: a row per map entry | `cache.entries` (SOW) | `amps_portfolios`, **keyed** on `OuterKey`+`Symbol` |
+| `orders-composite` | **COMPOSITE** (`[JSON, FIX]` parts), part-indexed tags | `orders.composite` (SOW) | `amps_composite`, **keyed** on `OrderId` |
 
 ### Table types
 
@@ -133,6 +135,23 @@ clear), and a **key column** may not have one, since every record missing the ke
 share the default and collapse onto a single row.
 
 Full reference: [docs 07 §5.2](../docs/07-amps-connectors.md).
+
+### Composite message types
+
+`format: COMPOSITE` subscribes to an AMPS composite message type (`composite-local` /
+`composite-global`): one message, several length-prefixed parts, each of a constituent format
+listed in `composite-parts`. Tags are part-indexed — `0.orderId`, `1.54` — the same addressing
+as the `/0/orderId` XPaths AMPS filters and SOW keys use; an unprefixed tag reads the merged
+namespace, the natural spelling for `composite-global`. `source.message-type` must name the
+type the **server** registers (it goes in the connection URI). [Docs 07 §5.3](../docs/07-amps-connectors.md).
+
+### A row per map entry
+
+`explode` renders a map with dynamic keys — `{"key": "portfolio-1", "value": {"AAPL": {...},
+"MSFT": {...}}}` — as one Deephaven row per member: the member name lands in `key-column`, the
+explode `fields` resolve inside the member's value (`"."` is the value itself), and on a keyed
+table the connector deletes rows for members that vanish from a republished record, for a
+`"value": null` clear, and for records leaving the SOW. [Docs 07 §5.4](../docs/07-amps-connectors.md).
 
 To key on the SOW key AMPS assigns — the case for a topic with a `KeyGenerator`, where the key
 cannot be rebuilt from the record body — name the SOW key column in `key-columns`:

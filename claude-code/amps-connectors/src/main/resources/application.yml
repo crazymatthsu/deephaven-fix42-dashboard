@@ -234,3 +234,96 @@ amps:
         - { tag: price,    column: Price,    type: DOUBLE }
         - { tag: size,     column: Size,     type: LONG }
         - { tag: tickTime, column: TickTime, type: INSTANT }
+
+    # ---------------------------------------------------------------------------------
+    # A map of maps, exploded: one Deephaven row per inner entry.
+    #
+    # The record is the "nested" cache shape -- amps-demo's cache.entries with a map-valued
+    # /value ({"key": "portfolio-1", "value": {"AAPL": {...}, "MSFT": {...}}}) -- whose
+    # member names are data, so no static field list can name them. `explode` walks the
+    # object at its tag and publishes one row per member: the ordinary fields repeat on
+    # every row, the member's name lands in `key-column`, and the explode fields resolve
+    # inside the member's value (`.` is the member value itself).
+    #
+    # On this keyed table the connector also remembers each record's members: a member
+    # missing from a republished record deletes its row, and a record leaving the SOW
+    # (sow_delete, out-of-focus) deletes all of its rows.
+    #
+    # The flattened alternative needs none of this: a topic like cache.nested.entries,
+    # one record per (outerKey, innerKey) pair on a composite SOW key, is already tabular
+    # -- map outerKey/innerKey/value.* directly and key on [OuterKey, InnerKey].
+    # ---------------------------------------------------------------------------------
+    - name: portfolios-json
+      enabled: true
+      format: JSON
+      source:
+        driver: ${amps-source-driver}
+        host: localhost
+        port: 9007
+        topic: cache.entries
+        sow: true
+        subscription-mode: FULL      # explode needs whole records; a delta may omit the map
+        simulated-rate: 8
+        simulated-keys: 6
+      deephaven:
+        table: amps_portfolios
+        table-type: KEYED
+        publish-mode: FULL
+        key-columns: [OuterKey, Symbol]   # must include explode.key-column
+        ingest-timestamp-column: IngestTs
+        flush-interval: 250ms
+      fields:
+        - { tag: key, column: OuterKey, type: STRING }
+      explode:
+        tag: value                   # the object whose members become rows
+        key-column: Symbol           # the member's name
+        fields:                      # resolved inside each member's value
+          - { tag: qty, column: Qty,      type: DOUBLE }
+          - { tag: px,  column: Px,       type: DOUBLE }
+          - { tag: ".", column: Position, type: STRING }   # the member value, as JSON text
+
+    # ---------------------------------------------------------------------------------
+    # An AMPS composite message type: one message, several length-prefixed parts.
+    #
+    # The server registers the type (composite-local or composite-global module) under a
+    # name of its own, e.g.
+    #     <MessageType>
+    #       <Name>composite-json-fix</Name>
+    #       <Module>composite-local</Module>
+    #       <MessageType>json</MessageType>
+    #       <MessageType>fix</MessageType>
+    #     </MessageType>
+    # and that registered name -- not "composite" -- goes in `message-type`, because it is
+    # part of the connection URI. `composite-parts` mirrors the constituent list, and tags
+    # become part-indexed: `0.orderId` is part 0's orderId, `1.54` is part 1's tag 54 --
+    # the same addressing as the /0/orderId XPaths AMPS filters and SOW keys use. An
+    # unprefixed tag reads from the merged namespace (first part carrying it wins), which
+    # matches how a composite-global topic is filtered.
+    # ---------------------------------------------------------------------------------
+    - name: orders-composite
+      enabled: true
+      format: COMPOSITE
+      composite-parts: [JSON, FIX]
+      source:
+        driver: ${amps-source-driver}
+        host: localhost
+        port: 9007
+        message-type: composite-json-fix   # the server's registered type name (goes in the URI)
+        topic: orders.composite
+        sow: true
+        subscription-mode: FULL
+        simulated-rate: 10
+        simulated-keys: 8
+      deephaven:
+        table: amps_composite
+        table-type: KEYED
+        publish-mode: FULL
+        key-columns: [OrderId]
+        ingest-timestamp-column: IngestTs
+        flush-interval: 250ms
+      fields:
+        - { tag: "0.orderId", column: OrderId, type: STRING }
+        - { tag: "0.account", column: Account, type: STRING }
+        - { tag: "1.54",      column: Side,    type: STRING, decode: SIDE }
+        - { tag: "1.38",      column: Qty,     type: DOUBLE }
+        - { tag: "1.44",      column: Price,   type: DOUBLE }

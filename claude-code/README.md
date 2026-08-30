@@ -585,8 +585,10 @@ map into Deephaven tables in the same server — so they appear in the IDE along
 `order_state_latest`. One application runs one or more connectors, all configured in
 `application.yml`.
 
-- **Formats** — `FIX`, `NVFIX` and `JSON`, each with its own tag → column → type mapping. The
-  mapping is an allowlist: an unmapped field is never published.
+- **Formats** — `FIX`, `NVFIX`, `JSON` and `COMPOSITE` (AMPS composite message types:
+  multi-part messages addressed with part-indexed tags such as `0.orderId`), each with its own
+  tag → column → type mapping. The mapping is an allowlist: an unmapped field is never
+  published.
 - **Readable values** — `decode: SIDE` publishes `54=1` as `BUY` from the built-in FIX 4.2
   tables, `values: {...}` rewrites inline for a feed they do not cover, and `default-value`
   fills a column the payload leaves out.
@@ -597,6 +599,8 @@ map into Deephaven tables in the same server — so they appear in the IDE along
   append-only for a journal topic.
 - **Delta** subscriptions and delta publishing, so a partial AMPS update merges over the stored
   row instead of blanking the columns it omits.
+- **A row per map entry** — `explode` renders an object-valued field with dynamic keys (a map,
+  or a map of maps) as one row per member, deleting rows for members that vanish.
 - **Restarting Deephaven restarts the connectors.** A poll detects the new server, re-creates the
   tables and replays every subscription from the start, rehydrating the tables.
 

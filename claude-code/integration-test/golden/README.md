@@ -79,13 +79,24 @@ where `RootClOrdID != ClOrdID` has been amended, and both ids must resolve throu
 
 ## Rerun semantics
 
-The topic is the journal and the pipeline is replay-idempotent (doc 03 §3.3). Rerunning
-the generator with the same seed republishes the same chain keys, and the cache
-converges to the same rows rather than double-counting. Consequently the assertions
-match on **expected keys**, never on total row counts — `status_summary` is checked for
-internal consistency against `order_state_latest` and for being a superset of the
-expected chains.
+Replay idempotence (doc 03 §3.3) is about re-*reading* the journal: the cache is a pure
+function of the records on the topic, so restarting Deephaven rebuilds it exactly. That is
+not the same as re-*publishing*. The generator restarts its venue-side counters
+(`ORD-0001`, `EXEC-000001`, …) on every invocation, so a second run's messages carry chain
+keys that already exist in the journal — the state machine folds both batches into one
+chain, and `expected-*.json` only ever describes the newest batch:
 
-Rerunning with a *different* `--seed` or `--orders` without `podman compose down -v`
-leaves the earlier chains in the topic, so the cache legitimately holds more orders
-than the newest `expected-*.json` describes. That is why the count check is `>=`.
+```
+ORD-0001: CumQty expected 500.0 got 3300.0
+ORD-0003: OrdStatus expected 'FILLED' got 'PENDING_REPLACE'
+```
+
+`run_integration.sh` therefore empties `fix42.messages` and restarts Deephaven before it
+generates, so a run asserts against exactly the batch it just published — including
+`KEEP_STACK=1` reruns against a stack that has been up for days. `RESET_TOPIC=0` skips the
+reset and refuses to start against a dirty topic rather than producing the diff above.
+
+The assertions still match on **expected keys**, never on total row counts —
+`status_summary` is checked for internal consistency against `order_state_latest` and for
+being a superset of the expected chains. That keeps a chain published into the topic by
+hand from breaking the run, which is why the count check is `>=`.

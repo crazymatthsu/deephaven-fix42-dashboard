@@ -188,15 +188,22 @@ source selection, AMPS config and the AMPS→update-graph hand-off *are* unit-te
 `run_integration.sh` + `test_e2e.py` (pytest, `pydeephaven`, `kafka-python` optional):
 
 1. `podman compose up -d --wait` (or docker compose; auto-detect).
-2. `./gradlew :fix-mock-generator:run --args="--seed 42 --orders 12 --rate 200"`.
-3. Poll `order_state_latest` via pydeephaven until row count stable ≥ expected chains.
-4. Assert (seed-42 expectations exported by the generator as
+2. **Empty `fix42.messages`** — delete + re-create with 3 partitions, then restart the
+   deephaven container so `kc.consume` re-resolves them. The generator restarts its
+   venue-side counters at `ORD-0001` on every invocation and the consumer replays from
+   offset 0, so a batch left on the topic by an earlier run folds into this run's chains
+   while `--emit-expected` describes only the new batch — a false failure that reads like
+   a state-machine bug. Skipped when the topic is already empty (the usual `down -v`
+   path costs nothing); `RESET_TOPIC=0` refuses to run against a dirty topic instead.
+3. `./gradlew :fix-mock-generator:run --args="--seed 42 --orders 12 --rate 200"`.
+4. Poll `order_state_latest` via pydeephaven until row count stable ≥ expected chains.
+5. Assert (seed-42 expectations exported by the generator as
    `--dry-run --emit-expected expected.json` or a checked-in golden file):
    per-order final `OrdStatus`, `CumQty`, `LeavesQty`; a busted exec has
    `FillStatus=BUSTED` in `executions_latest`; `clordid_index` resolves an amended
    chain's first ClOrdID; query API globals exist.
-5. Restart deephaven container → poll again → identical cache (replay idempotence).
-6. `podman compose down -v` (flag to keep up: `KEEP_STACK=1`).
+6. Restart deephaven container → poll again → identical cache (replay idempotence).
+7. `podman compose down -v` (flag to keep up: `KEEP_STACK=1`).
 
 Marked/skipped cleanly when podman or the stack is unavailable (CI-friendly).
 

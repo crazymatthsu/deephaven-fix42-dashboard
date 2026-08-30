@@ -269,13 +269,15 @@ cd integration-test
 ```
 
 It detects the compose implementation, starts the podman machine if needed, waits for
-Deephaven to serve, builds a client venv (`.venv-it`), runs the generator with
+Deephaven to serve, empties `fix42.messages` if an earlier run left messages on it (see
+*Rerun semantics* below), builds a client venv (`.venv-it`), runs the generator with
 `--seed 42 --orders 12 --emit-expected`, then runs `pytest`.
 
 ```bash
 KEEP_STACK=1 ./run_integration.sh    # leave the stack up to poke at afterwards
 SEED=7 ORDERS=30 ./run_integration.sh
 PYTEST_ARGS="-k restart" ./run_integration.sh
+RESET_TOPIC=0 ./run_integration.sh   # never touch the topic; abort if it is dirty
 ```
 
 What it asserts ([docs/05](docs/05-implementation-and-testing.md#6-integration-test-integration-test)):
@@ -298,11 +300,19 @@ The suite **skips** (never fails) when the stack is unreachable or the expected 
 missing, so it is safe to run in CI without containers. Details on the expected-data
 contract: [integration-test/golden/README.md](integration-test/golden/README.md).
 
-> **Rerun semantics.** The pipeline is idempotent by design, so rerunning without
-> `down -v` replays the same chain keys and converges to the same rows rather than
-> double-counting. Assertions therefore match on **expected keys**, never on total row
-> counts. Rerunning with a *different* `--seed` leaves the older chains in the topic, so
-> the cache legitimately holds more orders than the newest expected file describes.
+> **Rerun semantics.** Replay idempotence is about re-*reading* the journal: restart
+> Deephaven and the same records rebuild the same cache (assertion 6 above). It does not
+> make a second *publish* a no-op. The generator restarts its venue-side counters at
+> `ORD-0001` on every invocation, so publishing onto a topic that still holds an earlier
+> batch folds both batches into one chain while `--emit-expected` describes only the new
+> one — and the run fails with mismatches that read like a state-machine bug
+> (`ORD-0001: CumQty expected 500.0 got 3300.0`). `run_integration.sh` therefore empties
+> the topic and restarts Deephaven before generating, which is what makes a `KEEP_STACK=1`
+> rerun against a long-lived stack hermetic; it is skipped when the topic is already
+> empty, so the default `down -v` path costs nothing. `RESET_TOPIC=0` skips the reset and
+> aborts on a dirty topic instead. Assertions still match on **expected keys**, never on
+> total row counts, so a chain published into the topic by hand is tolerated rather than
+> fatal.
 
 ---
 

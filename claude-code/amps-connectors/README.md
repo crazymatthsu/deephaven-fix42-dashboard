@@ -125,6 +125,54 @@ podman run -d --name dh -p 10000:10000 \
 ./gradlew :amps-connectors:test --tests '*LiveTableTypeTest' -Damps.live=true
 ```
 
+### Running suites manually
+
+Add `--rerun` whenever you re-run by hand: without it Gradle sees nothing changed and skips
+the task as up-to-date, which looks like the tests passed instantly when in fact nothing ran.
+
+One feature at a time, by suite:
+
+```bash
+# Composite message types: part-indexed decoding, and the 60East builder -> parser
+# framing contract the subscriber relies on
+./gradlew :amps-connectors:test --rerun --tests '*CompositeRecordDecoderTest' --tests '*CompositeWireRoundTripTest'
+```
+
+```bash
+# explode: member rows, '.' scalars, dotted member names, vanish/clear/OOF deletion
+./gradlew :amps-connectors:test --rerun --tests '*RecordExploderTest'
+```
+
+```bash
+# The configuration rules, the simulator's composite/explode payloads, and that the
+# shipped application.yml binds and validates
+./gradlew :amps-connectors:test --rerun --tests '*ConnectorValidatorTest' --tests '*SimulatedAmpsSubscriberTest' --tests '*ApplicationYamlBindingTest'
+```
+
+The HTML report lands at `amps-connectors/build/reports/tests/test/index.html`.
+
+There is no AMPS-side live suite to ask for — AMPS has no public image — which is why the
+wire-level facts are pinned where they can be: `CompositeWireRoundTripTest` exercises the real
+60East client's framing, and everything downstream runs against the simulator.
+
+### Watching it instead of asserting it
+
+The demo profile runs the full pipeline against nothing but the Deephaven container above:
+
+```bash
+./gradlew :amps-connectors:bootRun --args="--spring.profiles.active=demo"
+```
+
+Then open http://localhost:10000/ide and watch:
+
+- **`amps_composite`** — one row per key, `OrderId`/`Account` from the JSON part joined with
+  `Side`/`Qty`/`Price` from the FIX part, `Side` showing decoded names (`BUY`, `SELL_SHORT`,
+  ...) rather than wire codes.
+- **`amps_portfolios`** — one row per map member, member names in `Symbol`, `Position`
+  carrying the member value as JSON text. The simulator shifts membership across ticks, so
+  rows for a given `OuterKey` appear *and disappear* — the disappearances are the exploder's
+  vanish-deletes running, the part a screenshot cannot show.
+
 ## Configure
 
 The shipped `src/main/resources/application.yml` is a worked example of all four formats and

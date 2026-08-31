@@ -8,6 +8,79 @@ Design and contract: [../docs/07-amps-connectors.md](../docs/07-amps-connectors.
 
 ---
 
+## Architecture and data flow
+
+One connector = one AMPS subscription = one Deephaven table. Everything between the two ends is
+format-agnostic: the wire format only decides how a payload becomes `tag → value`, and the table
+type only decides what the rows land in — so any format can feed any table type.
+
+```mermaid
+flowchart LR
+    subgraph AMPS["AMPS server — source.topic + source.sow"]
+        direction TB
+        SOW["SOW topic (sow: true)<br/>state of the world: last record per SOW key<br/>replayed with sow_and_subscribe (+OOF, so<br/>deletes and filter-exits arrive as out-of-focus)"]
+        JRN["journal topic (sow: false)<br/>transaction log, no SOW<br/>subscribe from the epoch bookmark:<br/>every restart replays everything"]
+    end
+
+    subgraph FMT["AMPS data type — format: (how one payload reads)"]
+        direction TB
+        FIX["FIX<br/>tag=value pairs, SOH-delimited<br/>tags are FIX tag numbers: 54=1<br/>built-in decode tables turn codes into names"]
+        NVFIX["NVFIX<br/>Name=value pairs in FIX framing<br/>tags are field names: Side=1"]
+        JSONF["JSON<br/>one object; tags are names or dotted paths<br/>(execution.venue); a nested object is also<br/>addressable whole, as its JSON text"]
+        COMP["COMPOSITE (composite-local / composite-global)<br/>several length-prefixed parts, each of a constituent<br/>format listed in composite-parts: [JSON, FIX]<br/>part-indexed tags: 0.orderId, 1.54 — like AMPS's own<br/>/0/orderId XPaths; a bare tag reads the merged<br/>namespace, first part wins (the composite-global spelling)"]
+    end
+
+    SUB["AmpsClientSubscriber (HAClient:<br/>reconnect + resubscribe survive AMPS restarts)<br/>or SimulatedAmpsSubscriber (demo profile)<br/>COMPOSITE: CompositeMessageParser unframes the<br/>raw message — the binary length prefixes do not<br/>survive as a string"]
+
+    DEC["RecordDecoder<br/>payload → tag → raw value<br/>a key present means the payload carried the field:<br/>absent ≠ empty, which is what delta correctness rides on"]
+
+    MAP["FieldMapper — the allowlist<br/>only mapped tags are published<br/>type coercion per column, plus value shaping:<br/>decode: SIDE (54=1 → BUY) · values: inline rewrites<br/>default-value when the field is absent"]
+
+    EXPL["RecordExploder (optional — explode:)<br/>an object with dynamic keys → one row per member<br/>member name → key-column, '.' = the member value<br/>remembers each record's members: a vanished member,<br/>a null value, or the record leaving the SOW → row deletes"]
+
+    MRG["DeltaRowMerger (optional — publish-mode: DELTA)<br/>partial update merged over the last full row for its key,<br/>so omitted columns keep their stored values"]
+
+    BAT["RowBatcher<br/>flush by max-batch-rows or flush-interval<br/>upserts and deletes, in arrival order"]
+
+    GW["FlightDeephavenGateway<br/>Arrow Flight + generated python bootstrap<br/>creates the table if missing, refuses to adopt a<br/>table whose columns, types or keys disagree"]
+
+    subgraph DH["Deephaven table type — deephaven.table-type"]
+        direction TB
+        KEYED["KEYED — input_table(key_cols=…)<br/>one row per key: an add is an upsert<br/>the only type with removal, so the only target for<br/>OOF / sow_delete, explode's deletes, DELTA merges<br/>default for SOW topics"]
+        AO["APPEND_ONLY — input_table()<br/>every row kept forever: audit / history shape<br/>removals are ignored (counted, not published)<br/>default for journal topics"]
+        BLINK["BLINK — table_publisher()<br/>rows live for one update-graph cycle, then vanish<br/>downstream aggregations see each row exactly once<br/>bounded memory"]
+        RING["RING — ring_table(blink, ring-capacity)<br/>the last ring-capacity rows of the stream<br/>bounded for real: nothing upstream retains the rows"]
+    end
+
+    SOW --> SUB
+    JRN --> SUB
+    SUB --> DEC
+    FMT -. "format: selects the decoder" .-> DEC
+    DEC --> MAP
+    MAP --> EXPL
+    EXPL --> MRG
+    MRG --> BAT
+    BAT --> GW
+    GW -->|"addToInputTable / delete rows"| KEYED
+    GW -->|"addToInputTable"| AO
+    GW -->|"TablePublisher.add"| BLINK
+    GW -->|"TablePublisher.add"| RING
+```
+
+Reading the two ends against each other:
+
+- **Any format can feed any table type** — the middle of the pipeline never asks which format
+  produced the fields, and never asks which table type will receive the row.
+- **The `sow` flag and the table type are independent choices.** Left unset, `table-type`
+  follows the topic (SOW → `KEYED`, journal → `APPEND_ONLY`); set it to override — a SOW topic
+  rendered as `BLINK` is a live view of updates rather than of state, a journal topic as `RING`
+  is a bounded tail of the log.
+- **Removal only exists on `KEYED`**, which is why everything that deletes — out-of-focus
+  messages, `sow_delete`, `explode`'s vanished members, `DELTA` merging — requires it.
+- **`BLINK`/`RING` go through a different publish path** (a server-side `TablePublisher`, not an
+  input table), which is why they require `create-if-missing`: the bootstrap is the only thing
+  that can create their publisher.
+
 ## Run
 
 Against a Deephaven server on `localhost:10000` with a real AMPS server on `localhost:9007`:
@@ -41,7 +114,7 @@ Any setting can be overridden on the command line, e.g. a Deephaven on another p
 ./gradlew :amps-connectors:test
 ```
 
-197 tests, no AMPS server and no Deephaven server required. Six more check the generated
+237 tests, no AMPS server and no Deephaven server required. Six more check the generated
 python against a real server and are skipped unless you ask for them:
 
 ```bash

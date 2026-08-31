@@ -67,7 +67,7 @@ class JsonRecordDecoderTest {
     @Test
     void handlesEmptyAndNullPayloads() {
         assertThat(decoder.decode("")).isEmpty();
-        assertThat(decoder.decode(null)).isEmpty();
+        assertThat(decoder.decode((String) null)).isEmpty();
     }
 
     @Test

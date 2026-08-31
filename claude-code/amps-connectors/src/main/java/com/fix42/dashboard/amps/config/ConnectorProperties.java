@@ -26,6 +26,13 @@ public class ConnectorProperties {
     @NotNull
     private SourceFormat format = SourceFormat.FIX;
 
+    /**
+     * For {@code format: COMPOSITE}: the constituent format of each part, in the order the
+     * server's composite message type declares them. Field tags are then part-indexed
+     * ({@code 0.orderId}), with unprefixed tags reading from the first part that carries them.
+     */
+    private List<SourceFormat> compositeParts = new ArrayList<>();
+
     @Valid
     @NotNull
     private AmpsSourceProperties source = new AmpsSourceProperties();
@@ -38,6 +45,10 @@ public class ConnectorProperties {
     @Valid
     @NotEmpty
     private List<FieldMapping> fields = new ArrayList<>();
+
+    /** Optional: publish one row per member of an object-valued field (doc 07 section 5.4). */
+    @Valid
+    private ExplodeProperties explode;
 
     public String getName() {
         return name;
@@ -79,12 +90,28 @@ public class ConnectorProperties {
         this.deephaven = deephaven;
     }
 
+    public List<SourceFormat> getCompositeParts() {
+        return compositeParts;
+    }
+
+    public void setCompositeParts(List<SourceFormat> compositeParts) {
+        this.compositeParts = compositeParts == null ? new ArrayList<>() : compositeParts;
+    }
+
     public List<FieldMapping> getFields() {
         return fields;
     }
 
     public void setFields(List<FieldMapping> fields) {
         this.fields = fields == null ? new ArrayList<>() : fields;
+    }
+
+    public ExplodeProperties getExplode() {
+        return explode;
+    }
+
+    public void setExplode(ExplodeProperties explode) {
+        this.explode = explode;
     }
 
     @Override

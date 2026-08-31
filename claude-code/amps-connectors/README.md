@@ -8,6 +8,79 @@ Design and contract: [../docs/07-amps-connectors.md](../docs/07-amps-connectors.
 
 ---
 
+## Architecture and data flow
+
+One connector = one AMPS subscription = one Deephaven table. Everything between the two ends is
+format-agnostic: the wire format only decides how a payload becomes `tag → value`, and the table
+type only decides what the rows land in — so any format can feed any table type.
+
+```mermaid
+flowchart LR
+    subgraph AMPS["AMPS server — source.topic + source.sow"]
+        direction TB
+        SOW["SOW topic (sow: true)<br/>state of the world: last record per SOW key<br/>replayed with sow_and_subscribe (+OOF, so<br/>deletes and filter-exits arrive as out-of-focus)"]
+        JRN["journal topic (sow: false)<br/>transaction log, no SOW<br/>subscribe from the epoch bookmark:<br/>every restart replays everything"]
+    end
+
+    subgraph FMT["AMPS data type — format: (how one payload reads)"]
+        direction TB
+        FIX["FIX<br/>tag=value pairs, SOH-delimited<br/>tags are FIX tag numbers: 54=1<br/>built-in decode tables turn codes into names"]
+        NVFIX["NVFIX<br/>Name=value pairs in FIX framing<br/>tags are field names: Side=1"]
+        JSONF["JSON<br/>one object; tags are names or dotted paths<br/>(execution.venue); a nested object is also<br/>addressable whole, as its JSON text"]
+        COMP["COMPOSITE (composite-local / composite-global)<br/>several length-prefixed parts, each of a constituent<br/>format listed in composite-parts: [JSON, FIX]<br/>part-indexed tags: 0.orderId, 1.54 — like AMPS's own<br/>/0/orderId XPaths; a bare tag reads the merged<br/>namespace, first part wins (the composite-global spelling)"]
+    end
+
+    SUB["AmpsClientSubscriber (HAClient:<br/>reconnect + resubscribe survive AMPS restarts)<br/>or SimulatedAmpsSubscriber (demo profile)<br/>COMPOSITE: CompositeMessageParser unframes the<br/>raw message — the binary length prefixes do not<br/>survive as a string"]
+
+    DEC["RecordDecoder<br/>payload → tag → raw value<br/>a key present means the payload carried the field:<br/>absent ≠ empty, which is what delta correctness rides on"]
+
+    MAP["FieldMapper — the allowlist<br/>only mapped tags are published<br/>type coercion per column, plus value shaping:<br/>decode: SIDE (54=1 → BUY) · values: inline rewrites<br/>default-value when the field is absent"]
+
+    EXPL["RecordExploder (optional — explode:)<br/>an object with dynamic keys → one row per member<br/>member name → key-column, '.' = the member value<br/>remembers each record's members: a vanished member,<br/>a null value, or the record leaving the SOW → row deletes"]
+
+    MRG["DeltaRowMerger (optional — publish-mode: DELTA)<br/>partial update merged over the last full row for its key,<br/>so omitted columns keep their stored values"]
+
+    BAT["RowBatcher<br/>flush by max-batch-rows or flush-interval<br/>upserts and deletes, in arrival order"]
+
+    GW["FlightDeephavenGateway<br/>Arrow Flight + generated python bootstrap<br/>creates the table if missing, refuses to adopt a<br/>table whose columns, types or keys disagree"]
+
+    subgraph DH["Deephaven table type — deephaven.table-type"]
+        direction TB
+        KEYED["KEYED — input_table(key_cols=…)<br/>one row per key: an add is an upsert<br/>the only type with removal, so the only target for<br/>OOF / sow_delete, explode's deletes, DELTA merges<br/>default for SOW topics"]
+        AO["APPEND_ONLY — input_table()<br/>every row kept forever: audit / history shape<br/>removals are ignored (counted, not published)<br/>default for journal topics"]
+        BLINK["BLINK — table_publisher()<br/>rows live for one update-graph cycle, then vanish<br/>downstream aggregations see each row exactly once<br/>bounded memory"]
+        RING["RING — ring_table(blink, ring-capacity)<br/>the last ring-capacity rows of the stream<br/>bounded for real: nothing upstream retains the rows"]
+    end
+
+    SOW --> SUB
+    JRN --> SUB
+    SUB --> DEC
+    FMT -. "format: selects the decoder" .-> DEC
+    DEC --> MAP
+    MAP --> EXPL
+    EXPL --> MRG
+    MRG --> BAT
+    BAT --> GW
+    GW -->|"addToInputTable / delete rows"| KEYED
+    GW -->|"addToInputTable"| AO
+    GW -->|"TablePublisher.add"| BLINK
+    GW -->|"TablePublisher.add"| RING
+```
+
+Reading the two ends against each other:
+
+- **Any format can feed any table type** — the middle of the pipeline never asks which format
+  produced the fields, and never asks which table type will receive the row.
+- **The `sow` flag and the table type are independent choices.** Left unset, `table-type`
+  follows the topic (SOW → `KEYED`, journal → `APPEND_ONLY`); set it to override — a SOW topic
+  rendered as `BLINK` is a live view of updates rather than of state, a journal topic as `RING`
+  is a bounded tail of the log.
+- **Removal only exists on `KEYED`**, which is why everything that deletes — out-of-focus
+  messages, `sow_delete`, `explode`'s vanished members, `DELTA` merging — requires it.
+- **`BLINK`/`RING` go through a different publish path** (a server-side `TablePublisher`, not an
+  input table), which is why they require `create-if-missing`: the bootstrap is the only thing
+  that can create their publisher.
+
 ## Run
 
 Against a Deephaven server on `localhost:10000` with a real AMPS server on `localhost:9007`:
@@ -41,7 +114,7 @@ Any setting can be overridden on the command line, e.g. a Deephaven on another p
 ./gradlew :amps-connectors:test
 ```
 
-197 tests, no AMPS server and no Deephaven server required. Six more check the generated
+237 tests, no AMPS server and no Deephaven server required. Six more check the generated
 python against a real server and are skipped unless you ask for them:
 
 ```bash
@@ -54,7 +127,7 @@ podman run -d --name dh -p 10000:10000 \
 
 ## Configure
 
-The shipped `src/main/resources/application.yml` is a worked example of all three formats and
+The shipped `src/main/resources/application.yml` is a worked example of all four formats and
 four table types:
 
 | Connector | Format | AMPS topic | Deephaven table |
@@ -63,6 +136,8 @@ four table types:
 | `positions-nvfix` | NVFIX, **delta** subscription and publish | `Positions` (SOW) | `amps_positions`, **keyed** on `Account`+`Symbol` |
 | `trades-json` | JSON, from the `epoch` bookmark | `Trades` (journal) | `amps_trades`, **append-only** |
 | `ticks-json` | JSON, from the `epoch` bookmark | `Ticks` (journal) | `amps_ticks`, **ring**, 5 000 rows |
+| `portfolios-json` | JSON with **`explode`**: a row per map entry | `cache.entries` (SOW) | `amps_portfolios`, **keyed** on `OuterKey`+`Symbol` |
+| `orders-composite` | **COMPOSITE** (`[JSON, FIX]` parts), part-indexed tags | `orders.composite` (SOW) | `amps_composite`, **keyed** on `OrderId` |
 
 ### Table types
 
@@ -133,6 +208,23 @@ clear), and a **key column** may not have one, since every record missing the ke
 share the default and collapse onto a single row.
 
 Full reference: [docs 07 §5.2](../docs/07-amps-connectors.md).
+
+### Composite message types
+
+`format: COMPOSITE` subscribes to an AMPS composite message type (`composite-local` /
+`composite-global`): one message, several length-prefixed parts, each of a constituent format
+listed in `composite-parts`. Tags are part-indexed — `0.orderId`, `1.54` — the same addressing
+as the `/0/orderId` XPaths AMPS filters and SOW keys use; an unprefixed tag reads the merged
+namespace, the natural spelling for `composite-global`. `source.message-type` must name the
+type the **server** registers (it goes in the connection URI). [Docs 07 §5.3](../docs/07-amps-connectors.md).
+
+### A row per map entry
+
+`explode` renders a map with dynamic keys — `{"key": "portfolio-1", "value": {"AAPL": {...},
+"MSFT": {...}}}` — as one Deephaven row per member: the member name lands in `key-column`, the
+explode `fields` resolve inside the member's value (`"."` is the value itself), and on a keyed
+table the connector deletes rows for members that vanish from a republished record, for a
+`"value": null` clear, and for records leaving the SOW. [Docs 07 §5.4](../docs/07-amps-connectors.md).
 
 To key on the SOW key AMPS assigns — the case for a topic with a `KeyGenerator`, where the key
 cannot be rebuilt from the record body — name the SOW key column in `key-columns`:

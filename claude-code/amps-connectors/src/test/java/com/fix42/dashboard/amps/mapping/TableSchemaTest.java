@@ -75,6 +75,19 @@ class TableSchemaTest {
     }
 
     @Test
+    @DisplayName("explode columns join the schema after the mapped fields")
+    void explodeColumnsJoinTheSchema() {
+        TableSchema schema = TableSchema.of(TestConnectors.jsonPortfolios());
+
+        assertThat(schema.columns()).extracting(ColumnSpec::name)
+                .containsExactly("OuterKey", "Symbol", "Qty", "Position");
+        assertThat(schema.keyColumns()).containsExactly("OuterKey", "Symbol");
+        assertThat(schema.columns().get(1).sourceTag()).isEqualTo(RecordExploder.KEY_TAG);
+        assertThat(schema.columns().get(2).sourceTag())
+                .isEqualTo(RecordExploder.fieldTag("qty"));
+    }
+
+    @Test
     void indexOfRejectsUnknownColumns() {
         TableSchema schema = TableSchema.of(TestConnectors.fixOrders());
         assertThat(schema.indexOf("Price")).isEqualTo(3);

@@ -45,6 +45,20 @@ public final class JsonRecordDecoder implements RecordDecoder {
         return fields;
     }
 
+    /**
+     * Flatten one JSON object to this decoder's field shape: dotted paths, containers
+     * registered as their JSON text, bare-name aliases for flat addressing. Shared with
+     * {@code RecordExploder}, which applies the same shape to each exploded member value.
+     *
+     * @param root the object to flatten
+     * @return its fields, keyed by path
+     */
+    public static Map<String, String> flatten(JsonNode root) {
+        Map<String, String> fields = new LinkedHashMap<>();
+        flatten(root, "", fields);
+        return fields;
+    }
+
     private static void flatten(JsonNode node, String prefix, Map<String, String> fields) {
         for (Map.Entry<String, JsonNode> member : node.properties()) {
             String name = member.getKey();

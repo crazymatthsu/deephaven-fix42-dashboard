@@ -3,13 +3,16 @@ package com.fix42.dashboard.amps.source;
 import com.crankuptheamps.client.Client;
 import com.crankuptheamps.client.Command;
 import com.crankuptheamps.client.CommandId;
+import com.crankuptheamps.client.CompositeMessageParser;
 import com.crankuptheamps.client.ConnectionStateListener;
 import com.crankuptheamps.client.DefaultServerChooser;
 import com.crankuptheamps.client.HAClient;
 import com.crankuptheamps.client.Message;
 import com.fix42.dashboard.amps.config.AmpsSourceProperties;
 import com.fix42.dashboard.amps.config.ConnectorProperties;
+import com.fix42.dashboard.amps.config.SourceFormat;
 import com.fix42.dashboard.amps.config.UpdateMode;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -39,6 +42,14 @@ public class AmpsClientSubscriber implements AmpsSubscriber {
 
     private final ConnectorProperties connector;
     private final AtomicBoolean connected = new AtomicBoolean(false);
+
+    /**
+     * Unframes composite messages (4-byte binary length prefix per part), which is why it
+     * reads the raw {@code Message} rather than {@code getData()} -- the prefixes do not
+     * survive a pass through a string. One instance, reused: the AMPS client delivers this
+     * subscription's messages on a single thread.
+     */
+    private final CompositeMessageParser compositeParser = new CompositeMessageParser();
 
     private HAClient client;
     private CommandId subscriptionId;
@@ -144,6 +155,15 @@ public class AmpsClientSubscriber implements AmpsSubscriber {
                 default -> null;
             };
             if (action == null) {
+                return;
+            }
+            if (connector.getFormat() == SourceFormat.COMPOSITE) {
+                int count = compositeParser.parse(message);
+                List<String> parts = new ArrayList<>(count);
+                for (int i = 0; i < count; i++) {
+                    parts.add(compositeParser.getString(i, StandardCharsets.UTF_8));
+                }
+                handler.onRecord(AmpsRecord.composite(parts, message.getSowKey(), action));
                 return;
             }
             handler.onRecord(new AmpsRecord(message.getData(), message.getSowKey(), action));

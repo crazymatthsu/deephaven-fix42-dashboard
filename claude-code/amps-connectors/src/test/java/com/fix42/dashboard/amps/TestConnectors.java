@@ -5,6 +5,7 @@ import com.fix42.dashboard.amps.config.ColumnType;
 import com.fix42.dashboard.amps.config.ConnectorProperties;
 import com.fix42.dashboard.amps.config.DeephavenTableProperties;
 import com.fix42.dashboard.amps.config.DeephavenTableType;
+import com.fix42.dashboard.amps.config.ExplodeProperties;
 import com.fix42.dashboard.amps.config.FieldMapping;
 import com.fix42.dashboard.amps.config.FixValueDecode;
 import com.fix42.dashboard.amps.config.SourceFormat;
@@ -104,6 +105,45 @@ public final class TestConnectors {
         qty.setDefaultValue("0");
         connector.setFields(List.of(
                 field("11", "ClOrdID", ColumnType.STRING), account, side, status, qty));
+        return connector;
+    }
+
+    /**
+     * A composite (JSON metadata + FIX detail) connector over a SOW topic, part-indexed tags.
+     */
+    public static ConnectorProperties compositeOrders() {
+        ConnectorProperties connector =
+                base("orders-composite", SourceFormat.COMPOSITE, "orders.composite", true);
+        connector.setCompositeParts(List.of(SourceFormat.JSON, SourceFormat.FIX));
+        connector.getSource().setMessageType("composite-json-fix");
+        connector.getDeephaven().setTable("amps_composite");
+        connector.getDeephaven().setKeyColumns(List.of("OrderId"));
+        connector.setFields(List.of(
+                field("0.orderId", "OrderId", ColumnType.STRING),
+                field("0.account", "Account", ColumnType.STRING),
+                field("1.54", "Side", ColumnType.STRING),
+                field("1.38", "Qty", ColumnType.DOUBLE)));
+        return connector;
+    }
+
+    /**
+     * A nested-map cache record exploded to one row per inner entry:
+     * {@code {"key": "portfolio-1", "value": {"AAPL": {"qty": 250}, ...}}} keyed
+     * {@code (OuterKey, Symbol)}.
+     */
+    public static ConnectorProperties jsonPortfolios() {
+        ConnectorProperties connector =
+                base("portfolios-json", SourceFormat.JSON, "cache.entries", true);
+        connector.getDeephaven().setTable("amps_portfolios");
+        connector.getDeephaven().setKeyColumns(List.of("OuterKey", "Symbol"));
+        connector.setFields(List.of(field("key", "OuterKey", ColumnType.STRING)));
+        ExplodeProperties explode = new ExplodeProperties();
+        explode.setTag("value");
+        explode.setKeyColumn("Symbol");
+        explode.setFields(List.of(
+                field("qty", "Qty", ColumnType.DOUBLE),
+                field(".", "Position", ColumnType.STRING)));
+        connector.setExplode(explode);
         return connector;
     }
 

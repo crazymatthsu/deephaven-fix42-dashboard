@@ -51,7 +51,8 @@ public final class TableSchema {
     /**
      * Resolve the schema of a connector's target table.
      *
-     * <p>Column order is: every mapped field in configuration order, then the SOW-key column,
+     * <p>Column order is: every mapped field in configuration order, then the explode key
+     * column and explode fields when {@code explode} is configured, then the SOW-key column,
      * then the ingest-timestamp column, when those are configured.
      *
      * <p>Key columns are kept only for a {@code KEYED} target, so a schema is internally
@@ -66,6 +67,9 @@ public final class TableSchema {
         List<ColumnSpec> columns = new ArrayList<>();
         for (FieldMapping field : connector.getFields()) {
             columns.add(ColumnSpec.field(field));
+        }
+        if (connector.getExplode() != null) {
+            columns.addAll(RecordExploder.columns(connector.getExplode()));
         }
         if (isSet(target.getSowKeyColumn())) {
             columns.add(ColumnSpec.sowKey(target.getSowKeyColumn().trim()));

@@ -177,6 +177,54 @@ class SimulatedAmpsSubscriberTest {
     }
 
     @Test
+    @DisplayName("a composite connector emits parts, each decodable in its own format")
+    void compositeRecordsCarryDecodableParts() {
+        ConnectorProperties connector = TestConnectors.compositeOrders();
+        connector.getSource().setSimulatedKeys(4);
+
+        List<AmpsRecord> records = new ArrayList<>();
+        try (SimulatedAmpsSubscriber source = new SimulatedAmpsSubscriber(connector)) {
+            source.start(records::add);
+        }
+        RecordDecoder decoder = new com.fix42.dashboard.amps.decode.RecordDecoderFactory(
+                new ObjectMapper()).create(connector);
+
+        assertThat(records).hasSize(4);
+        for (AmpsRecord record : records) {
+            assertThat(record.data()).isNull();
+            assertThat(record.parts()).hasSize(2);
+            Map<String, String> fields = decoder.decode(record);
+            assertThat(fields).containsKeys("0.orderId", "0.account", "1.54", "1.38");
+        }
+    }
+
+    @Test
+    @DisplayName("an explode connector gets an object whose membership shifts across ticks")
+    void explodeObjectsCycleMembership() {
+        ConnectorProperties connector = TestConnectors.jsonPortfolios();
+        connector.getSource().setSimulatedKeys(10);
+
+        List<Map<String, String>> records = new ArrayList<>();
+        RecordDecoder decoder = new JsonRecordDecoder(new ObjectMapper());
+        try (SimulatedAmpsSubscriber source = new SimulatedAmpsSubscriber(connector)) {
+            source.start(record -> records.add(decoder.decode(record.data())));
+        }
+
+        Set<String> memberSets = new HashSet<>();
+        for (Map<String, String> fields : records) {
+            String value = fields.get("value");
+            assertThat(value).as("the explode tag carries an object").startsWith("{");
+            memberSets.add(value.replaceAll("[^A-Z,]", ""));
+            assertThat(fields.keySet())
+                    .as("members nest inside the object")
+                    .anyMatch(tag -> tag.startsWith("value."));
+        }
+        assertThat(memberSets.size())
+                .as("membership varies, so vanish-deletes have something to do")
+                .isGreaterThan(1);
+    }
+
+    @Test
     void isConnectedOnlyWhileRunning() {
         ConnectorProperties connector = TestConnectors.jsonTrades();
         SimulatedAmpsSubscriber subscriber = new SimulatedAmpsSubscriber(connector);

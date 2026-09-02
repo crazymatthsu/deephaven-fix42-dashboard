@@ -5,7 +5,7 @@ plugins {
 
 group = "com.fix42.dashboard"
 version = "0.1.0"
-description = "FIX 4.2 mock order-flow generator: scenario engine + Kafka producer CLI"
+description = "FIX 4.2 mock order-flow generator: scenario engine + Kafka/AMPS producer CLI"
 
 repositories {
     mavenCentral()
@@ -19,6 +19,9 @@ java {
 
 dependencies {
     implementation("org.apache.kafka:kafka-clients:3.9.1")
+    // 60East AMPS java client -- the --amps-uri sink (doc 10 §10). Same coordinates as
+    // :amps-connectors, so both modules resolve one artifact from Maven Central.
+    implementation("com.crankuptheamps:amps-client:5.3.4.1")
     implementation("org.slf4j:slf4j-simple:2.0.16")
 
     testImplementation(platform("org.junit:junit-bom:5.11.4"))

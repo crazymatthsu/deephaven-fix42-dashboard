@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AMPS broker for the remote-URI demo (docs/10-deephaven-remote-uri.md §2.6 and §11).
+
+  Verified against AMPS 5.3.5 (image localhost/amps-demo:5.3.5.135) with
+  "ampServer [dash][dash]verify-config"; started by docker/docker-compose.remote-uri.yml as
+  service `amps` (container rx-amps), which publishes 9007/9008/8085 on 29007/29008/28085 so
+  this broker never collides with another AMPS on the default ports.
+
+  Three things this file decides, all of them load bearing for the demo:
+
+  1. THE FOUR HUB TOPICS ARE JOURNALLED. A topic listed under TransactionLog is written to the
+     transaction log, which is what lets every leaf subscribe from the `epoch` bookmark and
+     replay the whole tape before cutting over to live messages on the same subscription
+     (doc 03 §2.1). That replay is the deterministic-rebuild contract: restart a leaf and it
+     folds the identical history. A topic that is NOT listed here has no journal, so a
+     subscriber only ever sees messages published after it connected, and a restarted leaf
+     would silently come back with a truncated blotter.
+  2. RELATIVE PATHS RESOLVE UNDER THE WORKING DIRECTORY, which is /amps/data in this image.
+     So ./journal is /amps/data/journal and ./stats/stats.db is /amps/data/stats/stats.db.
+     Compose mounts a NAMED VOLUME on /amps/data, so `down` with the volume flag wipes the
+     journal: a stale journal is a dirty tape, and the e2e's expected-state oracle would be
+     compared against this run's families plus every previous run's.
+  3. THE CLIENT URI PICKS THE MESSAGE TYPE, not this file. The transport below speaks the
+     `amps` protocol on 9007 and accepts any registered message type; a client connecting to
+     tcp://amps:9007/amps/fix therefore talks FIX, which is what the generator publishes
+     (raw SOH delimited FIX, framing included) and what the leaves parse. The MessageType on
+     each journalled topic below must agree with that, hence `fix` throughout.
+
+  There is deliberately NO SOW section: the leaves fold state themselves in Deephaven from the
+  replayed journal (doc 10 §5), so a server side state-of-the-world would be a second, divergent
+  copy of the same state. The journal is the audit trail; Deephaven is the projection.
+
+  Adding a hub means adding its topic here AND assigning it to exactly one leaf in
+  REMOTEURI_LEAVES (doc 10 §4.3).
+-->
+<AMPSConfig>
+
+  <Name>fix42-remote-uri</Name>
+
+  <!--
+    Admin / monitoring interface: http://localhost:28085/amps/instance/... from the host.
+    The stats database is where AMPS keeps its own monitoring history.
+  -->
+  <Admin>
+    <InetAddr>8085</InetAddr>
+    <FileName>./stats/stats.db</FileName>
+    <Interval>10s</Interval>
+  </Admin>
+
+  <Transports>
+
+    <!-- Native AMPS protocol: the java client (generator) and the python client (leaves). -->
+    <Transport>
+      <Name>amps-tcp</Name>
+      <Type>tcp</Type>
+      <InetAddr>9007</InetAddr>
+      <Protocol>amps</Protocol>
+      <ReuseAddr>true</ReuseAddr>
+    </Transport>
+
+    <!-- Websocket transport, for browser tools such as AMPS' own web monitor. -->
+    <Transport>
+      <Name>amps-websocket</Name>
+      <Type>tcp</Type>
+      <InetAddr>9008</InetAddr>
+      <Protocol>websocket</Protocol>
+    </Transport>
+
+  </Transports>
+
+  <!-- Log to stdout so `podman logs rx-amps` is the whole story; no log files in the volume. -->
+  <Logging>
+    <Target>
+      <Protocol>stdout</Protocol>
+      <Level>info</Level>
+    </Target>
+  </Logging>
+
+  <!--
+    The transaction log. Sizes are demo sizes: two preallocated 10 MB journal files roll over
+    into new ones as needed, which is ample for the e2e's few thousand messages and small
+    enough that a fresh container is ready in a second or two.
+
+    Every hub tape of doc 09 §3 is listed explicitly rather than by a regex over
+    fix42.oms[dot]*, so a typo in a publisher's topic name produces an unjournalled topic that
+    fails loudly at the first replay instead of quietly matching a pattern.
+  -->
+  <TransactionLog>
+    <JournalDirectory>./journal</JournalDirectory>
+    <PreallocatedJournalFiles>2</PreallocatedJournalFiles>
+    <MinJournalSize>10MB</MinJournalSize>
+
+    <Topic>
+      <Name>fix42.oms-a</Name>
+      <MessageType>fix</MessageType>
+    </Topic>
+    <Topic>
+      <Name>fix42.oms-b-parent</Name>
+      <MessageType>fix</MessageType>
+    </Topic>
+    <Topic>
+      <Name>fix42.oms-b-child</Name>
+      <MessageType>fix</MessageType>
+    </Topic>
+    <Topic>
+      <Name>fix42.oms-c</Name>
+      <MessageType>fix</MessageType>
+    </Topic>
+  </TransactionLog>
+
+</AMPSConfig>

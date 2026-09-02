@@ -43,6 +43,14 @@ __all__ = [
     "BREAK_KINDS",
     "RED_BREAK_KINDS",
     "build_derived",
+    # Public aliases of the section 5 builders (defined at the bottom of the file).
+    "hub_config_table",
+    "build_id_index",
+    "build_orders_linked",
+    "build_child_rollup",
+    "build_orders_recon",
+    "build_chain_summary",
+    "build_chain_recon",
 ]
 
 #: Every global published by :func:`build_derived`, in dependency order.
@@ -475,3 +483,33 @@ def _build_tree(orders_recon: Table) -> Optional[Any]:
         print(f"[multi-oms] orders_tree unavailable ({type(exc).__name__}: {exc}); "
               "the flat blotter and every other table are unaffected")
         return None
+
+
+# --------------------------------------------------------------------------------------
+# Public aliases of the section 5 builders
+# --------------------------------------------------------------------------------------
+#
+# `build_derived` composes them into this module's own DAG, but doc 10's collector
+# needs them one at a time: it applies the same linking and per-edge reconciliation
+# to the *union* of several servers' exports, with the full topology so the K-1
+# iterated root walk still sees K=4. Reusing the implementation -- rather than
+# copying 250 lines of semantics whose e2e must agree with this one byte for byte --
+# is why these are public.
+#
+# The leading-underscore names are kept: they are what this module calls internally,
+# and renaming them would churn every call site for no gain.
+
+#: ``hub_config`` (``Oms, UpstreamOms, LinkTag, HubDepth, Topic``) for a topology.
+hub_config_table = _hub_config_table
+#: ``(Oms, Id) -> GlobalKey`` over every id a hub order has ever carried.
+build_id_index = _build_id_index
+#: ``+UpstreamOms +ParentGlobalKey +LinkState +RootKey +Depth +Notional``.
+build_orders_linked = _build_orders_linked
+#: Per-parent sums over its *direct* children.
+build_child_rollup = _build_child_rollup
+#: THE blotter table: per-edge deltas, ``BreakKind``, ``OnBrokenEdge``.
+build_orders_recon = _build_orders_recon
+#: Per (``RootKey``, ``Oms``) level sums; returns ``(table, how)``.
+build_chain_summary = _build_chain_summary
+#: One row per family with per-hub columns and the per-edge break flags.
+build_chain_recon = _build_chain_recon

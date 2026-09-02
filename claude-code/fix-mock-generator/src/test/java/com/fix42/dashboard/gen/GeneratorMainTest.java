@@ -109,8 +109,8 @@ class GeneratorMainTest {
     @DisplayName("--help prints usage covering every flag")
     void help() throws Exception {
         String output = capture(GeneratorMain.parseArgs(new String[] {"--help"}));
-        for (String flag : List.of("--bootstrap-servers", "--topic", "--orders", "--seed", "--rate",
-                "--scenario", "--loop", "--list-scenarios", "--dry-run", "--emit-expected")) {
+        for (String flag : List.of("--bootstrap-servers", "--amps-uri", "--topic", "--orders", "--seed",
+                "--rate", "--scenario", "--loop", "--list-scenarios", "--dry-run", "--emit-expected")) {
             assertTrue(output.contains(flag), flag);
         }
     }
@@ -361,6 +361,60 @@ class GeneratorMainTest {
             assertTrue(line.startsWith("8=FIX.4.2|"), line);
             assertEquals(0, line.chars().filter(c -> c == '\t').count(), "no topic prefix in single-tape mode");
         }
+    }
+
+    // ---------------------------------------------------------------- AMPS sink (--amps-uri)
+
+    @Test
+    @DisplayName("--amps-uri parses in both modes and leaves every other flag alone")
+    void ampsUriParsed() {
+        GeneratorMain.Config cfg = GeneratorMain.parseArgs(new String[] {
+            "--amps-uri", "tcp://localhost:29007/amps/fix", "--orders", "4", "--seed", "42",
+        });
+        assertEquals("tcp://localhost:29007/amps/fix", cfg.ampsUri());
+        assertEquals("localhost:19092", cfg.bootstrapServers(), "the unused Kafka default is left alone");
+        assertEquals("fix42.messages", cfg.topic());
+        assertEquals(4, cfg.orders());
+
+        GeneratorMain.Config multi = GeneratorMain.parseArgs(new String[] {
+            "--multi-oms", "--amps-uri", "tcp://amps:9007/amps/fix", "--children", "2",
+        });
+        assertEquals("tcp://amps:9007/amps/fix", multi.ampsUri());
+        assertTrue(multi.multiOms());
+        assertEquals(2, multi.children());
+
+        assertThrows(IllegalArgumentException.class,
+                () -> GeneratorMain.parseArgs(new String[] {"--amps-uri"}));
+        assertThrows(IllegalArgumentException.class,
+                () -> GeneratorMain.parseArgs(new String[] {"--amps-uri", "  "}));
+    }
+
+    @Test
+    @DisplayName("--amps-uri with an explicit --bootstrap-servers is rejected: one sink per run")
+    void ampsUriRejectsExplicitBootstrap() {
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
+                () -> GeneratorMain.parseArgs(new String[] {
+                    "--amps-uri", "tcp://localhost:29007/amps/fix", "--bootstrap-servers", "kafka:9092",
+                }));
+        assertTrue(thrown.getMessage().contains("--amps-uri"), thrown.getMessage());
+        assertTrue(thrown.getMessage().contains("--bootstrap-servers"), thrown.getMessage());
+        // Flag order must not matter.
+        assertThrows(IllegalArgumentException.class,
+                () -> GeneratorMain.parseArgs(new String[] {
+                    "--bootstrap-servers", "kafka:9092", "--amps-uri", "tcp://localhost:29007/amps/fix",
+                }));
+        // The Kafka default on its own is not "explicit", so this stays legal.
+        assertEquals("tcp://localhost:29007/amps/fix", GeneratorMain.parseArgs(
+                new String[] {"--amps-uri", "tcp://localhost:29007/amps/fix"}).ampsUri());
+    }
+
+    @Test
+    @DisplayName("the default sink is Kafka: ampsUri is null unless --amps-uri is given")
+    void defaultIsKafka() {
+        assertNull(GeneratorMain.parseArgs(new String[0]).ampsUri());
+        assertNull(GeneratorMain.parseArgs(new String[] {"--multi-oms", "--orders", "2"}).ampsUri());
+        assertNull(GeneratorMain.parseArgs(
+                new String[] {"--bootstrap-servers", "kafka:9092"}).ampsUri());
     }
 
     /** Blanks the fields that follow the wall clock: 52/60 and the checksum that covers them. */

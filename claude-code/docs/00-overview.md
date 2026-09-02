@@ -38,6 +38,8 @@ Implementation modules:
 | `fix-mock-generator` | Java 21 (Gradle module) | Builds valid FIX 4.2 messages, generates realistic order lifecycles for every required scenario, publishes them to Kafka. |
 | `deephaven-scripts` | Python (Gradle-wrapped submodule) | `fix42cache` — pure-python FIX parser + order state machine (no Deephaven imports, unit-testable). `dh_app` — Deephaven server scripts: ingestion (Kafka or an AMPS transaction log, `FIX42_SOURCE`), DAG, query API, dashboard. |
 | `deephaven-app-java` | Java 21 (Gradle module) | The same app against the Deephaven **Java engine API**: `fixcache` (the state machine, no Deephaven imports) + `dh` (publishers, DAG, query API). Runs in the same server, exports the same globals, and is asserted by the same integration suite. Doc 06 §3's escape hatch, implemented. |
+| `deephaven-app-multi-oms-blotter` | Python (Gradle-wrapped submodule) | `multi_oms` — four OMS drop-copy tapes linked across hubs and reconciled per edge in one server (doc 09). |
+| `deephaven-remote-uri` | Python (Gradle-wrapped submodule) | `remote_uri` — the same flow across **several** servers: leaves fold hub tapes from AMPS and export projections; a collector re-links families through `deephaven.uri` / Barrage subscriptions, marks exposure against market data, answers (source OMS, account, symbol) lookups and fetches history from the owning leaf by remote query (doc 10). |
 
 The two dashboard apps are alternatives, not layers: pick one with `DH_APP`
 (`fix42-dashboard` or `fix42-dashboard-java`).
@@ -100,10 +102,16 @@ claude-code/
 │   ├── src/main/java/com/fix42/dashboard/fixcache/  # state machine (no deephaven imports)
 │   ├── src/main/java/com/fix42/dashboard/dh/        # publishers, DAG, query api, app entry
 │   └── parity/                 # regenerates the python-vs-java golden asserted by the tests
+├── deephaven-remote-uri/       # python: N leaf servers (AMPS tapes) + a remote-URI collector (doc 10)
+│   ├── src/remote_uri/         #   config, ingest, leaf, remote, collector, exposure, dashboard
+│   ├── amps/amps-config.xml    #   the demo AMPS broker config
+│   └── e2e/                    #   run_e2e.sh + pydeephaven assertions against leaves + collector
 ├── amps-connectors/            # Spring Boot: AMPS topics -> Deephaven tables (doc 07)
 │   └── src/main/{java,resources}/  # connectors + application.yml
 ├── docker/                     # podman-compose stack: kafka (KRaft) + deephaven (+ui)
-│   └── apps/<name>/            # one folder per deephaven app; pick with DH_APP
+│   ├── apps/<name>/            # one folder per deephaven app; pick with DH_APP
+│   ├── deephaven-amps.Dockerfile   # server image + amps-python-client (remote-uri stack)
+│   └── docker-compose.remote-uri.yml   # amps + dh1 + dh2 + collector (doc 10)
 ├── integration-test/           # e2e: generator → kafka → deephaven, asserted via pydeephaven
 └── README.md                   # build + demo runbook
 ```
@@ -133,3 +141,4 @@ claude-code/
 - [07 — AMPS connectors](07-amps-connectors.md) *(AMPS → Deephaven bridge: config model, SOW vs journal, table types, delta handling, lifecycle)*
 - [08 — On-demand executions from AMPS](08-on-demand-executions-idea.md) *(**tabled idea, not a contract** — explored and set aside: two sources of truth, partial memory win)*
 - [09 — Multi-OMS drop-copy blotter](09-multi-oms-blotter.md) *(contract for `deephaven-app-multi-oms-blotter`: cross-hub linking via configurable tags, per-edge CumQty/LeavesQty/notional recon, break taxonomy, paged blotter UI)*
+- [10 — Multi-server Deephaven: remote-URI leaves and collector](10-deephaven-remote-uri.md) *(contract for `deephaven-remote-uri`: sharding by hub/chain key, the 400M-message sizing analysis, remote subscription/snapshot/query mechanisms, leaf exports, collector DAG, exposure semantics)*

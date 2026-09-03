@@ -579,7 +579,7 @@ leaf (orders held, messages folded, heap used) — the memory split the design i
 bash deephaven-remote-uri/e2e/run_e2e.sh   # down -v → build → up → generate to AMPS → pytest (leaves + collector) → down
 ```
 
-Runbook, remote mechanisms, exposure semantics and the `REMOTEURI_*` configuration surface:
+Step-by-step runbook (keeping the stack up), remote mechanisms, exposure semantics and the `REMOTEURI_*` configuration surface:
 [deephaven-remote-uri/README.md](deephaven-remote-uri/README.md).
 Design, the 400M-message sizing analysis and contract: [docs/10-deephaven-remote-uri.md](docs/10-deephaven-remote-uri.md).
 

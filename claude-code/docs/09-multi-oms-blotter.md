@@ -365,7 +365,14 @@ like `dh_app.dashboard` (lazy import → `None` fallback, signature-agnostic
 - **Selection**: row press stores `(GlobalKey, RootKey)`; chain panel filters on
   `RootKey`, bottom panels on `GlobalKey` — selecting an upstream or downstream
   hop both light the whole family (issue's "works both ways"). Pressing a chain
-  panel row re-centers the selection the same way.
+  panel row re-centers the selection the same way. Both tables pass
+  `always_fetch_columns=["GlobalKey", "RootKey"]`: the two key columns trail the
+  display columns and are outside the viewport in a narrow panel, and
+  `deephaven.ui` 0.40 (the version pinned in `ghcr.io/deephaven/server:42.4`)
+  delivers only viewport columns to `on_row_press` unless they are named there,
+  so without it a click on a narrow blotter silently selects nothing. The call is
+  wrapped in `_first()` with a plain `ui.table(...)` fallback for plugin builds
+  that predate the keyword.
 - **Coloring**: server-side `format_columns`/`format_row_where` (stable Table API)
   — red for `QTY_BREAK`/`NOTIONAL_BREAK`/`DANGLING`/`NO_LINK`, amber for
   `UNROUTED`, applied inside `_safe`.

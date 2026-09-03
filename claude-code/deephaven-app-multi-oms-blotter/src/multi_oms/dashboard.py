@@ -555,11 +555,28 @@ def build_dashboard(
             ),
             ui.row(
                 ui.panel(
-                    ui.table(window, on_row_press=_selection_handler(set_selection)),
+                    _first(
+                        # GlobalKey/RootKey trail the display columns, so they are off-screen
+                        # in a narrow panel; on_row_press only carries viewport columns unless
+                        # always_fetch_columns names them (deephaven.ui 0.40 semantics).
+                        lambda: ui.table(
+                            window,
+                            on_row_press=_selection_handler(set_selection),
+                            always_fetch_columns=["GlobalKey", "RootKey"],
+                        ),
+                        lambda: ui.table(window, on_row_press=_selection_handler(set_selection)),
+                    ),
                     title="Blotter (click a row)",
                 ),
                 ui.panel(
-                    ui.table(chain, on_row_press=_selection_handler(set_selection)),
+                    _first(
+                        lambda: ui.table(
+                            chain,
+                            on_row_press=_selection_handler(set_selection),
+                            always_fetch_columns=["GlobalKey", "RootKey"],
+                        ),
+                        lambda: ui.table(chain, on_row_press=_selection_handler(set_selection)),
+                    ),
                     title="Chain of selected row",
                 ),
                 height=46,

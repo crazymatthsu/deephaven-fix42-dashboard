@@ -16,6 +16,8 @@ sees that app's `.app` descriptors and no others — apps cannot leak into each 
 |---|---|
 | `fix42-dashboard` | The full FIX 4.2 pipeline: `order_state_latest`, `executions`, `order_events`, `fix_messages`, the query API and `fix42_dashboard`. Needs Kafka (or AMPS — see `FIX42_SOURCE`). |
 | `fix42-dashboard-java` | The same pipeline, built by `:deephaven-app-java` against the Deephaven **Java** engine API. Same table names, columns and values. Run `./gradlew :deephaven-app-java:assemble` first — the jar is mounted at `/apps/libs` and named on `EXTRA_CLASSPATH`. |
+| `remote-uri-leaf` | One **leaf** of the multi-server demo (doc 10): folds the OMS hub tapes named by `REMOTEURI_LEAF_HUBS` from AMPS and exports `rx_orders`, `rx_id_index`, `rx_exposure`, `rx_leaf_stats`. Runs from `docker/docker-compose.remote-uri.yml` (`rx-dh1`, `rx-dh2`), not from `docker-compose.yml`. |
+| `remote-uri-collector` | The **collector** of the same demo: subscribes to every leaf's exports through `deephaven.uri` / Barrage, re-links the families, marks exposure and serves `find_exposure(...)`, `remote_executions(...)` and `remote_uri_dashboard`. Runs from `docker-compose.remote-uri.yml` (`rx-collector`). |
 | `example-minimal` | One table, `example_heartbeat`. The copy-me template: it imports nothing from the repo, so bringing it up proves the `DH_APP` switch on its own. |
 
 `fix42-dashboard-java` is also the worked example of an app whose `main.py` is a *shim* rather than

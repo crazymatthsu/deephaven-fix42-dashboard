@@ -17,8 +17,11 @@ import org.apache.kafka.common.serialization.StringSerializer;
  *
  * <p>The constructor's topic is the default destination; {@link #publish(String, String, String)}
  * overrides it per message for the multi-OMS topology's four hub topics.
+ *
+ * <p>The {@link FixPublisher} half of this class is the same set of methods it always had; the
+ * interface exists so {@code --amps-uri} can swap in {@link AmpsFixPublisher} (doc 10 §10).
  */
-public final class KafkaFixPublisher implements AutoCloseable {
+public final class KafkaFixPublisher implements FixPublisher {
 
     private final Producer<String, String> producer;
     private final String topic;
@@ -59,11 +62,13 @@ public final class KafkaFixPublisher implements AutoCloseable {
      * ({@code docs/09-multi-oms-blotter.md} §3), while the key still keeps one order's messages on
      * one partition.
      */
+    @Override
     public void publish(String topic, String chainKey, String rawFix) {
         producer.send(new ProducerRecord<>(topic, chainKey, rawFix));
         published++;
     }
 
+    @Override
     public long publishedCount() {
         return published;
     }
@@ -72,6 +77,7 @@ public final class KafkaFixPublisher implements AutoCloseable {
         return topic;
     }
 
+    @Override
     public void flush() {
         producer.flush();
     }

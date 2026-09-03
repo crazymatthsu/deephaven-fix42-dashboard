@@ -21,6 +21,7 @@ import java.util.stream.Collectors;
  *
  * <p>Two modes share the flag set: the default single-tape mode of doc 05 §2.1, and
  * {@code --multi-oms}, which generates the correlated four-hub drop-copy tapes of doc 09 §8.
+ * Either mode publishes to Kafka by default or to AMPS with {@code --amps-uri} (doc 10 §10).
  */
 public final class GeneratorMain {
 
@@ -47,6 +48,9 @@ public final class GeneratorMain {
      * @param help             print usage and exit
      * @param multiOms         generate the four correlated multi-OMS tapes instead of one tape
      * @param children         multi-OMS only: maximum fan-out per {@code OMS-B-parent}
+     * @param ampsUri          AMPS URI to publish to instead of Kafka, or {@code null} for Kafka
+     *                         (doc 10 §10); mutually exclusive with an explicit
+     *                         {@code --bootstrap-servers}
      */
     public record Config(
             String bootstrapServers,
@@ -61,7 +65,8 @@ public final class GeneratorMain {
             Path emitExpected,
             boolean help,
             boolean multiOms,
-            int children) {}
+            int children,
+            String ampsUri) {}
 
     public static void main(String[] args) {
         int exit;
@@ -96,13 +101,19 @@ public final class GeneratorMain {
         boolean help = false;
         boolean multiOms = false;
         int children = MultiOmsScenarioEngine.DEFAULT_MAX_CHILDREN;
+        String ampsUri = null;
         boolean topicGiven = false;
         boolean childrenGiven = false;
+        boolean bootstrapGiven = false;
 
         for (int i = 0; i < args.length; i++) {
             String arg = args[i];
             switch (arg) {
-                case "--bootstrap-servers" -> bootstrap = value(args, ++i, arg);
+                case "--bootstrap-servers" -> {
+                    bootstrap = value(args, ++i, arg);
+                    bootstrapGiven = true;
+                }
+                case "--amps-uri" -> ampsUri = value(args, ++i, arg);
                 case "--topic" -> {
                     topic = value(args, ++i, arg);
                     topicGiven = true;
@@ -128,6 +139,17 @@ public final class GeneratorMain {
         if (orders <= 0) {
             throw new IllegalArgumentException("--orders must be positive, got " + orders);
         }
+        if (ampsUri != null) {
+            if (ampsUri.isBlank()) {
+                throw new IllegalArgumentException("--amps-uri requires a value");
+            }
+            // One sink per run: leaving the Kafka default in place while publishing to AMPS is
+            // fine (it is never read), but an explicit broker means the two flags disagree.
+            if (bootstrapGiven) {
+                throw new IllegalArgumentException(
+                        "--amps-uri and --bootstrap-servers cannot both be given: choose one sink");
+            }
+        }
         if (multiOms) {
             if (topicGiven) {
                 throw new IllegalArgumentException(
@@ -152,7 +174,7 @@ public final class GeneratorMain {
             throw new IllegalArgumentException("--emit-expected cannot be combined with --loop");
         }
         return new Config(bootstrap, topic, orders, seed, rate, scenario,
-                loop, listScenarios, dryRun, emitExpected, help, multiOms, children);
+                loop, listScenarios, dryRun, emitExpected, help, multiOms, children, ampsUri);
     }
 
     /** Executes the parsed configuration; returns the process exit code. */
@@ -188,12 +210,13 @@ public final class GeneratorMain {
             return 0;
         }
 
-        try (KafkaFixPublisher publisher = new KafkaFixPublisher(cfg.bootstrapServers(), cfg.topic())) {
+        try (FixPublisher publisher = openPublisher(cfg, cfg.topic())) {
             long batchNo = 0;
             do {
                 ScenarioEngine.GeneratedBatch batch = engine.generate(cfg.orders(), cfg.scenario());
                 for (ScenarioEngine.EmittedMessage emitted : batch.messages()) {
-                    publisher.publish(emitted.chainKey(), FixSerializer.serialize(emitted.message()));
+                    publisher.publish(cfg.topic(), emitted.chainKey(),
+                            FixSerializer.serialize(emitted.message()));
                     pace(pauseNanos);
                 }
                 publisher.flush();
@@ -202,10 +225,26 @@ public final class GeneratorMain {
                 System.err.printf(Locale.ROOT,
                         "batch %d: published %d messages across %d chains to %s (%s, seed %d)%n",
                         batchNo, batch.messages().size(), batch.chains().size(),
-                        cfg.topic(), cfg.bootstrapServers(), cfg.seed());
+                        cfg.topic(), sink(cfg), cfg.seed());
             } while (cfg.loop() && !Thread.currentThread().isInterrupted());
         }
         return 0;
+    }
+
+    /**
+     * Opens the sink this run publishes to: AMPS when {@code --amps-uri} was given, Kafka
+     * otherwise (doc 10 §10). {@code defaultTopic} is the destination for messages that do not
+     * route themselves; AMPS ignores it, since every {@code publish} names its topic.
+     */
+    private static FixPublisher openPublisher(Config cfg, String defaultTopic) {
+        return cfg.ampsUri() != null
+                ? new AmpsFixPublisher(cfg.ampsUri())
+                : new KafkaFixPublisher(cfg.bootstrapServers(), defaultTopic);
+    }
+
+    /** The sink named in the per-batch log line: the AMPS URI or the Kafka bootstrap servers. */
+    private static String sink(Config cfg) {
+        return cfg.ampsUri() != null ? cfg.ampsUri() : cfg.bootstrapServers();
     }
 
     /**
@@ -232,8 +271,7 @@ public final class GeneratorMain {
             return 0;
         }
 
-        try (KafkaFixPublisher publisher =
-                new KafkaFixPublisher(cfg.bootstrapServers(), MultiOmsTopology.OMS_A.topic())) {
+        try (FixPublisher publisher = openPublisher(cfg, MultiOmsTopology.OMS_A.topic())) {
             long batchNo = 0;
             do {
                 MultiOmsScenarioEngine.GeneratedBatch batch = engine.generate(cfg.orders(), cfg.scenario());
@@ -248,7 +286,7 @@ public final class GeneratorMain {
                 System.err.printf(Locale.ROOT,
                         "batch %d: published %d messages across %d families to %s (%s, seed %d)%n",
                         batchNo, batch.messages().size(), batch.chains().size(),
-                        String.join(", ", MultiOmsTopology.topics()), cfg.bootstrapServers(), cfg.seed());
+                        String.join(", ", MultiOmsTopology.topics()), sink(cfg), cfg.seed());
             } while (cfg.loop() && !Thread.currentThread().isInterrupted());
         }
         return 0;
@@ -334,6 +372,9 @@ public final class GeneratorMain {
                   --bootstrap-servers <host:port>  Kafka bootstrap servers (default localhost:19092)
                   --topic <name>                   destination topic (default fix42.messages;
                                                    rejected with --multi-oms, which fixes one topic per hub)
+                  --amps-uri <uri>                 publish to AMPS instead of Kafka (e.g.
+                                                   tcp://localhost:29007/amps/fix; --bootstrap-servers
+                                                   must not be given)
                   --orders <n>                     order chains (families with --multi-oms) to generate (default 20)
                   --seed <n>                       RNG seed (default random; identical seeds replay identically)
                   --rate <msgs/sec>                publish pacing (default 50; ignored by --dry-run)

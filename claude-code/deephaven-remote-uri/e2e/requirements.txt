@@ -1,0 +1,17 @@
+# Client-side dependencies for the remote-URI end-to-end test (doc 10 s12).
+#
+# pydeephaven talks Barrage/gRPC to the leaves (:10011, :10012) and the collector
+# (:10010), and its version must track the server image the stack is built on
+# (docker/deephaven-amps.Dockerfile -> ghcr.io/deephaven/server:42.4 -> pydeephaven
+# 42.4). Bump both together.
+#
+# Nothing here is installed into the servers: the collector's own remote calls use
+# the Java client behind deephaven.barrage (doc 10 s3), and pydeephaven stays an
+# e2e-only dependency.
+pydeephaven==42.4
+
+# to_arrow().to_pandas() -- pyarrow arrives via pydeephaven, pinned loosely here
+# so the assertion helpers have a guaranteed pandas.
+pandas>=2.0
+pyarrow>=14.0
+pytest>=8.0

@@ -463,6 +463,11 @@ deephaven-app-multi-oms-blotter/
     └── test_blotter_e2e.py     # pydeephaven assertions (below); skips cleanly without a stack
 ```
 
+The §5 builders are also exported under public names (`hub_config_table`, `build_id_index`,
+`build_orders_linked`, `build_child_rollup`, `build_orders_recon`, `build_chain_summary`,
+`build_chain_recon`) because the doc 10 collector runs the same linking/recon over rows merged
+from several servers — one implementation of these semantics, not two.
+
 Unit tests cover every pure module; `deephaven`-importing modules follow the
 dh_app precedent (integration-tested, not pytest-mocked). The e2e (self-contained
 here; `integration-test/` is not touched — a fix to its runner is in flight on

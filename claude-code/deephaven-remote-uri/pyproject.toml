@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deephaven-remote-uri"
+version = "0.1.0"
+description = "Remote-URI leaves and collector: N Deephaven servers folding AMPS FIX 4.2 hub tapes, re-linked and marked on a collector"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "deephaven-fix42-dashboard" }]
+# Stdlib-only by contract (doc 10 section 12). `deephaven` comes from the server
+# container; `multi_oms` and `fix42cache` come from the /moms-scripts and /scripts
+# mounts, never from pip -- which is why the unit suite runs on a bare host python
+# (tests/conftest.py puts the sibling module's src/ on sys.path).
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

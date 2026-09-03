@@ -32,7 +32,7 @@ No framework, plain `main()`.
 | `OrderScenario` | one order chain's scripted message sequence (list of `FixMessage` + think-time gaps); knows its ChainKey (venue OrderID) |
 | `ScenarioEngine` | seeded `Random`; builds N chains across the scenario catalog (§2.2 weights or explicit `--scenario`); maintains venue-side counters (OrderID `ORD-xxxx`, ExecID `EXEC-xxxx`, ClOrdID `C-<chain>-<n>`), correct absolute CumQty/LeavesQty/AvgPx math, monotone TransactTime |
 | `KafkaFixPublisher` | wraps `Producer<String,String>`; key = ChainKey, value = serialized FIX; flush/close |
-| `GeneratorMain` | CLI: `--bootstrap-servers` (default `localhost:19092`), `--topic` (`fix42.messages`), `--orders N` (default 20), `--seed` (default random), `--rate msgs/sec` (default 50), `--scenario all|<name>`, `--loop` (regenerate forever), `--list-scenarios`, `--dry-run` (print to stdout, no Kafka) |
+| `GeneratorMain` | CLI: `--bootstrap-servers` (default `localhost:19092`), `--topic` (`fix42.messages`), `--orders N` (default 20), `--seed` (default random), `--rate msgs/sec` (default 50), `--scenario all|<name>`, `--loop` (regenerate forever), `--list-scenarios`, `--dry-run` (print to stdout, no Kafka), `--amps-uri <uri>` (publish to AMPS instead of Kafka, doc 10 §10; not with `--bootstrap-servers`) |
 
 Interleaving: engine round-robins messages across concurrently "live" chains so the
 dashboard shows many orders progressing at once; per-chain order strictly preserved.

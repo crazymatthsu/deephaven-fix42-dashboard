@@ -61,7 +61,7 @@ Rationale in [docs/00-overview.md](docs/00-overview.md#2-the-state-machine-scena
 | **podman** (or Docker) | podman 5.x with `podman-compose`, or `docker` with `compose`. On macOS the podman VM must be running: `podman machine start`. |
 | **JDK** | Not required up front — the Gradle toolchain auto-provisions **Java 21** via foojay. |
 | **python3** | 3.10+ on the host, for the `deephaven-scripts` unit tests and the integration-test client venv. |
-| **RAM** | The Deephaven container is configured with `-Xmx4g`; give the podman machine ≥6 GB. |
+| **RAM** | The Deephaven container is configured with `-Xmx4g`; give the podman machine ≥6 GB. The multi-server stack (`docker-compose.remote-uri.yml`) runs three servers at `-Xmx1g/1g/1536m` for that same 6 GB — do not run both stacks at once; `DH_XMX_LEAF` / `DH_XMX_COLLECTOR` raise the heaps on a bigger machine. |
 
 Nothing else is installed globally: the Gradle wrapper is committed, and the integration
 test builds its own throwaway virtualenv.
@@ -450,6 +450,7 @@ DH_APP=fix42-dashboard-java podman compose -f docker/docker-compose.yml up -d
 | `fix42-dashboard` *(default)* | The full FIX 4.2 pipeline — `order_state_latest`, `executions`, `order_events`, `fix_messages`, the query API, `fix42_dashboard` |
 | `fix42-dashboard-java` | **The same pipeline, built in Java** against the Deephaven engine API (`:deephaven-app-java`). Identical table names, columns and values; build the jar first with `./gradlew :deephaven-app-java:assemble` |
 | `multi-oms-blotter` | **A different pipeline**: four OMS drop-copy tapes linked across hubs and reconciled per edge — `orders_recon`, `oms_breaks`, `chain_recon`, `orders_tree`, `multi_oms_blotter`. See [Multi-OMS drop-copy blotter](#multi-oms-drop-copy-blotter) |
+| `remote-uri-leaf` / `remote-uri-collector` | **The multi-server demo** (doc 10), run from its own compose file: leaves fold OMS hub tapes from AMPS and export `rx_orders` / `rx_id_index` / `rx_exposure` / `rx_leaf_stats`; the collector subscribes to them remotely, re-links the families and serves `find_exposure(...)`, `remote_executions(...)`, `remote_uri_dashboard`. See [Multiple Deephaven servers](#multiple-deephaven-servers--remote-uri-collector) |
 | `example-minimal` | One table, `example_heartbeat`. The copy-me template; it imports nothing from the repo, so it proves the switch on its own |
 
 Because only the selected folder is mounted, apps cannot leak into each other — bring up
@@ -520,6 +521,67 @@ bash deephaven-app-multi-oms-blotter/e2e/run_e2e.sh   # down -v → up → gener
 Runbook, recon semantics and the `MULTIOMS_*` configuration surface:
 [deephaven-app-multi-oms-blotter/README.md](deephaven-app-multi-oms-blotter/README.md).
 Design and contract: [docs/09-multi-oms-blotter.md](docs/09-multi-oms-blotter.md).
+
+---
+
+## Multiple Deephaven servers — remote-URI collector
+
+The third app pair in `docker/apps/`, and the first stack with **more than one Deephaven server**.
+Where the multi-OMS blotter folds four hub tapes in one JVM, this one spreads them over leaf
+servers (`DH1..DHn`) that read the tapes from **AMPS**, and adds a **collector** that holds only a
+subset of the leaves' data — pulled through Deephaven's remote-table mechanisms — to answer
+"given a source OMS, an account and a symbol, show every hop upstream → downstream with the latest
+CumQty, LeavesQty and notional exposure":
+
+```
+ generator --multi-oms --amps-uri ──► AMPS (rx-amps :29007)  journalled topics fix42.oms-a … fix42.oms-c
+                                        │ bookmark_subscribe(EPOCH)             │
+                                  DH1 (rx-dh1 :10011)                     DH2 (rx-dh2 :10012)
+                                  hubs: OMS-A                             hubs: OMS-B-parent, OMS-B-child, OMS-C
+                                  exports rx_orders rx_id_index rx_exposure rx_leaf_stats
+                                        └──── dh+plain://dhN:10000/scope/rx_* (Barrage subscriptions) ────┘
+                                                   collector (rx-collector :10010)
+                                       merge → doc 09 linking + per-edge recon → market data → exposure
+                                       remote calls back to the owning leaf for an order's executions
+```
+
+Three mechanisms are demonstrated, all from inside the collector's python: **remote subscription**
+(`deephaven.uri.resolve("dh+plain://dh1:10000/scope/rx_orders")` — a live Barrage subscription),
+**remote snapshot** (`barrage_session(...).snapshot(b"s/rx_leaf_stats")`) and **remote query**
+(the collector runs a filter on the owning leaf's console through the same Java client and pulls
+only the matching rows — `remote_executions("OMS-A|A-0001")`). Linking and reconciliation are
+doc 09's builders applied to the merged rows, so a child on `DH2` links to its parent on `DH1`
+exactly as it would inside one server; `orders_marked` then adds `ExecNotional`, `OpenNotional`
+(leaves × market mid), `TotalNotional` and `SignedExposure`, rolled up per level
+(`exposure_by_level`) and for the source level (`exposure_by_source` — the totals; summing across
+hubs would count the same flow once per hop).
+
+```bash
+podman compose -f docker/docker-compose.remote-uri.yml up -d --build     # amps + dh1 + dh2 + collector
+./gradlew :fix-mock-generator:run \
+  --args="--multi-oms --amps-uri tcp://localhost:29007/amps/fix --seed 42 --orders 12 --children 3 --rate 200"
+open http://localhost:10010/ide     # Panels ▸ remote_uri_dashboard (collector); :10011 / :10012 are the leaves
+```
+
+The `--amps-uri` flag makes the generator publish to AMPS instead of Kafka (same tapes, same
+`--emit-expected` oracle). The stack needs the locally built AMPS image (`localhost/amps-demo:5.3.5.135`;
+AMPS is commercial software with no public image — set `AMPS_IMAGE`, or point `REMOTEURI_AMPS_URI`
+at your own broker) and builds a derived Deephaven image with the AMPS python client
+(`docker/deephaven-amps.Dockerfile`). Heaps are sized for a 6 GB podman machine — see Prerequisites.
+
+**What you see.** Pick a source OMS, account and symbol on the collector: the headline shows the
+root-level totals, one panel lists every hop of every matching family upstream → downstream with
+its own CumQty / LeavesQty / notional, another the totals per level, and clicking a hop fetches its
+executions from the leaf that owns it (the panel title names the leaf). `fleet` shows one row per
+leaf (orders held, messages folded, heap used) — the memory split the design is about.
+
+```bash
+bash deephaven-remote-uri/e2e/run_e2e.sh   # down -v → build → up → generate to AMPS → pytest (leaves + collector) → down
+```
+
+Runbook, remote mechanisms, exposure semantics and the `REMOTEURI_*` configuration surface:
+[deephaven-remote-uri/README.md](deephaven-remote-uri/README.md).
+Design, the 400M-message sizing analysis and contract: [docs/10-deephaven-remote-uri.md](docs/10-deephaven-remote-uri.md).
 
 ---
 
@@ -623,7 +685,7 @@ Design and contract: [docs/07-amps-connectors.md](docs/07-amps-connectors.md).
 ```
 claude-code/
 ├── docs/                          # analysis & design — the binding contracts
-│   ├── 00-overview.md … 09-multi-oms-blotter.md
+│   ├── 00-overview.md … 10-deephaven-remote-uri.md
 ├── settings.gradle.kts            # gradle multi-module root (Java 21 toolchain)
 ├── build.gradle.kts
 ├── fix-mock-generator/            # Java 21: FIX builder + scenario engine + Kafka CLI
@@ -642,16 +704,26 @@ claude-code/
 │   ├── tests/                     #   pytest unit suite (pure python, no deephaven)
 │   ├── e2e/                       #   run_e2e.sh + pydeephaven assertions against the live DAG
 │   └── README.md                  #   runbook, recon semantics, MULTIOMS_* configuration
+├── deephaven-remote-uri/          # python: N leaf servers (AMPS tapes) + a remote-URI collector (doc 10)
+│   ├── src/remote_uri/            #   config, ingest, leaf, remote, collector, exposure, dashboard
+│   ├── amps/amps-config.xml       #   the demo AMPS broker config (4 journalled fix topics)
+│   ├── tests/                     #   pytest unit suite (pure python)
+│   ├── e2e/                       #   run_e2e.sh + pydeephaven assertions against leaves + collector
+│   └── README.md                  #   runbook, remote mechanisms, REMOTEURI_* configuration
 ├── amps-connectors/               # Spring Boot: AMPS topics -> Deephaven tables
 │   ├── src/main/java/com/fix42/dashboard/amps/
 │   └── src/main/resources/application.yml   # the whole configuration surface
 ├── docker/
 │   ├── docker-compose.yml         # kafka (KRaft) + deephaven, pinned images
+│   ├── docker-compose.remote-uri.yml  # amps + dh1 + dh2 + collector (the multi-server demo)
+│   ├── deephaven-amps.Dockerfile  # server image + amps-python-client, used by the remote-uri stack
 │   └── apps/                      # one folder per deephaven app; DH_APP picks one
 │       ├── _lib/loader.py         #   shared app-mode loader, mounted at /dh-app-lib
 │       ├── fix42-dashboard/       #   the default app (.app descriptor + main.py)
 │       ├── fix42-dashboard-java/  #   the java build of the same app (jpy shim + .app)
 │       ├── multi-oms-blotter/     #   the multi-OMS drop-copy blotter (.app + main.py)
+│       ├── remote-uri-leaf/       #   a leaf of the multi-server demo (.app + main.py)
+│       ├── remote-uri-collector/  #   the collector of the multi-server demo
 │       └── example-minimal/       #   copy-me template, no repo dependencies
 ├── integration-test/
 │   ├── run_integration.sh         # up → generate → pytest → down
@@ -677,3 +749,4 @@ claude-code/
 | [07 — AMPS connectors](docs/07-amps-connectors.md) | the AMPS → Deephaven bridge: config model, SOW vs journal, table types, delta handling, lifecycle |
 | [08 — On-demand executions](docs/08-on-demand-executions-idea.md) | **tabled idea, not a contract** — fetching executions from AMPS per click; why it was set aside, and the cheaper alternatives |
 | [09 — Multi-OMS drop-copy blotter](docs/09-multi-oms-blotter.md) | **the contract** for the second app: hub topology, cross-hub linking, per-edge reconciliation and the break taxonomy, dashboard, generator mode, e2e scope |
+| [10 — Multi-server Deephaven: remote-URI leaves and collector](docs/10-deephaven-remote-uri.md) | **the contract** for the multi-server demo: sharding by hub / chain key, the 400M-message sizing analysis (throughput, memory, what the collector holds), remote subscription / snapshot / query mechanisms, leaf exports, collector DAG, exposure semantics, e2e scope |

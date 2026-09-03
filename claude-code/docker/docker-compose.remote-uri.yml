@@ -1,0 +1,231 @@
+# Remote-URI demo stack — one AMPS broker, N Deephaven leaves, one Deephaven collector.
+# Contract: docs/10-deephaven-remote-uri.md (§4 configuration, §11 deployment).
+#
+#   podman compose -f docker/docker-compose.remote-uri.yml up -d --build
+#   podman compose -f docker/docker-compose.remote-uri.yml down -v
+#
+# What it runs. The generator publishes the four correlated OMS drop-copy tapes of doc 09 §3 to
+# AMPS (`--multi-oms --amps-uri tcp://localhost:29007/amps/fix`). Each leaf subscribes to the hub
+# topics it owns from the `epoch` bookmark, folds them with the multi_oms pipeline and exports
+# rx_orders / rx_id_index / rx_exposure / rx_leaf_stats. The collector holds none of that itself:
+# it resolves those four tables over `dh+plain://<leaf>:10000/scope/<name>` (a Barrage
+# subscription), merges them, re-links the cross-hub families, joins simulated market data and
+# answers the exposure question — plus remote snapshots and remote console queries against the
+# leaf that owns a given order (doc 10 §3).
+#
+#   host port   container      what
+#   ---------   ------------   ----------------------------------------------------------------
+#   29007       rx-amps        AMPS tcp (the generator publishes here)
+#   29008       rx-amps        AMPS websocket
+#   28085       rx-amps        AMPS admin/monitoring
+#   10011       rx-dh1         leaf DH1, hub OMS-A
+#   10012       rx-dh2         leaf DH2, hubs OMS-B-parent, OMS-B-child, OMS-C
+#   10010       rx-collector   the collector UI — the one to open
+#
+# This is a SEPARATE compose project (`name:` below) from docker/docker-compose.yml, with its own
+# container names, ports and network, so neither file can disturb the other's stack.
+#
+# ---------------------------------------------------------------------------------------------
+# MEMORY. The podman machine this repo is developed on has 6 GB, which is what the default heaps
+# below are sized for: 1g + 1g + 1.5g of JVM heap plus AMPS plus the machine's own overhead. Two
+# consequences:
+#
+#   * do not run this stack and the fix42-dashboard stack (-Xmx4g) at the same time on a 6 GB
+#     machine — the second one to start will be killed or will thrash;
+#   * override per server if you have the room: DH_XMX_LEAF=2g DH_XMX_COLLECTOR=3g podman compose
+#     -f docker/docker-compose.remote-uri.yml up -d
+#
+# Enlarging the machine itself (`podman machine set --memory 12288`) requires a machine restart,
+# which stops EVERY running container on this host, including ones this repo does not own. That
+# is the user's call to make, never a script's.
+# ---------------------------------------------------------------------------------------------
+# AMPS IMAGE. AMPS is commercial software with no public image, so this file expects a locally
+# built one (`localhost/amps-demo:5.3.5.135`, linux/amd64 — emulated on an arm64 host, which is
+# fine at demo message rates). Three ways out if you do not have it:
+#
+#   * AMPS_IMAGE=<your image> podman compose -f docker/docker-compose.remote-uri.yml up -d
+#   * point the leaves at a broker you already run and skip this file's `amps` service:
+#     REMOTEURI_AMPS_URI=tcp://host.containers.internal:9007/amps/fix (a host-side broker is
+#     reachable under that name; 10.0.2.2 is not)
+#   * the broker's own configuration is deephaven-remote-uri/amps/amps-config.xml — four
+#     journalled `fix` topics and nothing else.
+# ---------------------------------------------------------------------------------------------
+# ADDING DH3 (or DH30). Copy the `dh2` block and change four things: the service name, the
+# container name, the published port, and REMOTEURI_LEAF_NAME / REMOTEURI_LEAF_HUBS. Then add the
+# matching object to the collector's REMOTEURI_LEAVES and the service to its `depends_on`. Every
+# hub must be assigned to EXACTLY one leaf: two leaves folding the same hub makes the collector's
+# merged orders non-unique on GlobalKey and the linking join fails (refused at startup, doc 10
+# §4.3); a hub assigned to nobody is a logged warning and shows up as DANGLING downstream.
+
+name: fix42-remote-uri
+
+# -----------------------------------------------------------------------------------------------
+# Shared leaf definition. YAML anchors are a copy-paste shortcut, not inheritance:
+# `<<: *deephaven-leaf` merges TOP-LEVEL keys only. A service that writes its own `environment:`
+# REPLACES the anchor's environment map wholesale rather than adding to it — hence the separate
+# `x-leaf-env` anchor, which each leaf merges back in with `<<: *leaf-env` before adding its own
+# two variables. Forgetting that is the classic way to end up with a leaf that has a name but no
+# role, or a role but no AMPS URI.
+# -----------------------------------------------------------------------------------------------
+x-leaf-env: &leaf-env
+  DH_APP: remote-uri-leaf
+  # App-mode scripts are evaluated with __file__ unset, so a script cannot bootstrap sys.path from
+  # its own location: the mounts have to be on PYTHONPATH. /scripts = fix42cache + dh_app (the
+  # AMPS ingest source), /moms-scripts = multi_oms (the fold, linking and recon reused unchanged),
+  # /remote-scripts = remote_uri (this demo).
+  PYTHONPATH: "/scripts:/moms-scripts:/remote-scripts"
+  START_OPTS: >-
+    -Xmx${DH_XMX_LEAF:-1g}
+    -Ddeephaven.console.type=python
+    -Ddeephaven.application.dir=/app.d
+    -DAuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler
+  REMOTEURI_ROLE: leaf
+  # In-network address of the `amps` service; the message type is part of the URI.
+  REMOTEURI_AMPS_URI: "tcp://amps:9007/amps/fix"
+  # Replay the whole journal, then cut over to live on the same subscription (doc 10 §2.6): a
+  # restarted leaf rebuilds exactly the blotter it had.
+  REMOTEURI_AMPS_BOOKMARK: epoch
+
+x-deephaven-leaf: &deephaven-leaf
+  build:
+    context: .
+    dockerfile: deephaven-amps.Dockerfile
+  image: localhost/fix42-deephaven-amps:42.4
+  volumes:
+    - ../deephaven-scripts/src:/scripts:ro,z
+    - ../deephaven-app-multi-oms-blotter/src:/moms-scripts:ro,z
+    - ../deephaven-remote-uri/src:/remote-scripts:ro,z
+    - ./apps/_lib:/dh-app-lib:ro,z
+    - ./apps/remote-uri-leaf:/app.d:ro,z
+  environment: *leaf-env
+  healthcheck:
+    test: ["CMD", "/opt/grpc_health_probe/grpc_health_probe", "-addr=localhost:10000"]
+    interval: 10s
+    timeout: 5s
+    retries: 30
+    start_period: 30s
+  depends_on:
+    amps:
+      condition: service_healthy
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # AMPS — the tape. Four journalled `fix` topics, one per OMS hub; no SOW.
+  #
+  # The journal lives on a NAMED VOLUME, so `down -v` wipes it. That is deliberate: the journal is
+  # a journal, and a leftover journal from a previous run replays a previous seed's families into
+  # this run's blotter — the same class of failure a dirty Kafka topic causes, and the reason the
+  # e2e always tears down with the volume flag.
+  #
+  # The healthcheck opens a TCP connection to the client port from inside the container. The image
+  # has bash but no nc, so /dev/tcp is the portable probe; it answers as soon as the transport is
+  # accepting, which is what the leaves are waiting for.
+  # ---------------------------------------------------------------------------
+  amps:
+    image: ${AMPS_IMAGE:-localhost/amps-demo:5.3.5.135}
+    container_name: rx-amps
+    # `hostname` (here and below) pins the in-network DNS name to the service name that every
+    # REMOTEURI_* URI in this file uses, independent of the container_name beside it.
+    hostname: amps
+    command: ["/amps/config/amps-config.xml"]
+    volumes:
+      - ../deephaven-remote-uri/amps/amps-config.xml:/amps/config/amps-config.xml:ro,z
+      - rx-amps-data:/amps/data
+    ports:
+      - "29007:9007"
+      - "29008:9008"
+      - "28085:8085"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9007'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # DH1 — leaf, folds OMS-A.
+  # ---------------------------------------------------------------------------
+  dh1:
+    <<: *deephaven-leaf
+    container_name: rx-dh1
+    hostname: dh1
+    ports:
+      - "10011:10000"
+    environment:
+      <<: *leaf-env
+      REMOTEURI_LEAF_NAME: DH1
+      REMOTEURI_LEAF_HUBS: "OMS-A"
+
+  # ---------------------------------------------------------------------------
+  # DH2 — leaf, folds the other three hubs. The split is by hub, so one family's
+  # hops live on both leaves; re-linking them is the collector's job.
+  # ---------------------------------------------------------------------------
+  dh2:
+    <<: *deephaven-leaf
+    container_name: rx-dh2
+    hostname: dh2
+    ports:
+      - "10012:10000"
+    environment:
+      <<: *leaf-env
+      REMOTEURI_LEAF_NAME: DH2
+      REMOTEURI_LEAF_HUBS: "OMS-B-parent,OMS-B-child,OMS-C"
+
+  # ---------------------------------------------------------------------------
+  # The collector — same image and mounts, different app and role.
+  #
+  # It reads no AMPS topic at all: every row it holds arrives over Barrage from a leaf
+  # (REMOTEURI_RESOLVER=uri uses deephaven.uri.resolve; `barrage` uses barrage_session().subscribe
+  # instead — same tables, different API, doc 10 §3).
+  #
+  # depends_on gates on the leaves being *healthy*, which is a gRPC probe: it says the server is
+  # up, NOT that app mode has finished exporting rx_*. The collector retries resolving on its own
+  # until every leaf exposes all four exports (REMOTEURI_CONNECT_TIMEOUT), so a slow leaf delays
+  # the dashboard instead of breaking it.
+  # ---------------------------------------------------------------------------
+  collector:
+    build:
+      context: .
+      dockerfile: deephaven-amps.Dockerfile
+    image: localhost/fix42-deephaven-amps:42.4
+    container_name: rx-collector
+    hostname: collector
+    ports:
+      - "10010:10000"
+    volumes:
+      - ../deephaven-scripts/src:/scripts:ro,z
+      - ../deephaven-app-multi-oms-blotter/src:/moms-scripts:ro,z
+      - ../deephaven-remote-uri/src:/remote-scripts:ro,z
+      - ./apps/_lib:/dh-app-lib:ro,z
+      - ./apps/remote-uri-collector:/app.d:ro,z
+    environment:
+      DH_APP: remote-uri-collector
+      PYTHONPATH: "/scripts:/moms-scripts:/remote-scripts"
+      START_OPTS: >-
+        -Xmx${DH_XMX_COLLECTOR:-1536m}
+        -Ddeephaven.console.type=python
+        -Ddeephaven.application.dir=/app.d
+        -DAuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler
+      REMOTEURI_ROLE: collector
+      # Which leaf holds which hubs. Must partition the topology: every hub on exactly one leaf,
+      # and the `hubs` here must agree with that leaf's REMOTEURI_LEAF_HUBS above.
+      REMOTEURI_LEAVES: >-
+        [{"name":"DH1","uri":"dh+plain://dh1:10000","hubs":["OMS-A"]},
+        {"name":"DH2","uri":"dh+plain://dh2:10000","hubs":["OMS-B-parent","OMS-B-child","OMS-C"]}]
+      REMOTEURI_RESOLVER: uri
+    healthcheck:
+      test: ["CMD", "/opt/grpc_health_probe/grpc_health_probe", "-addr=localhost:10000"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    depends_on:
+      dh1:
+        condition: service_healthy
+      dh2:
+        condition: service_healthy
+
+volumes:
+  # The AMPS journal and stats database (the container's working directory, /amps/data).
+  rx-amps-data: {}

@@ -186,3 +186,34 @@ s.run_script("print('scriptable too')")
 7. `where(f"... == `{sel}`")`: guard `sel` against backticks/injection (ids are
    generator-controlled alphanumerics; still sanitize).
 8. Memory: append audit tables grow forever — acceptable demo tradeoff, documented.
+
+## 10. Remote tables across servers — `deephaven.uri`, Barrage, remote console
+
+Used by the `deephaven-remote-uri` submodule (doc 10) to build a collector over several
+Deephaven servers. All three ship with server 42.4; none needs `pydeephaven` inside the server.
+
+```python
+from deephaven.uri import resolve
+rx = resolve("dh+plain://dh1:10000/scope/rx_orders")      # live Barrage subscription to a remote global
+
+from deephaven.barrage import barrage_session
+sess = barrage_session(host="dh1", port=10000)             # anonymous by default; auth_type/auth_token for PSK
+live = sess.subscribe(b"s/rx_orders")                      # scope ticket = b"s/<global name>"
+snap = sess.snapshot(b"s/rx_leaf_stats")                   # one-shot static copy
+
+console = sess.j_barrage_session.session().console("python").get()   # the Java client's console
+changes = console.executeCode('rx_q_1 = oms_executions.where("GlobalKey == `OMS-A|A-0001`")')
+result = sess.snapshot(b"s/rx_q_1")                        # the filter ran on the remote server
+console.executeCode("del rx_q_1")
+```
+
+- `dh+plain://host:port/scope/<name>` resolves a query-scope global of the target server; the
+  resolver (`io.deephaven.server.uri.BarrageTableResolver`) is bound by default and connects with
+  the anonymous handler the demo stacks run.
+- A remote table is a refreshing table under the **local** update graph — `merge`, joins and
+  aggregations work on it like on any other; when the remote side fails, every dependent fails
+  too (doc 10 §2.7: rebuild, or bridge through a local `TablePublisher`).
+- Console-bound globals are reachable through `s/<name>` exactly like app-mode globals, which is
+  what makes a parameterised "remote call" a two-liner. Use unique names and delete them.
+- The gRPC health probe passes before app mode has finished wiring — "healthy" is not "exported";
+  retry `resolve()` until the global exists (doc 10 §6).

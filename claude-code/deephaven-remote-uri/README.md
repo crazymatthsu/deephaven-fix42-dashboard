@@ -84,6 +84,95 @@ reconnect()                                   # re-resolve every leaf and rebuil
 
 ---
 
+## Step by step (keep the stack up while you look around)
+
+Everything below runs from `claude-code/`. Nothing here tears the stack down; it stays up until
+you run the last command.
+
+**1. Bring the fleet up** (the derived image builds once, ~1 min the first time):
+
+```bash
+podman compose -f docker/docker-compose.remote-uri.yml up -d --build
+```
+
+| Container | Role | URL |
+|---|---|---|
+| `rx-amps` | AMPS broker, four journalled `fix42.oms-*` topics | `tcp://localhost:29007/amps/fix`, admin <http://localhost:28085> |
+| `rx-dh1` | leaf, folds `OMS-A` | <http://localhost:10011/ide> |
+| `rx-dh2` | leaf, folds `OMS-B-parent`, `OMS-B-child`, `OMS-C` | <http://localhost:10012/ide> |
+| `rx-collector` | collector: remote subscriptions, linking, exposure, dashboard | <http://localhost:10010/ide> |
+
+**2. Wait for the three banners.** `podman ps` says "healthy" as soon as the gRPC port answers,
+which is *before* app mode has finished wiring — the banner is the real "ready":
+
+```bash
+podman logs rx-dh1 | grep "Remote-URI leaf DH1 -- ready"
+podman logs rx-dh2 | grep "Remote-URI leaf DH2 -- ready"
+podman logs rx-collector | grep -A 12 "Remote-URI collector -- ready"   # lists every export it resolved
+```
+
+**3. Publish the sample FIX tapes into AMPS** (12 families, fan-out up to 3, ~320 messages across
+the four hub topics; the leaves fold them live and the collector updates within a second or two):
+
+```bash
+./gradlew :fix-mock-generator:run \
+  --args="--multi-oms --amps-uri tcp://localhost:29007/amps/fix --seed 42 --orders 12 --children 3 --rate 200"
+```
+
+**4. Look at the collector.** Open <http://localhost:10010/iframe/widget/?name=remote_uri_dashboard>
+(or the IDE and Panels ▸ `remote_uri_dashboard`). Pick Source OMS `OMS-A`, Account `ACC-1`,
+Symbol `META`, press *Find*: the headline shows the root-level totals, the families panel every
+hop of every matching family upstream → downstream with the leaf that holds it, and clicking a hop
+fetches its executions from that leaf (a remote query — the panel title names the leaf). `Fleet`
+shows one row per leaf with orders held and heap used.
+
+**5. Look at a leaf.** Open <http://localhost:10011/ide>: `rx_orders` holds only the 12 `OMS-A`
+orders, `oms_executions` their fills; <http://localhost:10012/ide> holds the other 60 hub-orders.
+Nothing on a leaf knows about the collector.
+
+**6. Try the mechanisms from the collector console** (IDE ▸ Console):
+
+```python
+find_exposure("OMS-A", "ACC-1", "META")       # 22 hops across DH1 and DH2, sorted RootKey, Depth, Oms
+exposure_for("OMS-A", "ACC-1", "")            # root-level totals per symbol
+family_totals("OMS-A", "", "")                # the same sums per hub level
+remote_executions("OMS-A|A-0001")             # remote query: filter runs on DH1, 7 rows come back
+remote_live_executions("OMS-C|C-0001-1")      # the same as a live subscription (from DH2)
+snapshot_leaf("DH2")                           # remote snapshot of DH2's rx_leaf_stats
+
+from deephaven.uri import resolve
+resolve("dh+plain://dh1:10000/scope/rx_orders").size()   # a raw remote subscription
+```
+
+**7. Publish more.** Any further generator run (any `--seed`, `--orders`, `--children`) adds
+families; the journal keeps everything, so a leaf restart replays it all.
+
+**8. Recovery drill.** Restart a leaf and watch the collector fail and recover:
+
+```bash
+podman restart rx-dh1
+```
+
+In the collector console `orders_recon.is_failed` turns `True` (a failed table still shows its
+last rows — that flag is the only honest signal), then:
+
+```python
+reconnect()      # re-resolves both leaves, rebuilds the DAG, re-exports every global
+```
+
+The first attempt may report `3 export(s) missing` while DH1 is still replaying from `EPOCH`;
+run it again a few seconds later.
+
+**9. Tear down — only when you are done** (also deletes the AMPS journal volume):
+
+```bash
+podman compose -f docker/docker-compose.remote-uri.yml down -v
+```
+
+The 6 GB podman machine fits this fleet *or* the 4 GB `fix42-dashboard` stack, not both.
+
+---
+
 ## Remote mechanisms (the point of the demo)
 
 All three run inside the collector's python; the leaves use the stack's anonymous auth.

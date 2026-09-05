@@ -585,6 +585,36 @@ Design, the 400M-message sizing analysis and contract: [docs/10-deephaven-remote
 
 ---
 
+## Market data demo — historical OHLC bars from parquet (local disk or S3)
+
+A fourth, self-contained app in `docker/apps/`, and the first one with **no message flow at
+all**: `market-data-demo` loads **per-minute OHLC bars** for one or more symbols over a period
+chosen in the UI from **parquet files** laid out as `YYYY/MM/DD/<SYMBOL>.parquet` on **local
+disk or S3**, and charts them as **candlestick**, OHLC, line, area, normalized-%-change or
+volume figures at a selectable bar interval (1m … 1D). A deterministic **mock generator**
+writes the parquet tree; the stack is one Deephaven server plus, for the S3 path, a MinIO
+bucket — all under podman:
+
+```bash
+bash market-data-demo/scripts/run_demo.sh              # generate mock data → podman compose up → URLs
+MD_SOURCE=s3 bash market-data-demo/scripts/run_demo.sh # + MinIO: upload the tree, Deephaven reads it via S3Instructions
+open http://localhost:10000/ide                        # Panels ▸ market_data_dashboard
+bash market-data-demo/scripts/run_demo.sh down
+```
+
+Pick symbols in the multi-select, a period with the date-range picker (or `1D / 5D / 1M / 3M /
+All`), a bar interval and a chart type; the loader reads exactly the day/symbol files the
+selection needs (listing one `YYYY/MM/DD/` prefix per day, never the whole store), merges
+them, resamples with `lowerBin` + `agg_by`, and plots with `deephaven.plot.express`. Clicking a
+row of the daily summary zooms to that day. `md_load("AAPL, MSFT", "2026-08-03", "2026-08-07",
+interval="5m")` and friends do the same from the console.
+
+Runbook, the parquet schema, the generator's properties, `MD_*` configuration and the MinIO
+addressing note: [market-data-demo/README.md](market-data-demo/README.md). Design and contract:
+[docs/11-market-data-demo.md](docs/11-market-data-demo.md).
+
+---
+
 ## AMPS transaction log as the source (optional)
 
 The pipeline reads raw FIX from Kafka by default. Set `FIX42_SOURCE=amps` and it reads the
@@ -685,7 +715,7 @@ Design and contract: [docs/07-amps-connectors.md](docs/07-amps-connectors.md).
 ```
 claude-code/
 ├── docs/                          # analysis & design — the binding contracts
-│   ├── 00-overview.md … 10-deephaven-remote-uri.md
+│   ├── 00-overview.md … 11-market-data-demo.md
 ├── settings.gradle.kts            # gradle multi-module root (Java 21 toolchain)
 ├── build.gradle.kts
 ├── fix-mock-generator/            # Java 21: FIX builder + scenario engine + Kafka CLI
@@ -710,6 +740,12 @@ claude-code/
 │   ├── tests/                     #   pytest unit suite (pure python)
 │   ├── e2e/                       #   run_e2e.sh + pydeephaven assertions against leaves + collector
 │   └── README.md                  #   runbook, remote mechanisms, REMOTEURI_* configuration
+├── market-data-demo/              # python: historical OHLC bars from parquet (local | S3) -> candlestick dashboard (doc 11)
+│   ├── src/market_data_demo/      #   layout, store (local/s3), config, mockgen, cli | reader, derived, charts, dashboard, app
+│   ├── scripts/                   #   generate_mock_data.sh, run_demo.sh (podman compose end to end)
+│   ├── tests/                     #   pytest unit suite (pure python) + optional embedded-server e2e
+│   ├── data/                      #   generated YYYY/MM/DD/<SYMBOL>.parquet tree (git-ignored)
+│   └── README.md                  #   runbook, schema, generator, MD_* configuration, MinIO note
 ├── amps-connectors/               # Spring Boot: AMPS topics -> Deephaven tables
 │   ├── src/main/java/com/fix42/dashboard/amps/
 │   └── src/main/resources/application.yml   # the whole configuration surface
@@ -717,6 +753,8 @@ claude-code/
 │   ├── docker-compose.yml         # kafka (KRaft) + deephaven, pinned images
 │   ├── docker-compose.remote-uri.yml  # amps + dh1 + dh2 + collector (the multi-server demo)
 │   ├── deephaven-amps.Dockerfile  # server image + amps-python-client, used by the remote-uri stack
+│   ├── docker-compose.market-data.yml # deephaven (+ optional MinIO, --profile s3) for the market-data demo
+│   ├── deephaven-market-data.Dockerfile # server image + boto3 (S3 listing), used by the market-data stack
 │   └── apps/                      # one folder per deephaven app; DH_APP picks one
 │       ├── _lib/loader.py         #   shared app-mode loader, mounted at /dh-app-lib
 │       ├── fix42-dashboard/       #   the default app (.app descriptor + main.py)
@@ -724,6 +762,7 @@ claude-code/
 │       ├── multi-oms-blotter/     #   the multi-OMS drop-copy blotter (.app + main.py)
 │       ├── remote-uri-leaf/       #   a leaf of the multi-server demo (.app + main.py)
 │       ├── remote-uri-collector/  #   the collector of the multi-server demo
+│       ├── market-data-demo/      #   the historical market-data dashboard (.app + main.py)
 │       └── example-minimal/       #   copy-me template, no repo dependencies
 ├── integration-test/
 │   ├── run_integration.sh         # up → generate → pytest → down
@@ -750,3 +789,4 @@ claude-code/
 | [08 — On-demand executions](docs/08-on-demand-executions-idea.md) | **tabled idea, not a contract** — fetching executions from AMPS per click; why it was set aside, and the cheaper alternatives |
 | [09 — Multi-OMS drop-copy blotter](docs/09-multi-oms-blotter.md) | **the contract** for the second app: hub topology, cross-hub linking, per-edge reconciliation and the break taxonomy, dashboard, generator mode, e2e scope |
 | [10 — Multi-server Deephaven: remote-URI leaves and collector](docs/10-deephaven-remote-uri.md) | **the contract** for the multi-server demo: sharding by hub / chain key, the 400M-message sizing analysis (throughput, memory, what the collector holds), remote subscription / snapshot / query mechanisms, leaf exports, collector DAG, exposure semantics, e2e scope |
+| [11 — Market data demo](docs/11-market-data-demo.md) | **the contract** for the market-data app: the `YYYY/MM/DD/<SYMBOL>.parquet` layout and schema, the deterministic mock generator, local vs S3 stores (and why MinIO needs `MINIO_DOMAIN`), `MD_*` configuration, reader / resampling / charts / dashboard, exported globals, embedded-engine test scope |

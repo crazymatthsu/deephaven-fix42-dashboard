@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "market-data-demo"
+version = "0.1.0"
+description = "Historical OHLC market data (parquet on local disk or S3) as a Deephaven candlestick / time-series dashboard, with a mock data generator"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "deephaven-fix42-dashboard" }]
+# pyarrow is the only runtime dependency, and only the mock generator / uploader use
+# it. Inside the Deephaven container the package is mounted as source (never pip
+# installed) and `deephaven` supplies pyarrow; the server reads the files itself.
+dependencies = ["pyarrow>=14.0"]
+
+[project.optional-dependencies]
+# boto3 lists/uploads S3 objects (MD_SOURCE=s3 and `python -m market_data_demo upload`).
+# Deephaven reads S3 parquet through its own client -- boto3 is never on the read path.
+s3 = ["boto3>=1.34"]
+test = ["pytest>=7.0"]
+
+[project.scripts]
+market-data-demo = "market_data_demo.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

@@ -1,0 +1,17 @@
+# python module artefacts
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# generated mock market data (regenerate with: python -m market_data_demo generate)
+data/

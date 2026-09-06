@@ -128,7 +128,9 @@ def test_resample_daily_and_normalized(runtime):
 
 
 def test_every_chart_type_builds(runtime):
-    from market_data_demo.charts import CHART_TYPES, build_charts
+    from deephaven import calendar as dh_calendar
+
+    from market_data_demo.charts import CHART_TYPES, DEMO_CALENDAR, build_charts, ensure_calendar
     from market_data_demo.derived import normalized, resample
 
     cfg, store, reader, inventory = runtime
@@ -136,10 +138,55 @@ def test_every_chart_type_builds(runtime):
     norm = normalized(bars)
     for kind in CHART_TYPES:
         for hide in (True, False):
-            charts = build_charts(kind, bars, ["AAPL", "MSFT"], interval="5m", hide_gaps=hide, first_day=DAYS[0], normalized_table=norm)
+            charts = build_charts(kind, bars, ["AAPL", "MSFT"], interval="5m", hide_gaps=hide, normalized_table=norm)
             assert not charts.notes, (kind, hide, charts.notes)
             expected = 2 if kind in ("candlestick", "ohlc") else 1
             assert len(charts.figures) == expected, (kind, hide)
+            # Gap hiding rides on a business calendar attached to every figure (doc 11 s7).
+            assert charts.calendar == (DEMO_CALENDAR if hide else None), (kind, hide)
+            for _title, figure in charts.figures:
+                assert figure.calendar == (DEMO_CALENDAR if hide else False), (kind, hide, figure.calendar)
+    # The demo calendar was registered with the engine on first use: NYSE hours, no holidays.
+    assert DEMO_CALENDAR in dh_calendar.calendar_names()
+    assert ensure_calendar("") == DEMO_CALENDAR
+    assert ensure_calendar("USNYSE_EXAMPLE") == "USNYSE_EXAMPLE"
+    assert ensure_calendar("NO_SUCH_CALENDAR") is None
+    demo = dh_calendar.calendar(DEMO_CALENDAR)
+    assert str(demo.timeZone()) == "America/New_York"
+    assert demo.isBusinessDay("2026-09-07")  # Labor Day: a business day in the demo calendar
+    assert not demo.isBusinessDay("2026-09-05")  # a Saturday
+
+
+def test_scan_failure_is_an_empty_inventory_not_a_crash(runtime):
+    """A bucket that does not exist yet (the S3 demo uploads after the server starts) must not
+    kill the app: empty inventory, a warning, and refresh() recovers once the store is there."""
+    from market_data_demo import app as app_module
+
+    cfg, store, reader, inventory = runtime
+
+    class _Broken:
+        kind = "s3"
+
+        def describe(self):
+            return "s3: s3://missing"
+
+        def available_days(self):
+            raise RuntimeError("NoSuchBucket: The specified bucket does not exist")
+
+        def list_files(self, *a, **k):  # pragma: no cover - never reached
+            raise AssertionError("list_files must not be called when available_days fails")
+
+    rt = app_module.Runtime(cfg, _Broken())
+    rt.scan()
+    assert rt.scan_error is not None and "NoSuchBucket" in rt.scan_error
+    assert rt.inventory.symbols == [] and rt.tables["md_inventory_symbols"].size == 0
+    rt.load_defaults()
+    assert rt.tables["md_bars"].size == 0 and rt.default_result is None
+    assert "scan_error=" in rt.describe()
+    rt.store = store  # the data landed: refresh() re-scans and forgets the error
+    rt.refresh()
+    assert rt.scan_error is None
+    assert rt.inventory.symbols == ["AAPL", "MSFT", "NVDA"]
 
 
 def test_dashboard_and_app_export(runtime, tree, monkeypatch):

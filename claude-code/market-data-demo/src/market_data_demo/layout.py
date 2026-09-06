@@ -18,7 +18,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Optional, Sequence, Union
+from typing import Any, Iterable, List, Mapping, Optional, Sequence, Union
 
 __all__ = [
     "PARQUET_SUFFIX",
@@ -163,9 +163,11 @@ def to_date(value: Any) -> Optional[dt.date]:
     """Coerce whatever a UI control or a caller hands over into a ``date``.
 
     Accepts ``date``/``datetime``, ISO strings (``"2026-09-04"``,
-    ``"2026-09-04T13:30:00Z"``), and any object whose ``str()`` starts with an ISO date
-    -- which covers the Java ``LocalDate`` / ``Instant`` / ``ZonedDateTime`` values
-    ``deephaven.ui`` date pickers deliver. ``None`` and blanks yield ``None``.
+    ``"2026-09-04T13:30:00Z"``), a mapping with ``year`` / ``monthValue`` (or ``month``)
+    / ``dayOfMonth`` (or ``day``) -- the shape a Java ``LocalDate`` cell has in a
+    ``deephaven.ui`` row-press payload -- and any other object whose ``str()`` starts
+    with an ISO date, which covers the ``LocalDate`` / ``Instant`` / ``ZonedDateTime``
+    values the date pickers deliver. ``None``, blanks and anything else yield ``None``.
     """
     if value is None:
         return None
@@ -173,6 +175,14 @@ def to_date(value: Any) -> Optional[dt.date]:
         return value.date()
     if isinstance(value, dt.date):
         return value
+    if isinstance(value, Mapping):
+        year = value.get("year")
+        month = value.get("monthValue", value.get("month"))
+        day = value.get("dayOfMonth", value.get("day"))
+        try:
+            return dt.date(int(year), int(month), int(day))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
     text = str(value)
     match = _LEADING_DATE_RE.match(text)
     if not match:

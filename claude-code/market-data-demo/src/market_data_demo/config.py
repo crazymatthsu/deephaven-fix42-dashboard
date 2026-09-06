@@ -76,6 +76,7 @@ class Config:
     default_interval: str = "1m"
     default_chart: str = "candlestick"
     hide_gaps: bool = True
+    calendar: str = ""
     cache_files: int = 512
     max_files: int = 2000
     read_threads: int = 4
@@ -122,6 +123,8 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
     ``MD_DEFAULT_INTERVAL``       ``1m``                 initial bar interval
     ``MD_DEFAULT_CHART``          ``candlestick``        initial chart type
     ``MD_HIDE_GAPS``              ``true``               hide overnight/weekend gaps on x
+    ``MD_CALENDAR``               ``""``                 business calendar for the gaps;
+                                                         blank -> the built-in demo one
     ``MD_CACHE_FILES``            ``512``                per-file table cache size
     ``MD_MAX_FILES``              ``2000``               refuse larger single loads
     ``MD_READ_THREADS``           ``4``                  parallel file reads
@@ -150,6 +153,7 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> Config:
         default_interval=(env.get("MD_DEFAULT_INTERVAL") or "1m").strip() or "1m",
         default_chart=(env.get("MD_DEFAULT_CHART") or "candlestick").strip().lower() or "candlestick",
         hide_gaps=parse_bool(env.get("MD_HIDE_GAPS"), "MD_HIDE_GAPS", True),
+        calendar=(env.get("MD_CALENDAR") or "").strip(),
         cache_files=parse_int(env.get("MD_CACHE_FILES"), "MD_CACHE_FILES", 512, minimum=0),
         max_files=parse_int(env.get("MD_MAX_FILES"), "MD_MAX_FILES", 2000, minimum=1),
         read_threads=parse_int(env.get("MD_READ_THREADS"), "MD_READ_THREADS", 4, minimum=1),

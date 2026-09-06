@@ -35,6 +35,7 @@ from typing import Any, Callable, Dict, List, MutableMapping, Optional  # noqa: 
 
 import market_data_demo  # noqa: E402
 from market_data_demo import config as md_config  # noqa: E402
+from market_data_demo.charts import DEMO_CALENDAR, ensure_calendar  # noqa: E402
 from market_data_demo.dashboard import build_dashboard, initial_symbols, preset_range  # noqa: E402
 from market_data_demo.derived import daily_summary  # noqa: E402
 from market_data_demo.query_api import make_query_api  # noqa: E402
@@ -91,11 +92,31 @@ class Runtime:
         self.api: Dict[str, Callable[..., Any]] = {}
         self.dashboard: Optional[Any] = None
         self.default_result: Optional[Any] = None
+        #: Why the last scan found nothing (``None`` when it succeeded).
+        self.scan_error: Optional[str] = None
 
     def scan(self) -> None:
-        """(Re)build the inventory from the store."""
-        days = self.store.available_days()
-        refs = self.store.list_files(days[0], days[-1]) if days else []
+        """(Re)build the inventory from the store.
+
+        A store that cannot be listed -- the S3 bucket does not exist yet (the demo uploads
+        it *after* the server starts), the endpoint is down, wrong credentials -- yields an
+        **empty inventory plus a warning line**, not a failed start: the dashboard and the
+        ``md_*`` functions still come up and ``md_refresh()`` re-scans once the data is
+        there. (Malformed ``MD_*`` values remain startup errors, see ``config``.)
+        """
+        try:
+            days = self.store.available_days()
+            refs = self.store.list_files(days[0], days[-1]) if days else []
+            self.scan_error = None
+        except Exception as exc:  # noqa: BLE001 - listing failed: empty inventory, loud warning
+            refs = []
+            self.scan_error = f"{type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''}"
+            print(
+                f"[market-data] WARNING: could not list {self.store.describe()} ({self.scan_error}); "
+                "the inventory is empty -- fix the store (upload the files, check the endpoint and "
+                "credentials) and run md_refresh(), or restart the container",
+                flush=True,
+            )
         self.inventory = summarize_inventory(refs)
         self.tables.update(_inventory_tables(self.inventory))
 
@@ -130,6 +151,7 @@ class Runtime:
         return (
             f"source={self.store.describe()} symbols={len(inv.symbols)} days={len(inv.days)} "
             f"files={len(inv.refs)} span={span}"
+            + (f" scan_error={self.scan_error}" if self.scan_error else "")
         )
 
 
@@ -141,6 +163,9 @@ def _wire() -> Runtime:
     """
     cfg = md_config.load_config()
     store = md_config.make_store(cfg)
+    # Register (or check) the gap-hiding calendar now, so a bad MD_CALENDAR shows up in the
+    # startup log and not on the first chart.
+    ensure_calendar(cfg.calendar)
     runtime = Runtime(cfg, store)
     runtime.scan()
     runtime.load_defaults()
@@ -190,10 +215,12 @@ def _print_banner(runtime: Runtime) -> None:
         "Market Data Demo -- ready",
         f"  source          : {cfg.describe()}",
         f"  inventory       : {len(inv.symbols)} symbols, {len(inv.days)} days, {len(inv.refs)} files"
-        + (f" ({inv.first_day} .. {inv.last_day})" if inv.first_day else ""),
+        + (f" ({inv.first_day} .. {inv.last_day})" if inv.first_day else "")
+        + (f" -- LISTING FAILED: {runtime.scan_error}; run md_refresh() once the store is reachable" if runtime.scan_error else ""),
         f"  symbols         : {', '.join(inv.symbols[:16])}{' ...' if len(inv.symbols) > 16 else ''}",
         f"  default load    : {default_line}",
-        f"  defaults        : interval={cfg.default_interval} chart={cfg.default_chart} days={cfg.default_days} hide_gaps={cfg.hide_gaps}",
+        f"  defaults        : interval={cfg.default_interval} chart={cfg.default_chart} days={cfg.default_days} "
+        f"hide_gaps={cfg.hide_gaps} calendar={ensure_calendar(cfg.calendar) or (cfg.calendar or DEMO_CALENDAR) + ' (unavailable)'}",
         f"  tables          : {', '.join(runtime.table_names)}",
         f"  query api       : {', '.join(sorted(runtime.api))}",
         f"  dashboard       : {dashboard_status}",

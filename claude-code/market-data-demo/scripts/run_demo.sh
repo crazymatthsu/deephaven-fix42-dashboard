@@ -87,7 +87,9 @@ if [ "$SOURCE" = "s3" ]; then
   "$VENV_PYTHON" -m market_data_demo upload --root "$DATA_DIR" --bucket "$BUCKET" --prefix "$PREFIX" \
     --endpoint "http://localhost:$MINIO_PORT" \
     --access-key "${MD_S3_ACCESS_KEY_ID:-minioadmin}" --secret-key "${MD_S3_SECRET_ACCESS_KEY:-minioadmin}" --quiet
-  # Deephaven scanned an empty bucket at startup: restart it so the inventory sees the upload.
+  # Deephaven started before the bucket existed (its scan logged a NoSuchBucket warning and an
+  # empty inventory): restart it so the startup inventory and the pre-loaded tables see the upload.
+  # (md_refresh() from the console would do as well.)
   log "restarting $CONTAINER so it re-scans the bucket"
   $RUNTIME_CMD restart "$CONTAINER" >/dev/null
 fi

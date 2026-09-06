@@ -2,14 +2,19 @@
 
 ::
 
-    +------------------------------------------------------+---------------------------+
-    | Symbols [list]  Period [range picker] 1D 5D 1M 3M All | Available symbols (table) |
-    | Interval v  Chart v  [x] hide gaps   status line      |                           |
-    +------------------------------------------------------+---------------------------+
+    +--------------------------------------------------------------+-------------------+
+    | Symbols [list]   Period [range picker]  1D 5D 1M 3M All       | Available symbols |
+    | [add symbols]    Interval v  Chart v  [x] hide gaps  Reload   | / Available days  |
+    |                  status line                                  |   (tabbed stack)  |
+    +--------------------------------------------------------------+-------------------+
     | Chart -- candlestick/OHLC: one tab per symbol; line/area/normalized/volume: one   |
     +----------------------------------------------+---------------------------------+
     | Bars (resampled)                             | Daily summary (click -> that day)|
     +----------------------------------------------+---------------------------------+
+
+The controls panel takes ~3/5 of the top row and the two inventory tables share the rest
+as tabs of one stack: with three equal panels only the symbol list was above the fold at
+1440x900 and every other control needed scrolling (found in the podman verification).
 
 State is four scalars -- the symbol tuple, the period, the interval, the chart type --
 and everything else is ``ui.use_memo`` over them: the reader loads the files for
@@ -39,6 +44,7 @@ __all__ = [
     "coerce_selection",
     "coerce_range",
     "initial_symbols",
+    "row_trade_date",
     "build_dashboard",
 ]
 
@@ -146,17 +152,32 @@ def _lookup(container: Any, key: str) -> Any:
         return getattr(container, key, None)
 
 
-def _cell_value(row: Any, column: str) -> Any:
+def row_trade_date(args: Sequence[Any], kwargs: Mapping[str, Any], column: str = "TradeDate") -> Optional[dt.date]:
+    """The date in a row-press payload, or ``None``.
+
+    ``deephaven.ui`` (0.40 verified) calls ``on_row_press`` with **one positional dict**,
+    column name -> ``{"value", "text", "type", ...}``; a ``LocalDate`` cell's ``value`` is
+    ``{"year": 2026, "monthValue": 9, "dayOfMonth": 4}`` and its ``text`` the ISO date.
+    Every candidate -- the value, the text, the raw cell -- is tried through
+    :func:`~market_data_demo.layout.to_date`, so older/newer payload shapes (a bare
+    string, a ``row=`` keyword, an object with attributes) resolve too.
+    """
+    row = _extract_row(args, kwargs)
+    if row is None:
+        return None
     cell = _lookup(row, column)
     if cell is None:
         return None
-    if isinstance(cell, (str, bytes, int, float)):
-        return cell.decode() if isinstance(cell, bytes) else cell
-    for key in _CELL_KEYS:
-        nested = _lookup(cell, key)
-        if nested is not None:
-            return nested
-    return cell
+    if isinstance(cell, bytes):
+        cell = cell.decode()
+    candidates: List[Any] = [cell]
+    if not isinstance(cell, (str, int, float)):
+        candidates = [_lookup(cell, key) for key in _CELL_KEYS] + [cell]
+    for candidate in candidates:
+        day = to_date(candidate)
+        if day is not None:
+            return day
+    return None
 
 
 def _safe(factory: Callable[[], Any]) -> Optional[Any]:
@@ -256,7 +277,7 @@ def build_dashboard(
                     symbol_list,
                     interval=interval,
                     hide_gaps=hide_gaps,
-                    first_day=start,
+                    calendar=cfg.calendar,
                     normalized_table=norm_table,
                 ),
                 None,
@@ -290,8 +311,7 @@ def build_dashboard(
 
         def on_summary_row(*args: Any, **kwargs: Any) -> None:
             try:
-                row = _extract_row(args, kwargs)
-                day = to_date(_cell_value(row, "TradeDate"))
+                day = row_trade_date(args, kwargs)
             except Exception:  # noqa: BLE001 - a UI callback must never raise
                 return
             if day is not None:
@@ -314,7 +334,7 @@ def build_dashboard(
                 on_change=on_symbols,
                 aria_label="Symbols",
                 height="size-1600",
-                min_width="size-1600",
+                width="size-2400",
             ),
             lambda: ui.checkbox_group(
                 *[ui.checkbox(symbol, value=symbol) for symbol in universe],
@@ -406,28 +426,54 @@ def build_dashboard(
         if charts is not None and charts.notes:
             status_lines.append("chart notes: " + " | ".join(charts.notes))
 
-        row_one = [element for element in (symbol_picker, typed_box, range_picker) if element is not None]
         presets = [element for element in preset_buttons if element is not None]
-        row_two = [element for element in (interval_picker, chart_picker, gaps_box, reload_button, clear_button) if element is not None]
+        settings_row = [element for element in (interval_picker, chart_picker, gaps_box, reload_button, clear_button) if element is not None]
 
-        controls = ui.flex(
-            ui.flex(*row_one, direction="row", gap="size-150", wrap=True, align_items="end"),
-            ui.flex(*presets, direction="row", gap="size-75", align_items="center"),
-            ui.flex(*row_two, direction="row", gap="size-150", wrap=True, align_items="end"),
+        # Two blocks side by side (a narrow panel scrolls horizontally): the symbol list with its
+        # add box, then the period / interval / chart settings and the status line.
+        # The symbol block keeps its natural width: the web plugin gives every ui.flex
+        # `flex-grow: 1`, so without an explicit 0 the block took the whole panel width and
+        # pushed the settings under it. The settings block shrinks into whatever is left
+        # (its own rows wrap inside), which is why the outer row must NOT wrap: with wrap on,
+        # the block's max-content width (the unwrapped settings row) exceeded the panel and
+        # it wrapped below the symbol list (`flex_basis` is not honoured by ui.flex 0.40).
+        symbol_block = ui.flex(
+            *[element for element in (symbol_picker, typed_box) if element is not None],
+            direction="column",
+            gap="size-100",
+            flex_grow=0,
+            flex_shrink=0,
+        )
+        settings_block = ui.flex(
+            *[element for element in (range_picker,) if element is not None],
+            ui.flex(*presets, direction="row", gap="size-75", wrap=True, align_items="center"),
+            ui.flex(*settings_row, direction="row", gap="size-150", wrap=True, align_items="end"),
             *[ui.text(line) for line in status_lines],
             direction="column",
             gap="size-100",
+            flex_grow=1,
+            flex_shrink=1,
+            min_width="size-3400",
         )
+        controls = ui.flex(symbol_block, settings_block, direction="row", gap="size-300", wrap=False, align_items="start")
 
         # -- chart panel -------------------------------------------------------------
         chart_body = _chart_body(ui, charts, chart_kind, symbol_list)
 
         # -- layout ------------------------------------------------------------------
-        top_panels = [ui.panel(controls, title="Market data -- controls")]
+        controls_panel = ui.panel(controls, title="Market data -- controls")
+        inventory_panels = []
         if inventory_symbols_table is not None:
-            top_panels.append(ui.panel(ui.table(inventory_symbols_table), title="Available symbols"))
+            inventory_panels.append(ui.panel(ui.table(inventory_symbols_table), title="Available symbols"))
         if inventory_days_table is not None:
-            top_panels.append(ui.panel(ui.table(inventory_days_table), title="Available days"))
+            inventory_panels.append(ui.panel(ui.table(inventory_days_table), title="Available days"))
+        # ~3/5 of the width for the controls, the inventory tables tabbed in one stack.
+        top_row = _first(
+            lambda: ui.row(ui.column(controls_panel, width=62), ui.stack(*inventory_panels, width=38), height=36)
+            if inventory_panels
+            else ui.row(controls_panel, height=36),
+            lambda: ui.row(controls_panel, *inventory_panels, height=36),
+        )
 
         summary_table = _first(
             lambda: ui.table(summary, on_row_press=on_summary_row, always_fetch_columns=["TradeDate"]),
@@ -436,12 +482,12 @@ def build_dashboard(
         )
 
         return ui.column(
-            ui.row(*top_panels, height=30),
-            ui.row(ui.panel(chart_body, title="Chart"), height=42),
+            top_row,
+            ui.row(ui.panel(chart_body, title="Chart"), height=38),
             ui.row(
                 ui.panel(ui.table(resampled), title=f"Bars ({interval})"),
                 ui.panel(summary_table, title="Daily summary (click a row to zoom to that day)"),
-                height=28,
+                height=26,
             ),
         )
 

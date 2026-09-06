@@ -34,13 +34,14 @@ CLI flags there are frozen the way docs 09/10 are for their modules.
 cd claude-code
 
 # 1. generate the mock universe (8 symbols, the last 30 calendar days, 1-minute bars)
-#    -> market-data-demo/data/YYYY/MM/DD/<SYMBOL>.parquet   (~200 files, ~15 MB)
+#    -> market-data-demo/data/YYYY/MM/DD/<SYMBOL>.parquet   (~180 files, ~3.5 MB)
 bash market-data-demo/scripts/generate_mock_data.sh
 #    or a specific universe / period / seed:
 bash market-data-demo/scripts/generate_mock_data.sh --symbols AAPL,MSFT,NVDA --start 2026-08-03 --end 2026-09-04 --seed 42
 
 # 2. bring Deephaven up on it (builds the derived image once: server 42.4 + boto3)
 podman compose -f docker/docker-compose.market-data.yml up -d --build
+#    DH_XMX=1g ... if another Deephaven stack is already on the podman machine (default 4g)
 
 # 3. open the dashboard
 open http://localhost:10000/ide          # Panels ▸ market_data_dashboard
@@ -54,8 +55,8 @@ if the data directory is empty, starts the stack, waits for the banner and print
 
 | Panel | Contents |
 |---|---|
-| Market data — controls | a multi-select **Symbols** list (plus a text box to add tickers), a **Period** date-range picker with `1D / 5D / 1M / 3M / All` presets, the **Bar interval** (`1m 5m 15m 30m 1h 1D`), the **Chart** type, a **hide gaps** toggle (weekends and overnight are cut out of the x axis), **Reload**, and a status line naming the files that were read |
-| Available symbols / days | the store inventory: per symbol its first/last day and file count; per day how many symbols |
+| Market data — controls | a multi-select **Symbols** list (plus a text box to add tickers), a **Period** date-range picker with `1D / 5D / 1M / 3M / All` presets, the **Bar interval** (`1m 5m 15m 30m 1h 1D`), the **Chart** type, a **hide gaps** toggle (a business calendar cuts weekends and the overnight hours out of the x axis), **Reload**, and a status line naming the files that were read |
+| Available symbols / days | the store inventory as two tabs: per symbol its first/last day and file count; per day how many symbols |
 | Chart | candlestick or OHLC: **one tab per selected symbol**; line / area / normalized / volume: **every symbol on one figure**, colored by `Symbol` |
 | Bars | the loaded table at the chosen interval — sort, filter and export it like any Deephaven table |
 | Daily summary | one row per symbol per trading day: OHLC, volume, `ReturnPct`, `RangePct` — **click a row to zoom the period to that day** |
@@ -195,6 +196,7 @@ malformed value is a **startup error**, never a silent fallback.
 | `MD_DEFAULT_INTERVAL` | `1m` | initial bar interval |
 | `MD_DEFAULT_CHART` | `candlestick` | initial chart type |
 | `MD_HIDE_GAPS` | `true` | cut weekends / overnight out of the x axis |
+| `MD_CALENDAR` | `` | the Deephaven business calendar that defines those gaps; blank → the built-in `MARKET_DATA_DEMO` one (NYSE hours, weekends, **no holidays** — what the generator writes); `USNYSE_EXAMPLE` for real data with holidays |
 | `MD_CACHE_FILES` | `512` | per-file table cache (files are immutable) |
 | `MD_MAX_FILES` | `2000` | refuse a single load larger than this |
 | `MD_READ_THREADS` | `4` | parallel file reads |
@@ -247,13 +249,27 @@ does not — see the MinIO note above. Check `podman exec md-deephaven getent ho
 market-data.minio` resolves, and that `MINIO_DOMAIN=minio` is set on the MinIO container.
 Against real S3, check `MD_S3_ENDPOINT` is empty.
 
+**S3: the banner says `0 symbols, 0 days ... LISTING FAILED: NoSuchBucket`.** Deephaven
+started before the bucket was created (in the `run_demo.sh` flow that is expected: the upload
+comes after `up`, and the script restarts the container afterwards). Upload, then `md_refresh()`
+in the console or `podman restart md-deephaven`. The same line with a connection error means
+`MD_S3_ENDPOINT` is wrong or MinIO is not up.
+
 **S3: `ModuleNotFoundError: boto3`.** The stack was started against the stock image. Use
 `up -d --build` (or `podman compose -f docker/docker-compose.market-data.yml build`) so the
 derived image from `docker/deephaven-market-data.Dockerfile` is used.
 
-**The chart shows big flat gaps between days.** `hide gaps` is off, or the period spans a
-DST change (the gap bounds are computed from the first day of the period; the sliver at one
-end is cosmetic). Toggle the checkbox, or shorten the period.
+**The chart shows big flat gaps between days.** `hide gaps` is off, or no business calendar
+could be attached — the status line then says `gaps not hidden: ...` and the startup banner's
+`calendar=` ends in `(unavailable)`. With `MD_CALENDAR` set, the name must be one of
+`deephaven.calendar.calendar_names()` (`USNYSE_EXAMPLE`, `USBANK_EXAMPLE`, `UTC` on 42.4);
+leave it blank for the built-in demo calendar. Note that `USNYSE_EXAMPLE` hides its
+holidays (Labor Day, Thanksgiving, ...) while the mock generator still writes bars for them.
+
+**Only the afternoon of each session shows, or the line/area chart is empty with `hide
+gaps` on.** That was the first implementation (fixed plotly `rangebreaks` in UTC, which
+the IDE's New-York display and WebGL line traces both defeat); update to the calendar-based
+`charts.py` (doc 11 §7).
 
 **`No tables or dashboard in the IDE`.** The app-mode script did not load:
 `podman logs md-deephaven | grep -E '\[market-data-demo\]|\[market-data\]'`. A python
@@ -262,3 +278,8 @@ the server stays up, so fix it and `podman restart md-deephaven`.
 
 **Port 10000 is taken.** The fix42-dashboard stack uses it too — run one or the other, or
 `DH_PORT=10001 podman compose -f docker/docker-compose.market-data.yml up -d`.
+
+**The container exits with code 137, or never prints the banner.** The JVM was OOM-killed:
+the podman machine (6 GB by default) cannot hold this stack's default 4 GB heap next to
+another Deephaven stack. `DH_XMX=1g bash market-data-demo/scripts/run_demo.sh` is plenty
+for the demo.

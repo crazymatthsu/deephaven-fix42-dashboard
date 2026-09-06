@@ -2,9 +2,9 @@ import datetime as dt
 
 import pytest
 
-from market_data_demo.charts import CHART_TYPES, PER_SYMBOL_CHARTS, gap_rangebreaks
+from market_data_demo.charts import CHART_TYPES, DEMO_CALENDAR, PER_SYMBOL_CHARTS, demo_calendar_xml
 from market_data_demo.config import Config
-from market_data_demo.dashboard import PRESETS, coerce_range, coerce_selection, initial_symbols, preset_range
+from market_data_demo.dashboard import PRESETS, coerce_range, coerce_selection, initial_symbols, preset_range, row_trade_date
 from market_data_demo.derived import INTERVALS, interval_nanos, interval_seconds, symbol_filter
 
 DAYS = [dt.date(2026, 8, 3) + dt.timedelta(days=i) for i in range(30) if (dt.date(2026, 8, 3) + dt.timedelta(days=i)).weekday() < 5]
@@ -68,13 +68,51 @@ def test_chart_registry():
     assert set(PER_SYMBOL_CHARTS) <= set(CHART_TYPES)
 
 
-def test_gap_rangebreaks_follow_dst():
-    summer = gap_rangebreaks(dt.date(2026, 9, 4))
-    assert summer[0] == {"bounds": ["sat", "mon"]}
-    assert summer[1] == {"bounds": [20.0, 13.5], "pattern": "hour"}
-    winter = gap_rangebreaks(dt.date(2026, 12, 4))
-    assert winter[1] == {"bounds": [21.0, 14.5], "pattern": "hour"}
-    assert len(gap_rangebreaks(None)) == 2
+def test_demo_calendar_xml():
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(demo_calendar_xml())
+    assert root.tag == "calendar"
+    assert root.findtext("name") == DEMO_CALENDAR == "MARKET_DATA_DEMO"
+    assert root.findtext("timeZone") == "America/New_York"
+    assert root.findtext("default/businessTime/open") == "09:30"
+    assert root.findtext("default/businessTime/close") == "16:00"
+    assert [w.text for w in root.findall("default/weekend")] == ["Saturday", "Sunday"]
+    assert root.findall("holiday") == []  # the mock generator models no holidays
+    assert root.findtext("name") != ET.fromstring(demo_calendar_xml(name="OTHER")).findtext("name") == "OTHER"
+
+
+# The payload deephaven.ui 0.40 hands on_row_press (captured from the running UI, trimmed).
+_UI_ROW = {
+    "Symbol": {"value": "AAPL", "text": "AAPL", "type": "java.lang.String", "isGrouped": False, "isExpandable": False},
+    "TradeDate": {
+        "value": {"year": 2026, "monthValue": 9, "dayOfMonth": 4},
+        "text": "2026-09-04",
+        "type": "java.time.LocalDate",
+        "isGrouped": False,
+        "isExpandable": False,
+    },
+    "Open": {"value": 414.69, "text": "414.6900", "type": "double", "isGrouped": False, "isExpandable": False},
+}
+
+
+class _Cell:
+    def __init__(self, value):
+        self.value = value
+
+
+def test_row_trade_date_payloads():
+    day = dt.date(2026, 9, 4)
+    assert row_trade_date((_UI_ROW,), {}) == day  # the real shape: one positional dict
+    assert row_trade_date((), {"row": _UI_ROW}) == day  # keyword variants
+    assert row_trade_date((), {"data": {"TradeDate": {"text": "2026-09-04"}}}) == day  # text only
+    assert row_trade_date(({"TradeDate": "2026-09-04"},), {}) == day  # bare string cell
+    assert row_trade_date(({"TradeDate": b"2026-09-04"},), {}) == day
+    assert row_trade_date((0, {"TradeDate": _Cell(dt.date(2026, 9, 4))}), {}) == day  # attribute cell
+    assert row_trade_date(({"TradeDate": {"value": {"year": 2026, "monthValue": 13, "dayOfMonth": 4}, "text": "bad"}},), {}) is None
+    assert row_trade_date(({"Symbol": {"value": "AAPL"}},), {}) is None
+    assert row_trade_date((), {}) is None
+    assert row_trade_date(("AAPL",), {}) is None
 
 
 def test_symbol_filter():

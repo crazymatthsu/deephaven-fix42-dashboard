@@ -165,6 +165,7 @@ fallback). Every variable has a default that makes the **local** demo run with n
 | `MD_DEFAULT_INTERVAL` | `1m` | key of `INTERVALS` |
 | `MD_DEFAULT_CHART` | `candlestick` | key of `CHART_TYPES` |
 | `MD_HIDE_GAPS` | `true` | bool |
+| `MD_CALENDAR` | `` | name of a registered Deephaven business calendar used to hide the gaps; blank → the built-in `MARKET_DATA_DEMO` calendar (§7); an unknown name is reported at startup and gaps are then shown |
 | `MD_CACHE_FILES` | `512` | ≥ 0 |
 | `MD_MAX_FILES` | `2000` | ≥ 1 |
 | `MD_READ_THREADS` | `4` | ≥ 1 |
@@ -217,28 +218,54 @@ then per `(Symbol, TradeDate)`: `Open` first, `High` max, `Low` min, `Close` las
 | `normalized` | `dx.line(normalized, y=PctChange, by=Symbol)` | one figure |
 | `volume` | `dx.bar(y=Volume, by=Symbol)` | one figure |
 
-`build_charts(kind, bars, symbols, interval, hide_gaps, first_day, normalized_table) ->
-ChartSet(kind, figures=[(title, figure)], notes)`. `hide_gaps` applies plotly
-`rangebreaks` through `unsafe_update_figure`: `["sat", "mon"]` and the overnight hours
-`[session_close, session_open]` in UTC, using the first day's DST offset (`gap_rangebreaks`).
-Every figure is attempted with its extras and retried plain if the plugin rejects them;
-what was dropped is recorded in `notes` and shown in the status line.
+`build_charts(kind, bars, symbols, interval, hide_gaps, calendar, normalized_table) ->
+ChartSet(kind, figures=[(title, figure)], notes, calendar)`.
+
+**Gap hiding is a business calendar, not hand-written rangebreaks.** With `hide_gaps` the
+figures carry a Deephaven business calendar (`calendar=` on `dx.line/area/candlestick/ohlc`;
+`figure.calendar = ...` on the volume `dx.bar`, which has no `calendar=` in 0.20) and the
+web plugin cuts the non-business time out of the x axis. Two facts, both verified against
+42.4 / plotly-express 0.20 in the podman stack, rule out fixed plotly `rangebreaks`
+through `unsafe_update_figure` (the first implementation):
+
+1. the IDE displays timestamps in the viewer's time zone (default `America/New_York`, not
+   UTC), so UTC hour bounds hid **the morning half of every session** instead of the night;
+2. plotly ignores rangebreaks on WebGL traces, and `dx.line` renders WebGL by default — the
+   line / area / normalized figures came up **empty** with gaps hidden. The plugin forces
+   `render_mode="svg"` when a calendar is attached.
+
+The calendar used is `MD_CALENDAR`, or when blank the built-in `MARKET_DATA_DEMO` calendar
+(`charts.DEMO_CALENDAR`): `America/New_York`, 09:30–16:00, Saturday/Sunday weekends, **no
+holidays** — exactly what the mock generator writes (§3), so no mock session is ever hidden.
+`ensure_calendar(name)` registers it with the engine on first use from `demo_calendar_xml()`
+(written to a temp file, `deephaven.calendar.add_calendar`) and is called once at startup
+so an unknown `MD_CALENDAR` is reported in the banner; real data with holidays should use
+`USNYSE_EXAMPLE`. Without a usable calendar the figures are built with the gaps shown and a
+note says so. Every figure is attempted with its extras (calendar, title hook) and retried
+plain if the plugin rejects them; what was dropped is recorded in `notes` and shown in the
+status line.
 
 ---
 
 ## 8. Dashboard (`market_data_demo.dashboard`, global `market_data_dashboard`)
 
 ```
-+------------------------------------------------------+---------------------------+
-| Symbols [multi-select] [+add]  Period [range] 1D 5D 1M 3M All | Available symbols     |
-| Interval v  Chart v  [x] hide gaps  Reload  Clear   | Available days              |
-| status: N file(s) for A .. B; symbols: ...           |                           |
-+------------------------------------------------------+---------------------------+
++--------------------------------------------------------------+-------------------+
+| Symbols [multi-select]   Period [range]  1D 5D 1M 3M All      | Available symbols |
+| [+add]                   Interval v  Chart v  [x] hide gaps   | / Available days  |
+|                          Reload  Clear   status: N file(s)... |  (tabbed stack)   |
++--------------------------------------------------------------+-------------------+
 | Chart: candlestick/OHLC -> one tab per symbol; line/area/normalized/volume -> one |
 +----------------------------------------------+---------------------------------+
 | Bars (resampled)                             | Daily summary (click -> that day)|
 +----------------------------------------------+---------------------------------+
 ```
+
+Top row: `ui.row(ui.column(controls, width=62), ui.stack(symbols, days, width=38), height=36)`
+— the controls take ~3/5 of the width and the two inventory tables are tabs of one stack.
+(Three equal panels, the first layout, left only the symbol list above the fold at 1440×900;
+every other control needed scrolling inside the panel.) Then the chart (38%) and the two
+tables (26%).
 
 State is four scalars — the symbol tuple, `(start, end)`, `interval`, `chart` — plus the
 `hide gaps` flag and a reload counter. Data flow, all `ui.use_memo`:
@@ -261,8 +288,16 @@ Version tolerance as in docs 09/10: `deephaven.ui` imported lazily, `build_dashb
 returns `None` without it (the app then exports only tables and functions); every control
 is built inside `_first`/`_safe` fallback chains (`list_view` → `checkbox_group`;
 `date_range_picker` → two `date_picker`s; `picker` → `radio_group`; `tabs` → stacked
-figures); `on_row_press` accepts every known payload shape; `to_date` coerces the Java
-`LocalDate`/`Instant` values the pickers deliver. UI callbacks never raise.
+figures); `to_date` coerces the Java `LocalDate`/`Instant` values the pickers deliver. UI
+callbacks never raise.
+
+**Daily-summary click.** deephaven.ui (0.40 verified) calls `on_row_press` with one
+positional dict, column → `{"value", "text", "type", ...}`; a `LocalDate` cell's `value` is
+`{"year": 2026, "monthValue": 9, "dayOfMonth": 4}` and its `text` the ISO date.
+`row_trade_date(args, kwargs)` (pure, unit-tested on that captured payload) tries the value,
+the text and the raw cell through `to_date`, which understands that mapping shape; the
+first implementation read only `value`, could not parse the mapping, and the click did
+nothing.
 
 ---
 
@@ -300,15 +335,20 @@ and a startup banner (`Market Data Demo -- ready`).
 tree with both shapes and junk; S3 fake with pagination, prefixes, upload round-trip;
 inventory roll-up), `test_config.py` (defaults, s3, every startup error, secret masking),
 `test_dashboard_helpers.py` (presets, selection/range coercion, intervals, chart registry,
-rangebreaks), `test_cli.py` (generate → list round trip).
+the demo calendar XML, `row_trade_date` on the captured deephaven.ui payload), `test_cli.py`
+(generate → list round trip).
 
 **Embedded engine (`MD_DH_TEST=1`, `deephaven-server==42.4` installed)** —
 `tests/test_deephaven_embedded.py` starts the server in-process and asserts: reader merge
 (6 files → 2340 rows), `Instant` timestamps at 13:30Z, cache hits, resample row counts
 (`5m`→78/day, `1h`→7/day, `1D`→1/day), daily summary and normalized invariants, every
-chart type × hide-gaps builds, the dashboard element builds, and the app entrypoint exports
-every §9 global and is idempotent on a second exec. Verified on this contract's
-implementation against 42.4 with deephaven.ui 0.42.0 / plotly-express 0.20.0.
+chart type × hide-gaps builds and carries the `MARKET_DATA_DEMO` calendar (registered with
+the engine, NYSE hours, Labor Day is a business day), the dashboard element builds, and the
+app entrypoint exports every §9 global and is idempotent on a second exec. Verified on this
+contract's implementation against 42.4 with deephaven.ui 0.42.0 / plotly-express 0.20.0,
+and in the podman stack (server 42.4, deephaven.ui 0.40.2) by driving the dashboard in a
+browser: symbol toggles, add box, presets, interval and chart pickers, hide-gaps, the
+daily-summary click and all six chart types.
 
 ---
 
@@ -329,7 +369,11 @@ are already in the base image.
 
 `market-data-demo/scripts/run_demo.sh [down]` sequences: generate if empty → `up -d --build`
 (`--profile s3` for `MD_SOURCE=s3`) → (s3) wait for MinIO, `upload`, restart Deephaven so it
-re-scans → wait for the banner → print URLs. `scripts/generate_mock_data.sh` is the
+re-scans → wait for the banner → print URLs. In the s3 flow Deephaven starts **before** the
+bucket exists: the startup scan logs a `NoSuchBucket` warning and an empty inventory (a store
+that cannot be listed is never a failed start — `Runtime.scan()` keeps the app up so
+`md_refresh()` can recover; the banner then reads `LISTING FAILED: ...`), and the restart is
+what makes the pre-loaded tables see the upload. `scripts/generate_mock_data.sh` is the
 generator through the module venv (also `./gradlew :market-data-demo:generateMockData`).
 
 ---

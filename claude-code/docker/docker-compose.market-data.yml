@@ -21,7 +21,9 @@
 # This is a SEPARATE compose project (`name:` below) from docker/docker-compose.yml and
 # docker-compose.remote-uri.yml, with its own container names and network -- but it publishes
 # the same host port 10000 as the fix42-dashboard stack, so run one or the other, or set
-# DH_PORT=10001 here.
+# DH_PORT=10001 here. The JVM heap defaults to 4 GB (DH_XMX); the demo itself is small
+# (a 30-day, 8-symbol tree is ~3.5 MB of parquet), so DH_XMX=1g is plenty when another
+# Deephaven stack already occupies the podman machine.
 #
 # ---------------------------------------------------------------------------------------------
 # S3 ADDRESSING. Deephaven's reader is the AWS Java SDK, which addresses a bucket behind a
@@ -94,6 +96,9 @@ services:
       MD_DEFAULT_INTERVAL: "${MD_DEFAULT_INTERVAL:-1m}"
       MD_DEFAULT_CHART: "${MD_DEFAULT_CHART:-candlestick}"
       MD_HIDE_GAPS: "${MD_HIDE_GAPS:-true}"
+      # Business calendar that hides the gaps; blank = the built-in demo calendar (NYSE
+      # hours, no holidays -- what the mock generator produces). USNYSE_EXAMPLE for real data.
+      MD_CALENDAR: "${MD_CALENDAR:-}"
       MD_MAX_FILES: "${MD_MAX_FILES:-2000}"
       MD_READ_THREADS: "${MD_READ_THREADS:-4}"
     healthcheck:

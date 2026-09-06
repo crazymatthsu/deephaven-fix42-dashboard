@@ -65,7 +65,9 @@ def make_query_api(runtime: Any) -> Dict[str, Callable[..., Any]]:
         names = parse_symbols(symbols) or list(runtime.inventory.symbols[:1])
         bars = md_load(names, first, last, interval)
         norm = normalized(bars) if kind == "normalized" else None
-        charts = build_charts(kind, bars, names, interval=interval, hide_gaps=hide_gaps, first_day=first, normalized_table=norm)
+        charts = build_charts(
+            kind, bars, names, interval=interval, hide_gaps=hide_gaps, calendar=runtime.cfg.calendar, normalized_table=norm
+        )
         for note in charts.notes:
             print("[market-data] " + note)
         return charts.figures[0][1] if charts.figures else None

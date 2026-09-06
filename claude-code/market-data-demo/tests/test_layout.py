@@ -120,6 +120,21 @@ def test_to_date(value, expected):
     assert to_date(value) == expected
 
 
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ({"year": 2026, "monthValue": 9, "dayOfMonth": 4}, dt.date(2026, 9, 4)),  # deephaven.ui LocalDate cell
+        ({"year": "2026", "month": "9", "day": "4"}, dt.date(2026, 9, 4)),
+        ({"year": 2026, "monthValue": 9, "dayOfMonth": 31}, None),  # not a date
+        ({"year": 2026, "month": "SEPTEMBER", "dayOfMonth": 4}, None),  # java's Month name is not enough
+        ({"start": "2026-09-04"}, None),
+        ({}, None),
+    ],
+)
+def test_to_date_mapping(value, expected):
+    assert to_date(value) == expected
+
+
 def test_clamp_range():
     avail = [dt.date(2026, 9, 1), dt.date(2026, 9, 2), dt.date(2026, 9, 3)]
     assert clamp_range(None, None, avail) == (dt.date(2026, 9, 1), dt.date(2026, 9, 3))

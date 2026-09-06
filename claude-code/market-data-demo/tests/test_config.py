@@ -13,6 +13,7 @@ def test_defaults_are_local():
     assert cfg.default_interval == "1m"
     assert cfg.default_chart == "candlestick"
     assert cfg.hide_gaps is True
+    assert cfg.calendar == ""  # blank -> the built-in demo calendar
     assert cfg.cache_files == 512 and cfg.max_files == 2000 and cfg.read_threads == 4
     assert cfg.describe() == "local /market-data"
     assert isinstance(make_store(cfg), LocalStore)
@@ -32,9 +33,11 @@ def test_s3_config():
             "MD_DEFAULT_INTERVAL": "5m",
             "MD_DEFAULT_CHART": "LINE",
             "MD_HIDE_GAPS": "no",
+            "MD_CALENDAR": " USNYSE_EXAMPLE ",
         }
     )
     assert cfg.is_s3
+    assert cfg.calendar == "USNYSE_EXAMPLE"
     assert cfg.s3_prefix == "ohlc"
     assert cfg.s3_path_style is True  # endpoint set -> path style default
     assert cfg.default_symbols == ["AAPL", "MSFT"]

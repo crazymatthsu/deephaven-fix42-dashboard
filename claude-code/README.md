@@ -715,7 +715,7 @@ Design and contract: [docs/07-amps-connectors.md](docs/07-amps-connectors.md).
 ```
 claude-code/
 ├── docs/                          # analysis & design — the binding contracts
-│   ├── 00-overview.md … 11-market-data-demo.md
+│   ├── 00-overview.md … 12-market-data-sql-as-of-join.md
 ├── settings.gradle.kts            # gradle multi-module root (Java 21 toolchain)
 ├── build.gradle.kts
 ├── fix-mock-generator/            # Java 21: FIX builder + scenario engine + Kafka CLI

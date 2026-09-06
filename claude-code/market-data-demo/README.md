@@ -26,6 +26,10 @@ The binding contract is [`docs/11-market-data-demo.md`](../docs/11-market-data-d
 the layout, the parquet schema, the table and column names, the `MD_*` variables and the
 CLI flags there are frozen the way docs 09/10 are for their modules.
 
+Recipes for joining the bars to FIX orders / executions ("what was the market doing around this
+order?") in SQL and with the native as-of join, verified against the running stack:
+[`docs/12-market-data-sql-as-of-join.md`](../docs/12-market-data-sql-as-of-join.md).
+
 ---
 
 ## Quickstart (local parquet files)

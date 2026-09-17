@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "basket-oms-demo"
+version = "0.1.0"
+description = "Deephaven as an equities OMS front end: basket ticket, basket list, order blotter with a context menu (modify / cancel / route / split), on mock orders"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "deephaven-fix42-dashboard" }]
+# No runtime dependency: the order core is pure python and the Deephaven layer runs
+# inside the server container, where `deephaven` and `deephaven.ui` are bundled.
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

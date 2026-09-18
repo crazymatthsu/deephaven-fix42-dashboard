@@ -700,11 +700,14 @@ Design and contract: [docs/03-deephaven-dag.md §2.1](docs/03-deephaven-dag.md).
 
 ## AMPS connectors (optional)
 
-Separate from the FIX 4.2 pipeline above, `amps-connectors` is a Spring Boot application that
-subscribes to [60East AMPS](https://www.crankuptheamps.com/) topics and publishes the fields you
-map into Deephaven tables in the same server — so they appear in the IDE alongside
-`order_state_latest`. One application runs one or more connectors, all configured in
-`application.yml`.
+Separate from the FIX 4.2 pipeline above, `amps-connectors` is a connector **framework** plus
+the Spring Boot **applications** built on it: each subscribes to
+[60East AMPS](https://www.crankuptheamps.com/) topics and publishes the fields you map into
+Deephaven tables in the same server — so they appear in the IDE alongside `order_state_latest`.
+One application runs one or more connectors, entirely configuration-driven; deployable
+applications are directories under `amps-connectors/config/<env>/<flow>/<app-name>/`, run as
+containers by `amps-connectors/scripts/dh-connectors-compose.sh` (podman compose), with custom
+code the exception, not the rule.
 
 - **Formats** — `FIX`, `NVFIX`, `JSON` and `COMPOSITE` (AMPS composite message types:
   multi-part messages addressed with part-indexed tags such as `0.orderId`), each with its own
@@ -726,11 +729,12 @@ map into Deephaven tables in the same server — so they appear in the IDE along
   tables and replays every subscription from the start, rehydrating the tables.
 
 ```bash
-# with an AMPS server on localhost:9007
-./gradlew :amps-connectors:bootRun
+# the demo profile: the six example connectors over an in-process simulator, no AMPS needed
+./gradlew :amps-connectors:connector-app:bootRun --args="--spring.profiles.active=demo"
 
-# without one -- the demo profile swaps in an in-process simulator
-./gradlew :amps-connectors:bootRun --args="--spring.profiles.active=demo"
+# the deployable applications, containerised (see amps-connectors/README.md)
+amps-connectors/scripts/dh-connectors-compose.sh local build
+amps-connectors/scripts/dh-connectors-compose.sh local up cache
 ```
 
 AMPS is commercial software with no public image, so the compose stack does not include one.

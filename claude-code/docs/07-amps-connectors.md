@@ -1,6 +1,7 @@
 # AMPS Connectors — Design & Contract
 
-Binding spec for `:amps-connectors`, the Spring Boot application that bridges
+Binding spec for `amps-connectors` — the connector framework and the Spring Boot applications
+built on it (§9) — bridging
 [60East AMPS](https://www.crankuptheamps.com/) topics into Deephaven tables. Independent of
 the FIX 4.2 pipeline in docs 01–05: it publishes into the *same* Deephaven server, so its
 tables appear alongside `order_state_latest` and friends, but it shares no code with it.
@@ -561,20 +562,46 @@ resurrect a record deleted and re-added in the same batch. A failed flush is log
 not thrown: losing Deephaven is precisely what triggers the reconnect and replay that
 republishes current state.
 
-## 9. Module layout
+## 9. Module layout: framework + applications
+
+The submodule separates the **framework** (a `java-library`) from the **applications** built on
+it. An application is a deployment unit: most are the generic runner plus one configuration
+directory, and a *custom* application (own decoder, enricher) is its own Gradle module. This is
+what lets the fleet grow to dozens of Spring Boot applications without dozens of modules: the
+build produces one framework and one runner artifact however many times they are deployed.
 
 ```
 amps-connectors/
-├── build.gradle.kts                    # spring boot 3.5, java 21, amps-client, deephaven client 42.4
-└── src/main/java/com/fix42/dashboard/amps/
-    ├── AmpsConnectorsApplication.java  # headless boot app (spring.main.keep-alive holds the JVM open)
-    ├── config/                         # the application.yml model + ConnectorValidator
-    ├── decode/                         # RecordDecoder: delimited (fix/nvfix) + json + composite
-    ├── mapping/                        # TableSchema, FieldMapper, MappedRow, DeltaRowMerger, RecordExploder
-    ├── deephaven/                      # DeephavenGateway, FlightDeephavenGateway, TableBootstrapScript
-    ├── source/                         # AmpsSubscriber: AmpsClientSubscriber + SimulatedAmpsSubscriber
-    └── runtime/                        # Connector, ConnectorManager, RowBatcher, DeephavenLifecycleMonitor
+├── framework/                          # :amps-connectors:framework — java-library + test fixtures
+│   └── src/main/java/com/fix42/dashboard/amps/
+│       ├── AmpsConnectorsAutoConfiguration.java   # contributes the pipeline's beans to any Boot app
+│       ├── config/                     # the amps: model + ConnectorValidator
+│       ├── decode/                     # RecordDecoder: delimited (fix/nvfix) + json + composite
+│       ├── mapping/                    # TableSchema, FieldMapper, MappedRow, DeltaRowMerger, RecordExploder
+│       ├── deephaven/                  # DeephavenGateway, FlightDeephavenGateway, TableBootstrapScript
+│       ├── source/                     # AmpsSubscriber: AmpsClientSubscriber + SimulatedAmpsSubscriber
+│       └── runtime/                    # Connector, ConnectorManager, RowBatcher, DeephavenLifecycleMonitor
+├── connector-app/                      # :amps-connectors:connector-app — the generic runner
+│   └── src/{main,test,integrationTest} # ConnectorApplication + baked defaults + demo profile;
+│                                       # ApplicationYamlBindingTest, ConfigTreeTest; LiveTableTypeTest
+├── apps/                               # custom-code applications, auto-discovered by settings.gradle.kts
+├── config/<env>/<flow>/<app-name>/     # the DEPLOYABLE applications (application.yml each) +
+│                                       # <env>/common/ for per-environment shared settings
+├── docker/spring-boot.Dockerfile       # one shared layered-jar Dockerfile for every app image
+└── scripts/dh-connectors-compose.sh    # generates + drives podman compose from the config tree
 ```
+
+The framework is deliberately **not** a Boot application (an executable module drags its main
+class and baked yml onto every consumer's classpath); it contributes its beans through
+`AmpsConnectorsAutoConfiguration` and ships `TestConnectors`, `FakeAmpsSubscriber` and
+`RecordingDeephavenGateway` as `testFixtures`. Applications apply the `dh.connector-app`
+convention plugin (build-logic), which mandates web + actuator — the container healthcheck
+depends on `/actuator/health` existing in all of them — and registers the `integrationTest`
+suite and the `dockerBuildLocal` image task. Configuration layers baked defaults →
+`config/<env>/common/` → `config/<env>/<flow>/<app-name>/` (`SPRING_CONFIG_ADDITIONAL_LOCATION`,
+later wins); a connector list may only ever live in the instance file, because two
+`amps.connectors` lists merge by index — `ConfigTreeTest` enforces that and binds + validates
+every file in the tree.
 
 Dependency versions are pinned to what the rest of the repo already runs against:
 `io.deephaven:deephaven-java-client-flight-dagger:42.4` matches
@@ -612,8 +639,9 @@ Deephaven container. It is a test and demo affordance, not a production path.
 
 ## 11. Testing
 
-`./gradlew :amps-connectors:test` — 237 JUnit 5 tests, no servers required, plus 6 opt-in
-tests that need one (`LiveTableTypeTest`, below).
+`./gradlew :amps-connectors:framework:test :amps-connectors:connector-app:test` — 247 JUnit 5
+tests, no servers required, plus 6 opt-in tests that need one (`LiveTableTypeTest`, in the
+runner's `integrationTest` suite, below).
 
 | Suite | Covers |
 |---|---|
@@ -631,8 +659,9 @@ tests that need one (`LiveTableTypeTest`, below).
 | `ConnectorTest` | the per-message pipeline for all three formats |
 | `ConnectorManagerTest` | **the §6 lifecycle contract**: start, steady state, restart-rehydrate, unavailable, per-connector retry |
 | `EndToEndPipelineTest` | the whole application with the simulated source and a recording gateway |
-| `ApplicationYamlBindingTest` | the shipped `application.yml` binds, means what this doc says, and validates |
-| `LiveTableTypeTest` | **opt-in**: the generated python and both publish paths, against a real server |
+| `ApplicationYamlBindingTest` | the shipped demo examples bind, mean what this doc says, and validate |
+| `ConfigTreeTest` | every `config/<env>/<flow>/<app>/application.yml` binds, layers and validates the way the container will run it; the tree's cross-file rules (§9) |
+| `LiveTableTypeTest` | **opt-in** (`integrationTest`): the generated python and both publish paths, against a real server |
 
 `LiveTableTypeTest` is the one suite the fakes cannot stand in for — a table type that has to be
 built out of generated python is only correct if a server says so. It is skipped unless you ask:
@@ -642,7 +671,7 @@ podman run -d --name dh -p 10000:10000 \
   -e START_OPTS="-Ddeephaven.console.type=python \
      -DAuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler" \
   ghcr.io/deephaven/server:42.4
-./gradlew :amps-connectors:test --tests '*LiveTableTypeTest' -Damps.live=true
+./gradlew :amps-connectors:connector-app:integrationTest -Damps.live=true
 ```
 
 It asserts *in* python (`executeCode` reports failures, not values) that a keyed table upserts,

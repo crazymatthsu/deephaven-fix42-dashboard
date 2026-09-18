@@ -1,0 +1,13 @@
+# Shared by every connector application in the `local` environment. Mounted at
+# /app/config/common/ ahead of the instance directory, so an instance file wins
+# any overlap.
+#
+# NEVER define `amps.connectors` here: two lists merge BY INDEX, so a common
+# entry would bleed through underneath every app's own list. ConfigTreeTest
+# enforces this.
+amps:
+  deephaven:
+    # In a container the compose generator sets DEEPHAVEN_HOST=host.containers.internal;
+    # from the IDE the default reaches the same server on localhost:10000.
+    host: ${DEEPHAVEN_HOST:localhost}
+    port: 10000

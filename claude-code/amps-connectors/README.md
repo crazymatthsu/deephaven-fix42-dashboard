@@ -1,10 +1,44 @@
-# `:amps-connectors`
+# `amps-connectors`
 
-Spring Boot application that subscribes to [60East AMPS](https://www.crankuptheamps.com/) topics
-and publishes the fields you map into Deephaven tables. One application runs one or more
-connectors; everything is driven from `application.yml`.
+A **framework** for subscribing to [60East AMPS](https://www.crankuptheamps.com/) topics and
+publishing the fields you map into Deephaven tables, plus the **Spring Boot applications** built
+on it. One application runs one or more connectors; everything is driven from configuration.
 
 Design and contract: [../docs/07-amps-connectors.md](../docs/07-amps-connectors.md).
+
+---
+
+## Layout: framework vs applications
+
+```
+amps-connectors/
+├── framework/        :amps-connectors:framework — the pipeline as a java-library
+│                     (decode, map, explode, batch, publish) + auto-configuration
+│                     + test fixtures. Not a Boot app: apps depend on it.
+├── connector-app/    :amps-connectors:connector-app — the GENERIC runner. One image,
+│                     deployed N times: a config-only application is this app under
+│                     its own name with its own mounted configuration.
+├── apps/             custom-code applications (auto-discovered by settings.gradle.kts);
+│                     the escape hatch when an app needs its own decoder/enricher.
+│                     See apps/README.md. Empty is the normal state.
+├── config/           the DEPLOYABLE applications: config/<env>/<flow>/<app-name>/
+│   └── local/        one directory per application; `common/` per env for shared
+│       ├── common/   endpoints. Adding application #51 = mkdir + one application.yml.
+│       ├── default/{orders-and-positions,trades-and-ticks}/
+│       └── cache/{portfolios,orders-composite}/
+├── docker/           ONE shared spring-boot.Dockerfile for every app image
+└── scripts/          dh-connectors-compose.sh — generates + drives podman compose
+                      from the config tree
+```
+
+Configuration layers, later sources winning (**the jar knows no environment**):
+baked `application.yml` (safe defaults, no connectors) → `config/<env>/common/` →
+`config/<env>/<flow>/<app-name>/`, the mounted pair arriving as
+`SPRING_CONFIG_ADDITIONAL_LOCATION=file:/app/config/common/,file:/app/config/instance/`.
+Endpoints are `${AMPS_HOST:localhost}`-style placeholders so the same files serve IDE runs
+and containers. Never define `amps.connectors` in `common/` — two lists merge **by index**
+— and never bake one; `ConfigTreeTest` enforces the tree's rules (every instance binds and
+validates, one table per app per env, no credentials) without booting anything.
 
 ---
 
@@ -83,46 +117,71 @@ Reading the two ends against each other:
 
 ## Run
 
-Against a Deephaven server on `localhost:10000` with a real AMPS server on `localhost:9007`:
+The demo profile — the six documented example connectors with every source swapped for the
+in-process simulator, so the full pipeline runs against Deephaven alone:
 
 ```bash
-./gradlew :amps-connectors:bootRun
+./gradlew :amps-connectors:connector-app:bootRun --args="--spring.profiles.active=demo"
 ```
 
-Without an AMPS server — the `demo` profile swaps every source for the in-process simulator, so
-the full pipeline runs against Deephaven alone:
+A deployable application from the config tree, from the IDE/CLI (endpoints default to
+`localhost`; the bare app without extra config boots idle with zero connectors):
 
 ```bash
-./gradlew :amps-connectors:bootRun --args="--spring.profiles.active=demo"
+./gradlew :amps-connectors:connector-app:bootRun --args="--spring.config.additional-location=file:amps-connectors/config/local/common/,file:amps-connectors/config/local/cache/portfolios/"
 ```
 
-As a jar (Arrow needs the `--add-opens` on JDK 21):
+As a jar (Arrow needs the `--add-opens` on JDK 21; the image bakes the same flag):
 
 ```bash
-java --add-opens=java.base/java.nio=ALL-UNNAMED -jar amps-connectors/build/libs/amps-connectors-0.1.0.jar
+java --add-opens=java.base/java.nio=ALL-UNNAMED -jar amps-connectors/connector-app/build/libs/connector-app-0.1.0.jar --spring.profiles.active=demo
 ```
 
 Any setting can be overridden on the command line, e.g. a Deephaven on another port:
 
 ```bash
-./gradlew :amps-connectors:bootRun --args="--spring.profiles.active=demo --amps.deephaven.port=10001"
+./gradlew :amps-connectors:connector-app:bootRun --args="--spring.profiles.active=demo --amps.deephaven.port=10001"
 ```
+
+### The fleet, under podman
+
+`scripts/dh-connectors-compose.sh` generates a compose file from `config/<env>/` — one service
+per application directory, each flow a compose profile — and drives `podman compose` with it:
+
+```bash
+amps-connectors/scripts/dh-connectors-compose.sh local build      # gradle → podman images
+amps-connectors/scripts/dh-connectors-compose.sh local up cache   # one flow's apps
+amps-connectors/scripts/dh-connectors-compose.sh local up         # every flow
+amps-connectors/scripts/dh-connectors-compose.sh local ps
+amps-connectors/scripts/dh-connectors-compose.sh local logs portfolios
+amps-connectors/scripts/dh-connectors-compose.sh local down
+```
+
+Services publish no ports (connectors are outbound clients; the actuator healthcheck runs
+inside the container network) and dial AMPS/Deephaven on the host via
+`host.containers.internal` — override with `AMPS_HOST`/`DEEPHAVEN_HOST`. Config-only apps run
+`localhost/dh-connector-app:local`; an app with a module under `apps/<name>/` runs
+`localhost/dh-<name>:local` instead. Mind the podman machine's memory before starting many
+flows at once: each app is a JVM capped by `DH_CONNECTOR_MEM` (default `384m`), so a 6 GB VM
+comfortably runs a flow or two, not fifty apps.
 
 ## Test
 
 ```bash
-./gradlew :amps-connectors:test
+./gradlew :amps-connectors:framework:test :amps-connectors:connector-app:test
 ```
 
-237 tests, no AMPS server and no Deephaven server required. Six more check the generated
-python against a real server and are skipped unless you ask for them:
+247 tests, no AMPS server and no Deephaven server required: 224 framework unit tests plus the
+configuration tests (the shipped demo examples in `ApplicationYamlBindingTest`, the whole
+`config/` tree in `ConfigTreeTest`). Six more check the generated python against a real server;
+they live in the `integrationTest` suite and are skipped unless you ask for them:
 
 ```bash
 podman run -d --name dh -p 10000:10000 \
   -e START_OPTS="-Ddeephaven.console.type=python \
      -DAuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler" \
   ghcr.io/deephaven/server:42.4
-./gradlew :amps-connectors:test --tests '*LiveTableTypeTest' -Damps.live=true
+./gradlew :amps-connectors:connector-app:integrationTest -Damps.live=true
 ```
 
 ### Running suites manually
@@ -135,21 +194,26 @@ One feature at a time, by suite:
 ```bash
 # Composite message types: part-indexed decoding, and the 60East builder -> parser
 # framing contract the subscriber relies on
-./gradlew :amps-connectors:test --rerun --tests '*CompositeRecordDecoderTest' --tests '*CompositeWireRoundTripTest'
+./gradlew :amps-connectors:framework:test --rerun --tests '*CompositeRecordDecoderTest' --tests '*CompositeWireRoundTripTest'
 ```
 
 ```bash
 # explode: member rows, '.' scalars, dotted member names, vanish/clear/OOF deletion
-./gradlew :amps-connectors:test --rerun --tests '*RecordExploderTest'
+./gradlew :amps-connectors:framework:test --rerun --tests '*RecordExploderTest'
 ```
 
 ```bash
-# The configuration rules, the simulator's composite/explode payloads, and that the
-# shipped application.yml binds and validates
-./gradlew :amps-connectors:test --rerun --tests '*ConnectorValidatorTest' --tests '*SimulatedAmpsSubscriberTest' --tests '*ApplicationYamlBindingTest'
+# The configuration rules and the simulator's composite/explode payloads
+./gradlew :amps-connectors:framework:test --rerun --tests '*ConnectorValidatorTest' --tests '*SimulatedAmpsSubscriberTest'
 ```
 
-The HTML report lands at `amps-connectors/build/reports/tests/test/index.html`.
+```bash
+# The shipped demo examples bind and validate; every config/<env>/<flow>/<app>/ does too
+./gradlew :amps-connectors:connector-app:test --rerun --tests '*ApplicationYamlBindingTest' --tests '*ConfigTreeTest'
+```
+
+The HTML reports land at `amps-connectors/framework/build/reports/tests/test/index.html` and
+`amps-connectors/connector-app/build/reports/tests/test/index.html`.
 
 There is no AMPS-side live suite to ask for — AMPS has no public image — which is why the
 wire-level facts are pinned where they can be: `CompositeWireRoundTripTest` exercises the real
@@ -160,7 +224,7 @@ wire-level facts are pinned where they can be: `CompositeWireRoundTripTest` exer
 The demo profile runs the full pipeline against nothing but the Deephaven container above:
 
 ```bash
-./gradlew :amps-connectors:bootRun --args="--spring.profiles.active=demo"
+./gradlew :amps-connectors:connector-app:bootRun --args="--spring.profiles.active=demo"
 ```
 
 Then open http://localhost:10000/ide and watch:
@@ -175,8 +239,9 @@ Then open http://localhost:10000/ide and watch:
 
 ## Configure
 
-The shipped `src/main/resources/application.yml` is a worked example of all four formats and
-four table types:
+The demo profile (`connector-app/src/main/resources/application-demo.yml`) is the worked,
+commented example of all four formats and four table types; the same six connectors, grouped
+into four deployable applications, live under `config/local/`:
 
 | Connector | Format | AMPS topic | Deephaven table |
 |---|---|---|---|
@@ -204,7 +269,8 @@ existed, so existing configuration keeps its behaviour.
 type that can apply an out-of-focus removal, and the only one `publish-mode: DELTA` can merge
 into.
 
-Add a connector by appending to `amps.connectors`. The essentials:
+Add a connector by appending to `amps.connectors` in an application's file (a new application
+is a new `config/<env>/<flow>/<app-name>/application.yml`). The essentials:
 
 ```yaml
 amps:
@@ -331,8 +397,9 @@ payload carries. For JSON, check whether the document is flat (`venue`) or neste
 **`java -jar` fails inside Arrow** — the `--add-opens=java.base/java.nio=ALL-UNNAMED` flag is
 missing. `bootRun` and `test` already set it.
 
-**The process exits immediately** — `spring.main.keep-alive: true` was removed. There is no web
-server and every connector thread is a daemon, so nothing else holds the JVM open.
+**The app will not start: port 8080 already in use** — the actuator's web server needs a port
+even though connectors are outbound-only clients. Pick another with `--server.port=0` for a
+throwaway run; in containers each app has its own network namespace, so nothing to configure.
 
 **An existing table has the wrong columns** — table creation refuses to adopt a table whose
 columns disagree with the configuration:

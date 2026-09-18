@@ -615,6 +615,35 @@ addressing note: [market-data-demo/README.md](market-data-demo/README.md). Desig
 
 ---
 
+## Basket OMS demo — Deephaven as an equities OMS front end
+
+A fifth app in `docker/apps/`, and the first one where the **user drives the tables**:
+`basket-oms-demo` is a basket order-entry and management UI on mock orders — a **basket
+ticket** (line builder or paste box), a **basket list** (one per row, live roll-ups), an
+**order blotter** for the selected basket with a **right-click context menu** (*Modify… /
+Route ▸ venue / Split… / Cancel*, built per row from the order's state), execution and
+audit tapes, a ticking quote board, an order tree for split parents and a fill-progress
+chart. A **mock venue** thread acks, fills, rejects and cancels so everything ticks.
+The order core is pure Python (validated transitions, ids, roll-ups, audit) and the
+keyed / append-only **input tables** are its live projection; the UI is `deephaven.ui`:
+
+```bash
+bash basket-oms-demo/scripts/run_demo.sh               # podman compose up → wait for healthy → URLs
+open http://localhost:10000/iframe/widget/?name=basket_oms_dashboard
+bash basket-oms-demo/scripts/run_demo.sh down
+```
+
+Click a basket, right-click an order, route it, watch it fill; *New basket* builds one
+from typed lines (`AAPL BUY 1000 LMT 189.50 DAY`, one per line). `oms_new_basket(...)`,
+`oms_route(...)`, `oms_split(...)` and friends do the same from the console. Why Python
+and not Java, popup or inline, what `deephaven.ui` 0.42 can and cannot do for an OMS
+screen (and what was found in the browser): [basket-oms-demo/ANALYSIS.md](basket-oms-demo/ANALYSIS.md);
+plan and verification log: [basket-oms-demo/PLAN.md](basket-oms-demo/PLAN.md); runbook:
+[basket-oms-demo/README.md](basket-oms-demo/README.md); contract:
+[docs/13-basket-oms-demo.md](docs/13-basket-oms-demo.md).
+
+---
+
 ## AMPS transaction log as the source (optional)
 
 The pipeline reads raw FIX from Kafka by default. Set `FIX42_SOURCE=amps` and it reads the
@@ -741,6 +770,7 @@ claude-code/
 │   ├── e2e/                       #   run_e2e.sh + pydeephaven assertions against leaves + collector
 │   └── README.md                  #   runbook, remote mechanisms, REMOTEURI_* configuration
 ├── market-data-demo/              # python: historical OHLC bars from parquet (local | S3) -> candlestick dashboard (doc 11)
+├── basket-oms-demo/               # python: basket ticket + blotter with a context menu on mock orders, mock venue (doc 13)
 │   ├── src/market_data_demo/      #   layout, store (local/s3), config, mockgen, cli | reader, derived, charts, dashboard, app
 │   ├── scripts/                   #   generate_mock_data.sh, run_demo.sh (podman compose end to end)
 │   ├── tests/                     #   pytest unit suite (pure python) + optional embedded-server e2e
@@ -754,6 +784,7 @@ claude-code/
 │   ├── docker-compose.remote-uri.yml  # amps + dh1 + dh2 + collector (the multi-server demo)
 │   ├── deephaven-amps.Dockerfile  # server image + amps-python-client, used by the remote-uri stack
 │   ├── docker-compose.market-data.yml # deephaven (+ optional MinIO, --profile s3) for the market-data demo
+│   ├── docker-compose.basket-oms.yml  # deephaven only, the basket OMS demo (doc 13)
 │   ├── deephaven-market-data.Dockerfile # server image + boto3 (S3 listing), used by the market-data stack
 │   └── apps/                      # one folder per deephaven app; DH_APP picks one
 │       ├── _lib/loader.py         #   shared app-mode loader, mounted at /dh-app-lib

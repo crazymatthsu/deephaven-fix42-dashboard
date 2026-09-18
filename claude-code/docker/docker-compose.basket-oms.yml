@@ -1,0 +1,59 @@
+# Basket OMS demo -- Deephaven as an equities OMS front end on mock orders
+# (docs/13-basket-oms-demo.md §6, basket-oms-demo/README.md).
+#
+#   podman compose -f docker/docker-compose.basket-oms.yml up -d
+#   open http://localhost:10000/ide            # Panels ▸ basket_oms_dashboard
+#   podman compose -f docker/docker-compose.basket-oms.yml down
+#
+# or `bash basket-oms-demo/scripts/run_demo.sh [up|down|status|logs]`.
+#
+# One service, the stock Deephaven image (deephaven.ui and plotly-express are bundled).
+# No message flow, no broker, no extra pip packages: the orders live in keyed input
+# tables fed by the python core, the mock venue is a thread in the same JVM.
+#
+# Heap: the tables are tiny, so -Xmx2g is plenty; DH_XMX=1g works when another
+# Deephaven stack is already on the 6 GB podman machine. DH_PORT moves the host port.
+# ---------------------------------------------------------------------------------------------
+
+name: basket-oms-demo
+
+services:
+
+  # /oms-scripts  = basket-oms-demo/src        (the basket_oms_demo package)
+  # /dh-app-lib   = apps/_lib                  (loader shared by every app)
+  # /app.d        = apps/basket-oms-demo       (this app's descriptor)
+  #
+  # PYTHONPATH=/oms-scripts because app-mode scripts run with __file__ UNSET (verified on
+  # 42.4), so the entrypoint cannot bootstrap sys.path from its own location.
+  deephaven:
+    image: ghcr.io/deephaven/server:42.4
+    container_name: "${DH_CONTAINER:-oms-deephaven}"
+    hostname: deephaven
+    ports:
+      - "${DH_PORT:-10000}:10000"
+    volumes:
+      - ../basket-oms-demo/src:/oms-scripts:ro,z
+      - ./apps/_lib:/dh-app-lib:ro,z
+      - ./apps/basket-oms-demo:/app.d:ro,z
+    environment:
+      DH_APP: basket-oms-demo
+      PYTHONPATH: "/oms-scripts"
+      START_OPTS: >-
+        -Xmx${DH_XMX:-2g}
+        -Ddeephaven.console.type=python
+        -Ddeephaven.application.dir=/app.d
+        -DAuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler
+      # --- doc 13 §6 -------------------------------------------------------------------
+      OMS_SEED: "${OMS_SEED:-42}"
+      OMS_MOCK_BASKETS: "${OMS_MOCK_BASKETS:-5}"
+      OMS_SIM: "${OMS_SIM:-true}"
+      OMS_SIM_INTERVAL_MS: "${OMS_SIM_INTERVAL_MS:-750}"
+      OMS_TRADER: "${OMS_TRADER:-trader1}"
+      OMS_VENUES: "${OMS_VENUES:-NYSE,NASDAQ,ARCA,BATS,DARK,ALGO-VWAP,ALGO-TWAP}"
+      OMS_TICKET_PANEL: "${OMS_TICKET_PANEL:-false}"
+    healthcheck:
+      test: ["CMD", "/opt/grpc_health_probe/grpc_health_probe", "-addr=localhost:10000"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s

@@ -1,0 +1,58 @@
+# positions-jdbc (local/db) -- the positions table of a trading database, polled as a snapshot.
+#
+# A query is a snapshot, not a stream, so this source re-runs the whole query every
+# poll-interval and upserts every row. `key-column` is what lets it also express a
+# REMOVAL: the source remembers the key set between polls and emits a delete for every
+# key that stopped appearing -- the JDBC spelling of an AMPS out-of-focus message.
+#
+# A result-set row has no wire format, so the source builds one: each row arrives as a
+# JSON object keyed by result-set column LABEL (an `AS` alias included), which is why
+# `format: JSON` is required here and why the tags below are the query's own column
+# names rather than tags or paths.
+#
+# Layered over the baked defaults and config/local/common/ at runtime; this file
+# owns the connector list. Reference examples with commentary: application-demo.yml.
+dh-connectors:
+  connectors:
+    - name: positions-jdbc
+      enabled: true
+      format: JSON                   # required by source.jdbc: the source synthesises the JSON
+      source:
+        driver: ${source-driver:REAL}
+        jdbc:
+          url: "jdbc:postgresql://${JDBC_HOST:localhost}:5432/trading"
+          username: trading_ro       # read-only: this connector only ever SELECTs
+          # Named here, never written: these files are plaintext in git, so ConfigTreeTest
+          # allows a credential key to carry one ${...} placeholder and nothing else. The
+          # container sets JDBC_PASSWORD; unset, it resolves to blank and the driver is
+          # handed whatever authentication the URL itself carries.
+          password: "${JDBC_PASSWORD:}"
+          mode: SNAPSHOT             # the whole query every poll: state, so the table is KEYED
+          # Run verbatim -- the source never rewrites it. The composite key is built by
+          # the query, because `key-column` names ONE result-set column and a position is
+          # identified by an account and a symbol together.
+          query: >-
+            SELECT account || ':' || symbol AS position_key,
+            account, symbol, quantity, avg_cost, updated_at
+            FROM positions
+          key-column: position_key   # its value becomes the record's source key
+          poll-interval: 5s
+          reconnect-delay: 5s
+          fetch-size: 1000           # rows per round trip; bounds the driver's buffering
+      deephaven:
+        table: jdbc_positions
+        table-type: KEYED            # what a SNAPSHOT poll implies; spelled out for the reader
+        publish-mode: FULL           # every poll carries the whole row, so nothing to merge
+        # The key column IS the source key: a row that vanished from the query is reported
+        # by its key alone, with no payload left to rebuild the key columns from.
+        source-key-column: PositionKey
+        key-columns: [PositionKey]
+        ingest-timestamp-column: IngestTs
+        max-batch-rows: 5000
+        flush-interval: 500ms
+      fields:
+        - { tag: account,    column: Account,   type: STRING }
+        - { tag: symbol,     column: Symbol,    type: STRING }
+        - { tag: quantity,   column: Quantity,  type: DOUBLE }
+        - { tag: avg_cost,   column: AvgCost,   type: DOUBLE }
+        - { tag: updated_at, column: UpdatedAt, type: INSTANT }

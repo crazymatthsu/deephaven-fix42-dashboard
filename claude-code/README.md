@@ -702,20 +702,23 @@ Design and contract: [docs/03-deephaven-dag.md §2.1](docs/03-deephaven-dag.md).
 
 Separate from the FIX 4.2 pipeline above, `dh-connectors` is a **multi-source** connector
 framework plus the Spring Boot **applications** built on it: each subscribes to
-[60East AMPS](https://www.crankuptheamps.com/) topics, Kafka topics or raw framed TCP feeds and
-publishes the fields you map into Deephaven tables in the same server — so they appear in the
-IDE alongside `order_state_latest`. The transport is one block in a connector's configuration
-(`source: { amps: … | kafka: … | tcp: … }`) and everything after it is shared, so the three
-differ by a handful of lines. One application runs one or more connectors, entirely
+[60East AMPS](https://www.crankuptheamps.com/) topics, Kafka topics, raw framed TCP feeds,
+polled database queries or S3 objects and publishes the fields you map into Deephaven tables in
+the same server — so they appear in the IDE alongside `order_state_latest`. The transport is one
+block in a connector's configuration
+(`source: { amps: … | kafka: … | tcp: … | jdbc: … | s3: … }`) and everything after it is shared,
+so the five differ by a handful of lines. One application runs one or more connectors, entirely
 configuration-driven; deployable applications are directories under
 `dh-connectors/config/<env>/<flow>/<app-name>/`, run as containers by
 `dh-connectors/scripts/dh-connectors-compose.sh` (podman compose), with custom code the
 exception, not the rule.
 
-- **Sources** — AMPS (SOW or journal topics, composite message types, delta subscriptions),
-  Kafka (compacted or not; the connector assigns partitions and owns its offsets, so a restart
-  re-seeks rather than resuming), and raw TCP (delimited or 4-byte-length-prefixed framing).
-  One driver module each; the generic runner carries all three.
+- **Sources** — five transports: AMPS (SOW or journal topics, composite message types, delta
+  subscriptions), Kafka (compacted or not; the connector assigns partitions and owns its
+  offsets, so a restart re-seeks rather than resuming), raw TCP (delimited or
+  4-byte-length-prefixed framing), JDBC (a query polled as a snapshot — state, deletes included
+  — or read forward from a watermark) and S3 (objects read once per unseen key or changed ETag,
+  framed as NDJSON or whole). One driver module each; the generic runner carries all five.
 - **Formats** — `FIX`, `NVFIX`, `JSON` and `COMPOSITE` (AMPS composite message types:
   multi-part messages addressed with part-indexed tags such as `0.orderId`), each with its own
   tag → column → type mapping. The mapping is an allowlist: an unmapped field is never
@@ -792,10 +795,10 @@ claude-code/
 │   ├── tests/                     #   pytest unit suite (pure python) + optional embedded-server e2e
 │   ├── data/                      #   generated YYYY/MM/DD/<SYMBOL>.parquet tree (git-ignored)
 │   └── README.md                  #   runbook, schema, generator, MD_* configuration, MinIO note
-├── dh-connectors/                 # Spring Boot: AMPS / Kafka / TCP feeds -> Deephaven tables (doc 07)
+├── dh-connectors/                 # Spring Boot: AMPS / Kafka / TCP / JDBC / S3 feeds -> Deephaven tables (doc 07)
 │   ├── core/                      #   the pipeline as a java-library + the source SPI
-│   ├── source-{amps,kafka,tcp}/   #   one driver module per transport
-│   ├── connector-app/             #   the generic runner (carries all three drivers)
+│   ├── source-{amps,kafka,tcp,jdbc,s3}/  # one driver module per transport
+│   ├── connector-app/             #   the generic runner (carries all five drivers)
 │   ├── apps/                      #   custom-code applications, auto-discovered
 │   └── config/<env>/<flow>/<app>/ #   the deployable applications, one directory each
 ├── docker/
@@ -835,7 +838,7 @@ claude-code/
 | [04 — Features & API survey](docs/04-deephaven-features-api.md) | Kafka consumer, table publishers, listeners, `deephaven.ui`, app mode, `pydeephaven` |
 | [05 — Implementation & testing](docs/05-implementation-and-testing.md) | module APIs, scenario catalog, build layout, demo runbook |
 | [06 — State machine language choice](docs/06-state-machine-language-analysis.md) | python vs java for the stateful fold, with a measured throughput ceiling |
-| [07 — dh-connectors](docs/07-dh-connectors.md) | the AMPS / Kafka / TCP → Deephaven bridge: config model, the source SPI and the three transports, transforms, table types, delta handling, lifecycle |
+| [07 — dh-connectors](docs/07-dh-connectors.md) | the AMPS / Kafka / TCP / JDBC / S3 → Deephaven bridge: config model, the source SPI and the five transports, transforms, table types, delta handling, lifecycle |
 | [08 — On-demand executions](docs/08-on-demand-executions-idea.md) | **tabled idea, not a contract** — fetching executions from AMPS per click; why it was set aside, and the cheaper alternatives |
 | [09 — Multi-OMS drop-copy blotter](docs/09-multi-oms-blotter.md) | **the contract** for the second app: hub topology, cross-hub linking, per-edge reconciliation and the break taxonomy, dashboard, generator mode, e2e scope |
 | [10 — Multi-server Deephaven: remote-URI leaves and collector](docs/10-deephaven-remote-uri.md) | **the contract** for the multi-server demo: sharding by hub / chain key, the 400M-message sizing analysis (throughput, memory, what the collector holds), remote subscription / snapshot / query mechanisms, leaf exports, collector DAG, exposure semantics, e2e scope |

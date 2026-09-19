@@ -339,7 +339,7 @@ class ConnectorValidatorTest {
         connector.getSource().setAmps(null);
         assertThat(ConnectorValidator.validate(connector))
                 .anyMatch(error -> error.contains(
-                        "source needs exactly one of amps/kafka/tcp, and has none"));
+                        "source needs exactly one of amps/kafka/tcp/jdbc/s3, and has none"));
     }
 
     @Test
@@ -460,6 +460,165 @@ class ConnectorValidatorTest {
         assertThat(ConnectorValidator.validate(connector)).isEmpty();
     }
 
+    // ---- jdbc: the poll modes and what each one can back ----------------------------
+
+    @Test
+    @DisplayName("a snapshot poll is state, so it defaults to a keyed table")
+    void jdbcSnapshotIsStatefulAndIncrementalIsNot() {
+        ConnectorProperties snapshot = jdbcConnector(JdbcSourceProperties.Mode.SNAPSHOT);
+        assertThat(snapshot.getSource().configuredBlocks()).containsExactly("jdbc");
+        assertThat(snapshot.getSource().stateful()).isTrue();
+        assertThat(snapshot.getSource().describe()).isEqualTo("jdbc:snapshot");
+        assertThat(ConnectorValidator.validate(snapshot)).isEmpty();
+
+        ConnectorProperties incremental = jdbcConnector(JdbcSourceProperties.Mode.INCREMENTAL);
+        incremental.getSource().getJdbc().setIncrementalColumn("updated_at");
+        incremental.getDeephaven().setKeyColumns(List.of());
+        assertThat(incremental.getSource().stateful()).isFalse();
+        assertThat(incremental.getSource().describe()).isEqualTo("jdbc:incremental");
+        assertThat(ConnectorValidator.validate(incremental)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("the source synthesises the payload, so only format=JSON can read it")
+    void rejectsANonJsonFormatOverJdbc() {
+        ConnectorProperties connector = jdbcConnector(JdbcSourceProperties.Mode.SNAPSHOT);
+        connector.setFormat(SourceFormat.FIX);
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("source.jdbc requires format=JSON")
+                        && error.contains("keyed by column label"));
+    }
+
+    @Test
+    @DisplayName("an incremental poll with nothing to compare would re-emit everything")
+    void rejectsIncrementalWithoutAnIncrementalColumn() {
+        ConnectorProperties connector = jdbcConnector(JdbcSourceProperties.Mode.INCREMENTAL);
+        connector.getDeephaven().setKeyColumns(List.of());
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("source.jdbc.mode=INCREMENTAL requires "
+                        + "source.jdbc.incremental-column"));
+    }
+
+    @Test
+    @DisplayName("an incremental poll cannot tell a deleted row from an untouched one")
+    void rejectsAKeyColumnUnderIncremental() {
+        ConnectorProperties connector = jdbcConnector(JdbcSourceProperties.Mode.INCREMENTAL);
+        connector.getSource().getJdbc().setIncrementalColumn("updated_at");
+        connector.getSource().getJdbc().setKeyColumn("position_key");
+        connector.getDeephaven().setKeyColumns(List.of());
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains(
+                        "source.jdbc.key-column is only meaningful for mode=SNAPSHOT"));
+    }
+
+    @Test
+    void rejectsAnIncrementalColumnUnderSnapshot() {
+        ConnectorProperties connector = jdbcConnector(JdbcSourceProperties.Mode.SNAPSHOT);
+        connector.getSource().getJdbc().setIncrementalColumn("updated_at");
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("source.jdbc.incremental-column is only "
+                        + "meaningful for mode=INCREMENTAL"));
+    }
+
+    @Test
+    @DisplayName("a vanished row carries no payload, so a keyed table must key on the key")
+    void jdbcKeyColumnMustBeTheKeyOfAKeyedTable() {
+        ConnectorProperties connector = jdbcConnector(JdbcSourceProperties.Mode.SNAPSHOT);
+        connector.getSource().getJdbc().setKeyColumn("position_key");
+        connector.getDeephaven().setKeyColumns(List.of("TradeID"));
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("source.jdbc.key-column with a keyed table "
+                        + "requires deephaven.key-columns to include source-key-column"));
+
+        // Unset is the same failure: there would be nowhere for the vanished key to land.
+        connector.getDeephaven().setSourceKeyColumn(null);
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("source-key-column (which is not set)"));
+
+        connector.getDeephaven().setSourceKeyColumn("PositionKey");
+        connector.getDeephaven().setKeyColumns(List.of("PositionKey"));
+        assertThat(ConnectorValidator.validate(connector)).isEmpty();
+    }
+
+    // ---- s3: the scope, and what a framed object feed can back -----------------------
+
+    @Test
+    @DisplayName("an object feed re-emits rather than converging, so it is never state")
+    void s3IsNeverStatefulAndDescribesItsScope() {
+        ConnectorProperties prefix = s3Connector();
+        assertThat(prefix.getSource().configuredBlocks()).containsExactly("s3");
+        assertThat(prefix.getSource().stateful()).isFalse();
+        assertThat(prefix.getSource().describe()).isEqualTo("s3:trading-data/trades/");
+        assertThat(ConnectorValidator.validate(prefix)).isEmpty();
+
+        ConnectorProperties single = s3Connector();
+        single.getSource().getS3().setPrefix(null);
+        single.getSource().getS3().setKey("trades/2026-09-18.ndjson");
+        assertThat(single.getSource().describe())
+                .isEqualTo("s3:trading-data/trades/2026-09-18.ndjson");
+        assertThat(ConnectorValidator.validate(single)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a bucket on its own does not say which objects to read")
+    void rejectsAnS3SourceWithNeitherKeyNorPrefix() {
+        ConnectorProperties connector = s3Connector();
+        connector.getSource().getS3().setPrefix(null);
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains(
+                        "source.s3 needs exactly one of key/prefix"));
+    }
+
+    @Test
+    @DisplayName("key and prefix are two ways of naming one scope, so both is a mistake")
+    void rejectsAnS3SourceWithBothKeyAndPrefix() {
+        ConnectorProperties connector = s3Connector();
+        connector.getSource().getS3().setKey("trades/2026-09-18.ndjson");
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains(
+                        "source.s3 configures both key and prefix"));
+    }
+
+    @Test
+    @DisplayName("an object's frames carry no per-record key, so there is none to publish")
+    void rejectsSourceKeyColumnOnS3() {
+        ConnectorProperties connector = s3Connector();
+        connector.getDeephaven().setSourceKeyColumn("SourceKey");
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains(
+                        "deephaven.source-key-column is not available for source.s3"));
+    }
+
+    @Test
+    @DisplayName("a frame is just a payload, so every simple wire format reads over S3")
+    void everySimpleFormatIsLegalOverS3() {
+        for (SourceFormat format : List.of(
+                SourceFormat.FIX, SourceFormat.NVFIX, SourceFormat.JSON)) {
+            ConnectorProperties connector = s3Connector();
+            connector.setFormat(format);
+            connector.setFields(List.of(
+                    TestConnectors.field(format == SourceFormat.FIX ? "55" : "symbol",
+                            "Symbol", ColumnType.STRING)));
+            assertThat(ConnectorValidator.validate(connector))
+                    .as("format %s over source.s3", format)
+                    .isEmpty();
+        }
+    }
+
+    @Test
+    @DisplayName("COMPOSITE stays amps-only, by the rule that already says so")
+    void compositeOverS3IsRefusedByTheExistingAmpsRule() {
+        ConnectorProperties connector = s3Connector();
+        connector.setFormat(SourceFormat.COMPOSITE);
+        connector.setCompositeParts(List.of(SourceFormat.JSON, SourceFormat.FIX));
+        List<String> errors = ConnectorValidator.validate(connector);
+        assertThat(errors).anyMatch(error ->
+                error.contains("format=COMPOSITE requires source.amps"));
+        // And exactly once: there is no separate s3 spelling of the same rule.
+        assertThat(errors).filteredOn(error -> error.contains("format=COMPOSITE requires"))
+                .hasSize(1);
+    }
+
     // ---- transforms ------------------------------------------------------------------
 
     @Test
@@ -494,6 +653,38 @@ class ConnectorValidatorTest {
         tcp.setHost("localhost");
         tcp.setPort(5001);
         return tcp;
+    }
+
+    /**
+     * The JSON example moved onto a polled query. {@code SNAPSHOT} is state, so it arrives
+     * keyed on the column the source key lands in -- the shape the config tree's example uses.
+     */
+    private static ConnectorProperties jdbcConnector(JdbcSourceProperties.Mode mode) {
+        ConnectorProperties connector = TestConnectors.jsonTrades();
+        connector.getSource().setAmps(null);
+        JdbcSourceProperties jdbc = new JdbcSourceProperties();
+        jdbc.setUrl("jdbc:postgresql://localhost:5432/trading");
+        jdbc.setQuery("SELECT * FROM positions");
+        jdbc.setMode(mode);
+        connector.getSource().setJdbc(jdbc);
+        connector.getDeephaven().setSourceKeyColumn("PositionKey");
+        connector.getDeephaven().setKeyColumns(List.of("PositionKey"));
+        return connector;
+    }
+
+    /**
+     * The JSON example moved onto an object feed: a prefix of NDJSON objects into the
+     * append-only table a non-stateful source defaults to -- the shape the config tree's
+     * example uses.
+     */
+    private static ConnectorProperties s3Connector() {
+        ConnectorProperties connector = TestConnectors.jsonTrades();
+        connector.getSource().setAmps(null);
+        S3SourceProperties s3 = new S3SourceProperties();
+        s3.setBucket("trading-data");
+        s3.setPrefix("trades/");
+        connector.getSource().setS3(s3);
+        return connector;
     }
 
     @Test

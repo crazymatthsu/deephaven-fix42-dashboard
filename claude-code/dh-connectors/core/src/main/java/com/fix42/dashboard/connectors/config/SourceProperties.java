@@ -4,6 +4,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * The upstream side of one connector: which driver runs it, and the settings of whichever
@@ -55,6 +56,14 @@ public class SourceProperties {
     @Valid
     private TcpSourceProperties tcp;
 
+    /** JDBC settings; non-null selects the JDBC source. */
+    @Valid
+    private JdbcSourceProperties jdbc;
+
+    /** S3 settings; non-null selects the S3 source. */
+    @Valid
+    private S3SourceProperties s3;
+
     /**
      * Names of the transport blocks this source configures, in a stable order.
      *
@@ -64,7 +73,7 @@ public class SourceProperties {
      * @return the configured block names, e.g. {@code ["amps"]}
      */
     public List<String> configuredBlocks() {
-        List<String> blocks = new ArrayList<>(3);
+        List<String> blocks = new ArrayList<>(5);
         if (amps != null) {
             blocks.add("amps");
         }
@@ -73,6 +82,12 @@ public class SourceProperties {
         }
         if (tcp != null) {
             blocks.add("tcp");
+        }
+        if (jdbc != null) {
+            blocks.add("jdbc");
+        }
+        if (s3 != null) {
+            blocks.add("s3");
         }
         return blocks;
     }
@@ -83,8 +98,9 @@ public class SourceProperties {
      * <p>This is the transport-independent form of the question the whole connector pivots on
      * (doc 07 section 3): a stateful feed is replayed in full on connect and keys its records,
      * so it defaults to a Deephaven <em>keyed</em> table and can express removals. An AMPS SOW
-     * topic and a compacted Kafka topic are stateful; a journal topic, an uncompacted Kafka
-     * topic and a TCP stream are not.
+     * topic, a compacted Kafka topic and a JDBC query polled in {@code SNAPSHOT} mode are
+     * stateful; a journal topic, an uncompacted Kafka topic, a TCP stream, an S3 object feed
+     * and an {@code INCREMENTAL} JDBC poll are not.
      *
      * @return {@code true} when the configured transport is replaying state
      */
@@ -95,6 +111,16 @@ public class SourceProperties {
         if (kafka != null) {
             return kafka.isCompacted();
         }
+        if (jdbc != null) {
+            // A snapshot poll re-reads the whole query every time, which is the state of the
+            // world; an incremental poll only ever reads forward, which is a journal.
+            return jdbc.getMode() == JdbcSourceProperties.Mode.SNAPSHOT;
+        }
+        // TCP and S3 fall through, for the same reason spelled two ways: a socket has no state
+        // to replay at all, and an object feed RE-EMITS rather than converging -- rereading a
+        // rewritten object republishes its records, it does not settle them onto a key. So
+        // APPEND_ONLY (or RING) is what those two default to, and a KEYED table over either is
+        // the operator's explicit call, keyed on payload fields.
         return false;
     }
 
@@ -115,7 +141,8 @@ public class SourceProperties {
      * A short label for this feed, for logs and error messages: the transport and whatever
      * it calls the thing being read.
      *
-     * @return e.g. {@code amps:Orders}, {@code kafka:trades}, {@code tcp:feed-1:5001}
+     * @return e.g. {@code amps:Orders}, {@code kafka:trades}, {@code tcp:feed-1:5001},
+     *     {@code jdbc:snapshot}, {@code s3:trading-data/trades/}
      */
     public String describe() {
         if (amps != null) {
@@ -126,6 +153,16 @@ public class SourceProperties {
         }
         if (tcp != null) {
             return "tcp:" + tcp.getHost() + ":" + tcp.getPort();
+        }
+        if (jdbc != null) {
+            // The poll mode rather than the query: a query is a paragraph, and the mode is
+            // what actually distinguishes two JDBC connectors in a log line.
+            return "jdbc:" + jdbc.getMode().name().toLowerCase(Locale.ROOT);
+        }
+        if (s3 != null) {
+            // The bucket and whichever of key/prefix names the scope; a trailing slash on the
+            // prefix is the visible difference between the two.
+            return "s3:" + s3.getBucket() + "/" + s3.keyOrPrefix();
         }
         return "<no source>";
     }
@@ -188,5 +225,21 @@ public class SourceProperties {
 
     public void setTcp(TcpSourceProperties tcp) {
         this.tcp = tcp;
+    }
+
+    public JdbcSourceProperties getJdbc() {
+        return jdbc;
+    }
+
+    public void setJdbc(JdbcSourceProperties jdbc) {
+        this.jdbc = jdbc;
+    }
+
+    public S3SourceProperties getS3() {
+        return s3;
+    }
+
+    public void setS3(S3SourceProperties s3) {
+        this.s3 = s3;
     }
 }

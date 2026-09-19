@@ -2,8 +2,9 @@
 
 Binding spec for `dh-connectors` — the multi-source connector framework and the Spring Boot
 applications built on it (§9) — bridging live feeds into Deephaven tables.
-[60East AMPS](https://www.crankuptheamps.com/) topics, Kafka topics and raw framed TCP streams
-all arrive through the same pipeline (§11). Independent of the FIX 4.2 pipeline in docs 01–05:
+[60East AMPS](https://www.crankuptheamps.com/) topics, Kafka topics, raw framed TCP streams,
+polled database queries and S3 objects all arrive through the same pipeline (§11). Independent
+of the FIX 4.2 pipeline in docs 01–05:
 it publishes into the *same* Deephaven server, so its tables appear alongside
 `order_state_latest` and friends, but it shares no code with it.
 
@@ -12,22 +13,29 @@ it publishes into the *same* Deephaven server, so its tables appear alongside
 ## 1. What it is
 
 ```
-   sources                            dh-connectors (Spring Boot, java 21)                 Deephaven
- ┌────────────────┐   sow_and_subscribe   ┌──────────────────────────────────────┐   ┌────────────────────┐
- │ AMPS SOW topic ├──────────────────────►│ RecordSource (amps / kafka / tcp)    │   │                    │
- │   Orders (fix) │                       │      │        SourceRecord           │   │  amps_orders       │
- ├────────────────┤   sow_and_delta_sub   │      ▼  RecordDecoder (fix/nvfix/json)   │    (keyed)         │
- │ AMPS SOW topic ├──────────────────────►│   tag -> value                        │   │                    │
- │  Positions(nv) │                       │      ▼  RecordTransform chain (§12)   │   │  amps_positions    │
- ├────────────────┤   assign + seek       │      ▼  FieldMapper  (allowlist)     │   │    (keyed)         │
- │ Kafka topic    ├──────────────────────►│   Object[] in schema order           │   │                    │
- │  trades (json) │                       │      │                               │   │  kafka_trades      │
- ├────────────────┤   framed socket       │      ▼  DeltaRowMerger (publish DELTA)│  │    (append-only)   │
- │ TCP feed       ├──────────────────────►│      ▼  RowBatcher                    │  │  tcp_ticks         │
- │  ticks (json)  │                       │      ▼  FlightDeephavenGateway        ├─►│    (ring)          │
- └────────────────┘                       └──────────────────────────────────────┘   └────────────────────┘
+      sources                               dh-connectors (Spring Boot, java 21)           Deephaven
+ ┌────────────────┐   sow_and_subscribe   ┌───────────────────────────────────────┐  ┌────────────────────┐
+ │ AMPS SOW topic ├──────────────────────►│ RecordSource                          │  │                    │
+ │   Orders (fix) │                       │  (amps / kafka / tcp / jdbc / s3)     │  │  amps_orders       │
+ ├────────────────┤   sow_and_delta_sub   │                                       │  │    (keyed)         │
+ │ AMPS SOW topic ├──────────────────────►│      │        SourceRecord            │  │                    │
+ │  Positions(nv) │                       │      ▼  RecordDecoder (fix/nvfix/json)│  │  amps_positions    │
+ ├────────────────┤     assign + seek     │   tag -> value                        │  │    (keyed)         │
+ │ Kafka topic    ├──────────────────────►│                                       │  │                    │
+ │  trades (json) │                       │      ▼  RecordTransform chain (§12)   │  │  kafka_trades      │
+ ├────────────────┤     framed socket     │                                       │  │    (append-only)   │
+ │ TCP feed       ├──────────────────────►│      ▼  FieldMapper  (allowlist)      │  │                    │
+ │  ticks (json)  │                       │   Object[] in schema order            │  │  tcp_ticks         │
+ ├────────────────┤     polled query      │                                       │  │    (ring)          │
+ │ Database       ├──────────────────────►│      ▼  DeltaRowMerger (publish DELTA)│  │                    │
+ │  positions     │                       │                                       │  │  jdbc_positions    │
+ ├────────────────┤    polled listing     │      ▼  RowBatcher                    │  │    (keyed)         │
+ │ S3 bucket      ├──────────────────────►│                                       │  │                    │
+ │  trades (json) │                       │      ▼  FlightDeephavenGateway        ├─►│  s3_trades         │
+ └────────────────┘                       │                                       │  │    (append-only)   │
+                                          └───────────────────────────────────────┘  └────────────────────┘
                                                      ▲                                        │
-                                                     └───── DeephavenLifecycleMonitor ◄────────┘
+                                                     └───── DeephavenLifecycleMonitor ◄───────┘
                                                             polls; a generation change
                                                             restarts every connector
 ```
@@ -53,7 +61,8 @@ dh-connectors:
       enabled: true
       format: FIX                # FIX | NVFIX | JSON | COMPOSITE
       composite-parts: []        # COMPOSITE only: each part's format, in wire order (s5.3)
-      source:                    # the transport: driver + EXACTLY ONE of amps/kafka/tcp (s11)
+      source:                    # the transport: driver + EXACTLY ONE of
+                                 # amps/kafka/tcp/jdbc/s3 (s11)
         driver: REAL             # REAL | SIMULATED
         simulated-rate: 5        # SIMULATED only: records per second
         simulated-keys: 8        # SIMULATED only: distinct keys cycled through
@@ -68,6 +77,32 @@ dh-connectors:
           subscription-mode: FULL  # FULL | DELTA
           bookmark: epoch        # journal topics only
           filter: "/Symbol = 'AAPL'"
+      # ...or, in that block's place, one of the other four. JDBC — a query, polled:
+        jdbc:
+          url: "jdbc:postgresql://db:5432/trading"
+          username: trading_ro
+          password: "${JDBC_PASSWORD:}"   # a ${...} placeholder and nothing else (s9)
+          query: "SELECT ... FROM positions"   # run VERBATIM, never rewritten
+          mode: SNAPSHOT         # SNAPSHOT (state) | INCREMENTAL (a journal)
+          key-column: position_key      # SNAPSHOT only: what a vanished row is reported by
+          incremental-column: updated_at  # INCREMENTAL only: the forward-reading mark
+          poll-interval: 5s
+          reconnect-delay: 5s
+          fetch-size: 1000       # rows per round trip; bounds the driver's buffering
+      # S3 — a bucket, polled:
+        s3:
+          bucket: trading-data
+          prefix: "trades/"      # EXACTLY ONE of prefix: / key: (s7)
+          region: us-east-1
+          endpoint: "http://minio:9000"   # optional: MinIO, localstack, a gateway
+          path-style-access: true
+          access-key: "${S3_ACCESS_KEY:}" # both blank -> the SDK default credential chain
+          secret-key: "${S3_SECRET_KEY:}"
+          framing: DELIMITED     # DELIMITED | WHOLE (the whole object as one record)
+          delimiter: "\n"
+          charset: UTF-8
+          poll-interval: 30s
+          reconnect-delay: 5s
       transforms: []             # optional: RecordTransform bean names, applied in order (s12)
       deephaven:
         table: amps_orders       # the global name; must be an identifier
@@ -77,7 +112,8 @@ dh-connectors:
         key-columns: [ClOrdID]   # KEYED only, and required by it
         ingest-timestamp-column: IngestTs
         source-key-column: SourceKey  # optional; the source's own key (AMPS SOW key, Kafka
-                                      # message key). Refused for source.tcp: no such thing
+                                      # message key, a JDBC row's key-column). Refused for
+                                      # source.tcp and source.s3: a frame has no such thing
         create-if-missing: true
         max-batch-rows: 5000
         flush-interval: 250ms
@@ -98,9 +134,10 @@ startup by `ConnectorValidator` (§7).
 The transport blocks are **siblings under `source:`, and exactly one is configured**. The block
 that is present is what selects the driver — there is no `type:` discriminator to keep in step
 with it — and `driver: SIMULATED` keeps the block rather than replacing it, so the demo
-validates the same configuration the real deployment will (§10). The Kafka and TCP blocks are
-spelled out in §11; the rest of this document is written against the AMPS block because it is
-the one with the most to say, and every section from §4 on applies to all three unchanged.
+validates the same configuration the real deployment will (§10). The Kafka, TCP, JDBC and S3
+blocks are spelled out in §11; the rest of this document is written against the AMPS block
+because it is the one with the most to say, and every section from §4 on applies to all five
+unchanged.
 
 ## 3. Two independent choices: the source side and the Deephaven side
 
@@ -516,23 +553,40 @@ not hold up the others and recovers on its own.
 Cross-field rules bean validation cannot express. All are checked once, and a failure stops the
 application with the full list rather than a stack trace.
 
-A rule that only one transport can satisfy **names that transport in its message**: with three
+A rule that only one transport can satisfy **names that transport in its message**: with five
 source kinds sharing one connector model, "requires a SOW topic" is only actionable once you
 can see which block was supposed to provide one.
 
 **The source:**
 
-- `source` configures **exactly one** of `amps` / `kafka` / `tcp` — none means nothing would be
-  dialled, several means one table fed from two feeds. The rule holds for `driver: SIMULATED`
-  too: the block says what the simulator stands in for, and dropping it under the demo profile
-  would let the demo validate configurations the real deployment rejects
+- `source` configures **exactly one** of `amps` / `kafka` / `tcp` / `jdbc` / `s3` — none means
+  nothing would be dialled, several means one table fed from two feeds. The rule holds for
+  `driver: SIMULATED` too: the block says what the simulator stands in for, and dropping it
+  under the demo profile would let the demo validate configurations the real deployment rejects
 - `format: COMPOSITE` and `composite-parts` require `source.amps`: composite message types are
-  an AMPS feature, not a wire format the other transports frame
-- `deephaven.source-key-column` is refused for `source.tcp` — a socket carries no per-message
-  key, so the column could only ever be null (§5.1)
+  an AMPS feature, not a wire format the other transports frame. That one rule is also what
+  keeps `COMPOSITE` off JDBC and S3 — there is deliberately no per-transport restatement of it
+- `deephaven.source-key-column` is refused for `source.tcp` **and** `source.s3` — a socket and
+  an object both deliver bytes, and a frame is a stretch of them rather than a message with a
+  key beside it, so the column could only ever be null (§5.1)
 - `source.kafka.compacted: true` with a keyed table requires `key-columns` to **include**
   `source-key-column`: a tombstone carries no payload to rebuild the key from, so the message
   key has to be the key (§11)
+- `source.jdbc.key-column` with a keyed table requires the same thing, for the same reason: a
+  row that vanished from the query is reported by its key alone, with an empty payload. An
+  *unset* `source-key-column` fails it too — there would be nowhere for the vanished key to
+  land at all (§11.4)
+- `source.jdbc` requires `format: JSON` — a result-set row has no wire format of its own, so
+  the source serialises each one as a JSON object keyed by column label, and FIX, NVFIX or
+  COMPOSITE would have nothing to parse
+- `source.jdbc.mode: INCREMENTAL` requires `incremental-column` (without a column saying what
+  is new, every poll would re-emit the entire query) and refuses `key-column` (an incremental
+  poll never selects the rows that did not change, so it cannot tell a deleted row from an
+  untouched one). `mode: SNAPSHOT` refuses `incremental-column` symmetrically — a setting
+  belonging to the other mode is a connector configured for behaviour it will not get
+- `source.s3` configures **exactly one** of `key` / `prefix`: a bucket on its own does not say
+  which objects to read, and naming both names one scope twice. Every simple wire format is
+  legal over S3 — the object says where a record ends, the format says what is inside it
 - `transforms` entries are non-blank and unique — a transform is stateless, so applying it
   twice either does nothing or is a copy-paste slip (§12). An *unknown* name is not checked
   here: it fails the connector at start, the way an unreachable broker does
@@ -618,7 +672,7 @@ The submodule separates the **framework** (a `java-library`), the **source drive
 module per transport) and the **applications** built on them. An application is a deployment
 unit: most are the generic runner plus one configuration directory, and a *custom* application
 (own decoder, enricher) is its own Gradle module. This is what lets the fleet grow to dozens of
-Spring Boot applications without dozens of modules: the build produces one framework, three
+Spring Boot applications without dozens of modules: the build produces one framework, five
 drivers and one runner artifact however many times they are deployed.
 
 ```
@@ -637,8 +691,10 @@ dh-connectors/
 ├── source-amps/                        # :dh-connectors:source-amps — 60East client (§11)
 ├── source-kafka/                       # :dh-connectors:source-kafka — kafka-clients consumer (§11)
 ├── source-tcp/                         # :dh-connectors:source-tcp — framed socket, java.net only (§11)
+├── source-jdbc/                        # :dh-connectors:source-jdbc — java.sql + the PostgreSQL driver (§11)
+├── source-s3/                          # :dh-connectors:source-s3 — AWS SDK v2 behind S3ObjectStore (§11)
 ├── connector-app/                      # :dh-connectors:connector-app — the generic runner,
-│   └── src/{main,test,integrationTest} #   which depends on ALL THREE drivers
+│   └── src/{main,test,integrationTest} #   which depends on ALL FIVE drivers
 │                                       # ConnectorApplication + baked defaults + demo profile;
 │                                       # ApplicationYamlBindingTest, ConfigTreeTest; LiveTableTypeTest
 ├── apps/                               # custom-code applications, auto-discovered by settings.gradle.kts
@@ -651,10 +707,14 @@ dh-connectors/
 **Core knows nothing about any transport.** Each driver module carries its own client
 dependency and contributes a `SourceFactory` through its own auto-configuration, so adding a
 transport is adding a module to the classpath and an application carries only the clients it
-actually dials. The generic runner depends on all three deliberately — it is the *one* image
+actually dials. The generic runner depends on all five deliberately — it is the *one* image
 the whole fleet deploys, and a driver missing from it would turn "someone wrote a different
 `source:` block" into a startup failure. An app under `apps/` that only ever dials one broker
-depends on just that module.
+depends on just that module. Two driver modules carry a *runtime* payload of their own beyond
+the client: `source-jdbc` ships the PostgreSQL driver so a config-only application can reach a
+real database (any other database arrives with the `apps/` module that needs it), and
+`source-s3` excludes the AWS SDK's two default HTTP stacks in favour of the URL-connection
+client, because the alternative is putting them on every image in the fleet.
 
 Core is deliberately **not** a Boot application (an executable module drags its main
 class and baked yml onto every consumer's classpath); it contributes its beans through
@@ -668,11 +728,25 @@ later wins); a connector list may only ever live in the instance file, because t
 `dh-connectors.connectors` lists merge by index — `ConfigTreeTest` enforces that and binds +
 validates every file in the tree.
 
+**Credentials in the config tree are named, never written.** The tree is plaintext in git, so
+`ConfigTreeTest` refuses a value on any key whose name contains `password`, `passwd`, `secret`
+or `token` — with one exception, which is the whole contract: the value may be a **single
+`${...}` placeholder**, quoted or not, and nothing else. A placeholder is the *name* of a
+secret, resolved by the container from its environment; anything beside it is the secret
+itself. That is what lets `source.jdbc.password` and `source.s3.secret-key` appear in the
+tree at all, documenting that the setting exists and which variable fills it, and it is why a
+literal — or a placeholder with anything else on the line beside it — is still refused.
+Leaving the variable unset resolves to blank, which each transport reads as
+"no credentials configured" — the URL's own authentication for JDBC, the SDK's default
+provider chain for S3.
+
 Dependency versions are pinned to what the rest of the repo already runs against:
 `io.deephaven:deephaven-java-client-flight-dagger:42.4` matches
 `ghcr.io/deephaven/server:42.4` in `docker/docker-compose.yml`, and Arrow 18.3.0 matches the
 version that client publishes with; the driver modules take their client versions the same way
-(`com.crankuptheamps:amps-client:5.3.4.1`, and `kafka-clients` from the Spring Boot BOM).
+(`com.crankuptheamps:amps-client:5.3.4.1`, `kafka-clients` and the PostgreSQL driver from the
+Spring Boot BOM, and — because that BOM does not manage it — `software.amazon.awssdk:bom:2.55.0`
+imported by `source-s3` itself).
 Arrow needs `--add-opens=java.base/java.nio=ALL-UNNAMED` on JDK 21; `bootRun` and `test` set
 it, and the runbook gives it for `java -jar`.
 
@@ -721,11 +795,11 @@ exploder's vanish-deletes run in the demo rather than only its upserts.
 That is what makes the `demo` profile and the end-to-end tests runnable with nothing but a
 Deephaven container. It is a test and demo affordance, not a production path.
 
-## 11. Sources: one pipeline, three transports
+## 11. Sources: one pipeline, five transports
 
 A source's whole job is to answer one question — *what is a record?* — and hand the answer to
 the pipeline as a `SourceRecord(data | parts, key, action)`. Everything downstream is written
-against that record and nothing else, which is why the three transports share a decoder, a
+against that record and nothing else, which is why the five transports share a decoder, a
 mapper, a merger, a batcher and four table types between them.
 
 The SPI is four types in `core`:
@@ -740,25 +814,32 @@ The SPI is four types in `core`:
 A driver module contributes its factory as a bean through its own auto-configuration, so
 `core` holds no list of drivers and an application supports the transports it depends on.
 
-### 11.1 The same ideas in three vocabularies
+### 11.1 The same ideas in five vocabularies
 
 Every concept the pipeline pivots on exists in each transport under a different name. This is
 the whole mapping:
 
-| pipeline concept | AMPS | Kafka | TCP |
-|---|---|---|---|
-| **state** (`stateful()`, and the `KEYED` default) | a SOW topic (`amps.sow: true`) | a compacted topic (`kafka.compacted: true`) | — never; a socket has no state |
-| **record key** (`source-key-column`) | the SOW key, `Message.getSowKey()` | the message key | — none; §7 refuses the setting |
-| **removal** (`DELETE`) | `sow_delete`, or an out-of-focus (`oof`) message | a tombstone: a record with a **null value** | — never |
-| **history** (what a first connect reads) | `bookmark: epoch` replays the transaction log | `from: EARLIEST` replays the retained log; `LATEST` starts at the end | the live stream, from the moment the socket opens |
-| **rehydration** (§6, every restart) | the SOW replay, or the bookmark again | assign + seek to the beginning again | redial; nothing is replayed |
-| **framing** | the message type, plus binary part prefixes for `COMPOSITE` (§5.3) | one record is one message | `DELIMITED` or `LENGTH_PREFIXED` (below) |
+| pipeline concept | AMPS | Kafka | TCP | JDBC | S3 |
+|---|---|---|---|---|---|
+| **state** (`stateful()`, and the `KEYED` default) | a SOW topic (`amps.sow: true`) | a compacted topic (`kafka.compacted: true`) | — never; a socket has no state | a `SNAPSHOT` poll (`jdbc.mode`): the result set *is* the state | — never; an object feed re-emits rather than converging |
+| **record key** (`source-key-column`) | the SOW key, `Message.getSowKey()` | the message key | — none; §7 refuses the setting | the row's `jdbc.key-column` | — none; §7 refuses the setting |
+| **removal** (`DELETE`) | `sow_delete`, or an out-of-focus (`oof`) message | a tombstone: a record with a **null value** | — never | a key that appeared in the previous poll and not in this one | — never |
+| **history** (what a first connect reads) | `bookmark: epoch` replays the transaction log | `from: EARLIEST` replays the retained log; `LATEST` starts at the end | the live stream, from the moment the socket opens | `INCREMENTAL` reads forward from a watermark on `incremental-column` | every object under the prefix that is new or has a changed ETag |
+| **rehydration** (§6, every restart) | the SOW replay, or the bookmark again | assign + seek to the beginning again | redial; nothing is replayed | the full query again, from an empty watermark and an empty key set | re-list and re-read everything in scope |
+| **framing** | the message type, plus binary part prefixes for `COMPOSITE` (§5.3) | one record is one message | `DELIMITED` or `LENGTH_PREFIXED` (§11.3) | one row is one record, serialised to JSON here (§11.4) | `DELIMITED` or `WHOLE` inside each object (§11.5) |
 
 Read the "state" row and the "rehydration" row together and the design falls out: **a compacted
-Kafka topic replayed from the beginning is the Kafka spelling of an AMPS SOW replay**, and a
-tombstone is the Kafka spelling of an `oof`. That correspondence is why a Kafka connector needs
-no concepts of its own — `compacted: true` sets `stateful()`, which defaults the table to
-`KEYED`, which is what makes tombstones mean something.
+Kafka topic replayed from the beginning is the Kafka spelling of an AMPS SOW replay**, a
+tombstone is the Kafka spelling of an `oof`, and **a `SNAPSHOT` query re-run every poll is the
+SQL spelling of the same thing** — its result set is a state of the world, and a key that
+stopped appearing in it is an `oof`. That correspondence is why none of these transports needs
+concepts of its own: `compacted: true` and `mode: SNAPSHOT` both set `stateful()`, which
+defaults the table to `KEYED`, which is what makes a removal mean anything at all.
+
+The two polled transports differ on exactly one point, and it is the point: JDBC's snapshot
+**converges** (the same key re-read is the same row, updated in place), while S3's listing
+**re-emits** (the same object re-read is its records again, appended). That is why one defaults
+to `KEYED` and the other does not.
 
 ### 11.2 Offsets: the connector owns its position
 
@@ -805,7 +886,81 @@ has no notion of a record leaving it, and it replays nothing on a redial. `RING`
 is exactly what the transport can back. A feed that must survive a restart belongs behind a
 broker.
 
-### 11.4 Scope: when this module earns its keep
+### 11.4 JDBC: a snapshot poll is a SOW
+
+A query is a snapshot, not a stream: there is nothing to subscribe to, so this source polls,
+and `jdbc.mode` is the whole difference between the two feeds it can be.
+
+| `mode` | each poll emits | the framework analog |
+|---|---|---|
+| `SNAPSHOT` | every row of the query, as an `UPSERT`; with `key-column` set, also a `DELETE` for every key that appeared last poll and not this one | a SOW replay, and its out-of-focus message |
+| `INCREMENTAL` | only the rows whose `incremental-column` is past the mark left by the previous polls, as `UPSERT`s | a journal topic read forward from a bookmark |
+
+**The `SNAPSHOT` contract, stated as one rule:** *the result set is the state of the world.*
+Every poll is a full replay — which is why it sets `stateful()` and defaults to `KEYED` — and
+a key's absence from that replay is its removal, which is why `key-column` is what gives this
+transport a `DELETE` at all. Without it there are no deletes and a row deleted in the database
+lingers in the table: the configured trade-off for a query with no stable key. With it, §7
+requires that the key column *be* the table's key, because a vanished row is reported by its
+key alone with an empty payload — there is nothing left to rebuild key columns from.
+
+**The query is run verbatim.** `INCREMENTAL` filters in this process rather than wrapping the
+configured SQL, so a query that is already correct cannot be broken by string surgery and an
+expensive one is visibly expensive — once per `poll-interval`.
+
+**Both marks are memory-only, deliberately.** Neither the watermark nor the seen-key set is
+persisted, so a restarted connector reads from the beginning again. That is the §6 rehydration
+contract rather than a gap: the Deephaven table is the state, and every restart rebuilds it
+from nothing. A watermark that outlived the table would leave the table holding only what
+arrived since — the same mistake as resuming from a committed Kafka offset (§11.2).
+
+**The rows are turned into JSON here.** A result-set row has no wire format, so the source
+synthesises one: each row becomes a flat JSON object keyed by result-set column *label*, which
+is why §7 requires `format: JSON` and why field mappings address columns by label, an `AS`
+alias included. Numbers stay numbers and booleans stay booleans, dates and times become
+ISO-8601 text, and SQL `NULL` becomes an explicit JSON `null` — which the JSON decoder already
+reads as "present, and cleared" rather than as an absent field.
+
+### 11.5 S3: unseen key, or changed ETag
+
+An object store has no subscription either, and no mode to choose, because there is only
+**one rule**:
+
+> every poll, list the objects in scope; any whose key has not been seen, or whose ETag differs
+> from the one it was last seen at, is read and its frames are emitted.
+
+Both configurations fall out of that single rule rather than needing a code path each:
+`key: <one object>` emits nothing until the object is rewritten, and then re-emits it **whole**
+(a rewritten file is a new version of every record in it); `prefix: <many>` emits each object
+that appears under the prefix exactly once, in key order. §7 requires exactly one of the two —
+a bucket on its own does not say what to read.
+
+The seen-map is **memory-only**, for the same reason JDBC's watermark is: a restarted connector
+re-lists and re-reads everything in scope, which is what §6 rehydration means for a transport
+whose replay is simply reading the files again. A failed read is retried rather than remembered
+— a key is recorded only after its object has been read in full — and because the map is only
+ever added to, a poll that died halfway still knows about everything it had already read.
+
+| `framing` | inside one object |
+|---|---|
+| `DELIMITED` | records separated by `delimiter`, matched as a **byte sequence** in the configured charset, so multi-byte separators work; empty frames are skipped. Unlike a socket, an object is finite — the bytes after the last delimiter are a whole record, so a file with no trailing newline loses nothing |
+| `WHOLE` | the entire object is one record — one document per key |
+
+Every frame becomes a keyless `UPSERT`. This source never sets a key and never emits a
+`DELETE`: an object carries no per-record key, and a key disappearing from a bucket says
+nothing about records already read out of it. `APPEND_ONLY` and `RING` are therefore its
+natural targets, and §7 refuses `deephaven.source-key-column` outright.
+
+`S3ObjectStore` — `list()` and `read(key)` — is the seam the whole design rests on: everything
+the source decides sits above it, so the tests drive a map of strings and the SDK never appears
+in them. The SDK side is one class (`SdkS3ObjectStore`), and its three local-development
+settings exist so a MinIO or localstack is the *same* connector: `endpoint` overrides the
+endpoint, `path-style-access` addresses buckets as `<endpoint>/<bucket>` (virtual-host
+addressing needs wildcard DNS a developer machine does not have), and the static credentials
+are used only when both halves are set — otherwise the SDK's default provider chain runs,
+which is what a deployed connector on an instance role wants.
+
+### 11.6 Scope: when this module earns its keep
 
 Deephaven ingests Kafka natively — `deephaven.stream.kafka.consumer.consume` builds a blink
 table from a topic in a few lines of python, inside the server, with no application to deploy.
@@ -814,8 +969,10 @@ When that is all you need, use it.
 This module earns its keep when you want what sits *between* the wire and the table: the
 mapping allowlist, `decode` / `values` / `default-value` shaping (§5.2), `explode` (§5.4),
 startup validation of the whole configuration (§7), transforms (§12), and input-table **delete**
-semantics — plus the same configuration language across AMPS, Kafka and a socket, and one
-runtime whose restart contract is written down (§6). The overlap with `kc.consume` is real and
+semantics — plus the same configuration language across AMPS, Kafka, a socket, a database and a
+bucket, and one runtime whose restart contract is written down (§6). A connector moves between
+any two of those five by rewriting the six lines under `source:`, which is worth more than any
+one of them individually. The overlap with `kc.consume` is real and
 worth being honest about; the answer is "use the connector when the table needs shaping the
 python one-liner would have to grow into".
 
@@ -873,13 +1030,17 @@ the thing the rows are being published into.
 ```bash
 ./gradlew :dh-connectors:core:test :dh-connectors:source-amps:test \
           :dh-connectors:source-kafka:test :dh-connectors:source-tcp:test \
+          :dh-connectors:source-jdbc:test :dh-connectors:source-s3:test \
           :dh-connectors:connector-app:test
 ```
 
-**292 JUnit 5 tests, no servers required** — core 236, source-amps 10, source-kafka 9,
-source-tcp 7, connector-app 30 — plus 6 opt-in tests that need one (`LiveTableTypeTest`, in the
-runner's `integrationTest` suite, below). No transport test needs a broker: the Kafka suite
-drives a `MockConsumer` and the TCP suite a loopback `ServerSocket` the test starts itself.
+**323 JUnit 5 tests, no servers required** — core 248, source-amps 10, source-kafka 9,
+source-tcp 7, source-jdbc 8, source-s3 9, connector-app 32 — plus 6 opt-in tests that need one
+(`LiveTableTypeTest`, in the runner's `integrationTest` suite, below). No transport test needs
+external infrastructure: the Kafka suite drives a `MockConsumer`, the TCP suite a loopback
+`ServerSocket` the test starts itself, the JDBC suite a real in-memory H2 database, and the S3
+suite a fake `S3ObjectStore` — which is the whole point of that seam, since everything the
+source decides sits above it.
 
 | Suite | Covers |
 |---|---|
@@ -899,11 +1060,13 @@ drives a `MockConsumer` and the TCP suite a loopback `ServerSocket` the test sta
 | `AmpsRecordSourceTest` | §11: the AMPS command each topic/mode resolves to, URI and bookmark building — no server |
 | `KafkaRecordSourceTest` | §11: upserts keyed by the message key, tombstone → DELETE, where each configuration seeks, assign-not-subscribe, passthrough properties, close — a `MockConsumer`, no broker |
 | `TcpRecordSourceTest` | §11.3: delimited and length-prefixed framing, a frame split across two writes, a multi-byte delimiter, redial after the peer hangs up, close — a loopback `ServerSocket` |
+| `JdbcRecordSourceTest` | §11.4: the JSON a result set is serialised into and the types it keeps, the key carried on upserts, a vanished key → DELETE, no key column → no deletes at all, the incremental mark never re-emitting, an undialable URL looping the backoff, close mid-interval — a real in-memory H2 database |
+| `S3RecordSourceTest` | §11.5: an NDJSON object's lines as records, an unchanged ETag emitting nothing, a changed ETag re-emitting the object whole, a new key emitted once, `WHOLE` framing, a multi-byte delimiter matched as a byte sequence, a record spanning several reads, a store that throws once recovering without re-reading what it had, close mid-interval — a fake `S3ObjectStore` |
 | `ConnectorManagerTest` | **the §6 lifecycle contract**: start, steady state, restart-rehydrate, unavailable, per-connector retry |
 | `SimulatedSourceTest` | §10: the replay, the generated payloads decoding back to every mapped tag, the §5.2 knobs |
 | `EndToEndPipelineTest` | the whole application with the simulated source and a recording gateway |
 | `ApplicationYamlBindingTest` | the shipped demo examples bind, mean what this doc says, and validate |
-| `ConfigTreeTest` | every `config/<env>/<flow>/<app>/application.yml` binds, layers and validates the way the container will run it; the tree's cross-file rules (§9) |
+| `ConfigTreeTest` | every `config/<env>/<flow>/<app>/application.yml` binds, layers and validates the way the container will run it; the tree's cross-file rules (§9), including the credential-placeholder contract |
 | `LiveTableTypeTest` | **opt-in** (`integrationTest`): the generated python and both publish paths, against a real server |
 
 `LiveTableTypeTest` is the one suite the fakes cannot stand in for — a table type that has to be

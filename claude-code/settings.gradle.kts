@@ -24,6 +24,8 @@ include(":dh-connectors:core")
 include(":dh-connectors:source-amps")
 include(":dh-connectors:source-kafka")
 include(":dh-connectors:source-tcp")
+include(":dh-connectors:source-jdbc")
+include(":dh-connectors:source-s3")
 include(":dh-connectors:connector-app")
 file("dh-connectors/apps").listFiles()
     ?.filter { it.isDirectory && File(it, "build.gradle.kts").exists() }

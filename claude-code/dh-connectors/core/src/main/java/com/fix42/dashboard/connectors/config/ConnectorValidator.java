@@ -16,7 +16,7 @@ import java.util.regex.Pattern;
  * {@code application.yml} stops the application with a readable list instead of a stack trace.
  *
  * <p>A rule that only one transport can satisfy names that transport in its message: with
- * three source kinds sharing one connector model, "requires a SOW topic" is only actionable
+ * five source kinds sharing one connector model, "requires a SOW topic" is only actionable
  * once you know which block was supposed to provide one.
  */
 public final class ConnectorValidator {
@@ -115,11 +115,13 @@ public final class ConnectorValidator {
                 errors.add(id + "source-key-column '" + sourceKeyColumn
                         + "' collides with a mapped column");
             }
-            // A socket delivers bytes, nothing beside them: there is no per-message key to
-            // publish, so the column could only ever be null.
-            if (source.getTcp() != null) {
-                errors.add(id + "deephaven.source-key-column is not available for source.tcp: "
-                        + "a TCP stream carries no per-message key -- key on payload fields "
+            // A socket delivers bytes and an S3 object delivers bytes: a frame is a stretch of
+            // them, not a message with a key beside it, so the column could only ever be null.
+            String framed = source.getTcp() != null ? "source.tcp"
+                    : source.getS3() != null ? "source.s3" : null;
+            if (framed != null) {
+                errors.add(id + "deephaven.source-key-column is not available for " + framed
+                        + ": its frames carry no per-record key -- key on payload fields "
                         + "instead");
             }
             // Kafka's tombstone carries a key and no value, so a compacted topic can only
@@ -132,6 +134,22 @@ public final class ConnectorValidator {
                         + sourceKeyColumn + "': a tombstone carries no payload to rebuild the "
                         + "key from");
             }
+        }
+        // The same reasoning for JDBC: a key that stopped appearing in the query is reported
+        // by its key alone, with an empty payload, so the key column has to BE the source key.
+        // Checked outside the block above because an unset source-key-column fails it too --
+        // there would be nowhere for the vanished key to land at all.
+        if (source.getJdbc() != null && !isBlank(source.getJdbc().getKeyColumn())
+                && target.isKeyed()
+                && (isBlank(sourceKeyColumn)
+                        || !target.getKeyColumns().contains(sourceKeyColumn))) {
+            String named = isBlank(sourceKeyColumn)
+                    ? "(which is not set)"
+                    : "'" + sourceKeyColumn + "'";
+            errors.add(id + "source.jdbc.key-column with a keyed table requires "
+                    + "deephaven.key-columns to include source-key-column " + named
+                    + ": a row that vanished from the query carries no payload to rebuild the "
+                    + "key from");
         }
         String ingestColumn = target.getIngestTimestampColumn();
         if (ingestColumn != null && !ingestColumn.isBlank() && !columns.add(ingestColumn)) {
@@ -204,12 +222,12 @@ public final class ConnectorValidator {
         SourceProperties source = connector.getSource();
         List<String> blocks = source.configuredBlocks();
         if (blocks.isEmpty()) {
-            errors.add(id + "source needs exactly one of amps/kafka/tcp, and has none");
+            errors.add(id + "source needs exactly one of amps/kafka/tcp/jdbc/s3, and has none");
             return errors;
         }
         if (blocks.size() > 1) {
             errors.add(id + "source configures " + blocks + ", but a connector feeds one table "
-                    + "from one source: keep exactly one of amps/kafka/tcp");
+                    + "from one source: keep exactly one of amps/kafka/tcp/jdbc/s3");
             return errors;
         }
 
@@ -227,10 +245,82 @@ public final class ConnectorValidator {
         if (amps == null && !connector.getCompositeParts().isEmpty()) {
             errors.add(id + "composite-parts requires source.amps");
         }
+        errors.addAll(validateJdbc(id, connector));
+        errors.addAll(validateS3(id, connector));
         // There is deliberately no "subscription-mode=DELTA requires amps" rule: the setting
         // lives on the amps block, so a connector without one cannot ask for deltas at all,
         // and SourceProperties.subscriptionMode() answers FULL for every other transport.
         return errors;
+    }
+
+    /**
+     * The {@code source.jdbc} rules: the format the synthesised payload forces, and the two
+     * settings that only one poll mode can mean anything to.
+     *
+     * <p>{@code mode} is the whole difference between the two feeds this transport can be, so
+     * a setting belonging to the other one is never a harmless extra -- it is a connector
+     * configured for the behaviour it will not get.
+     */
+    private static List<String> validateJdbc(String id, ConnectorProperties connector) {
+        JdbcSourceProperties jdbc = connector.getSource().getJdbc();
+        if (jdbc == null) {
+            return List.of();
+        }
+        List<String> errors = new ArrayList<>();
+        // The source builds the payload itself, as a JSON object keyed by column label; there
+        // is no FIX, NVFIX or composite spelling of a result-set row for a decoder to parse.
+        if (connector.getFormat() != SourceFormat.JSON) {
+            errors.add(id + "source.jdbc requires format=JSON: a result-set row has no wire "
+                    + "format of its own, so the source serialises each one as a JSON object "
+                    + "keyed by column label -- " + connector.getFormat() + " has nothing to "
+                    + "parse");
+        }
+        if (jdbc.getMode() == JdbcSourceProperties.Mode.INCREMENTAL) {
+            if (isBlank(jdbc.getIncrementalColumn())) {
+                errors.add(id + "source.jdbc.mode=INCREMENTAL requires "
+                        + "source.jdbc.incremental-column: without a column that says what is "
+                        + "new, every poll would re-emit the entire query");
+            }
+            if (!isBlank(jdbc.getKeyColumn())) {
+                errors.add(id + "source.jdbc.key-column is only meaningful for mode=SNAPSHOT: "
+                        + "an incremental poll never selects the rows that did not change, so "
+                        + "it cannot tell a deleted row from an untouched one");
+            }
+        } else if (!isBlank(jdbc.getIncrementalColumn())) {
+            errors.add(id + "source.jdbc.incremental-column is only meaningful for "
+                    + "mode=INCREMENTAL: a snapshot poll re-runs the whole query and emits "
+                    + "every row it returns");
+        }
+        return errors;
+    }
+
+    /**
+     * The one {@code source.s3} rule bean validation cannot express: {@code key} and
+     * {@code prefix} are alternatives, and "exactly one of a pair" is a statement about the
+     * pair rather than about either field.
+     *
+     * <p>There is deliberately nothing here about the wire format. FIX, NVFIX and JSON are all
+     * legal over S3 because a frame is just a payload -- the object says where records end, the
+     * format says what is inside one. {@code COMPOSITE} is already refused for every non-AMPS
+     * transport by the rule in {@link #validateSource}, so it is not repeated here.
+     */
+    private static List<String> validateS3(String id, ConnectorProperties connector) {
+        S3SourceProperties s3 = connector.getSource().getS3();
+        if (s3 == null) {
+            return List.of();
+        }
+        boolean key = !isBlank(s3.getKey());
+        boolean prefix = !isBlank(s3.getPrefix());
+        if (key && prefix) {
+            return List.of(id + "source.s3 configures both key and prefix, but they are two "
+                    + "ways of naming one scope: keep the single object, or everything under "
+                    + "the prefix");
+        }
+        if (!key && !prefix) {
+            return List.of(id + "source.s3 needs exactly one of key/prefix: a bucket on its "
+                    + "own does not say which objects to read");
+        }
+        return List.of();
     }
 
     /**

@@ -13,10 +13,12 @@ description = "Generic source -> Deephaven connector application; connectors arr
 dependencies {
     // Every source module, because this is the ONE image the whole fleet deploys: an
     // instance picks its transport in configuration (source.amps / source.kafka /
-    // source.tcp), and a driver missing from the image would turn that into a startup
-    // failure on the day someone writes a different block. An app under apps/ that only
-    // ever dials one broker can depend on just that module.
+    // source.tcp / source.jdbc / source.s3), and a driver missing from the image would turn
+    // that into a startup failure on the day someone writes a different block. An app under
+    // apps/ that only ever dials one broker can depend on just that module.
     implementation(project(":dh-connectors:source-amps"))
     implementation(project(":dh-connectors:source-kafka"))
     implementation(project(":dh-connectors:source-tcp"))
+    implementation(project(":dh-connectors:source-jdbc"))
+    implementation(project(":dh-connectors:source-s3"))
 }

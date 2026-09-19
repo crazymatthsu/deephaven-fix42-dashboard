@@ -1,0 +1,62 @@
+# trades-s3 (local/files) -- a day's trades landing in an object store as NDJSON, read as they appear.
+#
+# An object store has no subscription, so this source polls a listing and applies one
+# rule: an object whose key it has not seen, or whose ETag has changed since it did, is
+# read and its frames are emitted. In `prefix` mode that means each new file under
+# trades/ arrives exactly once; the single-object spelling (`key:` instead of `prefix:`)
+# re-emits the whole object whenever it is rewritten. Exactly one of the two is
+# configured -- a bucket on its own does not say what to read.
+#
+# What has been read lives in memory only, so a restart re-lists and re-reads everything.
+# That is the framework's rehydration contract, not a gap: the Deephaven table is the
+# state and every restart rebuilds it from nothing.
+#
+# The endpoint and path-style settings point this at a local MinIO; delete them both and
+# the same connector reads real S3 in the configured region. Credentials are NAMED here
+# and never written -- unset, the blanks fall through to the SDK's default provider chain
+# (environment, profile, container or instance role), which is what a deployment wants.
+#
+# Layered over the baked defaults and config/local/common/ at runtime; this file
+# owns the connector list. Reference examples with commentary: application-demo.yml.
+dh-connectors:
+  connectors:
+    - name: trades-s3
+      enabled: true
+      format: JSON                   # what is INSIDE a frame; the framing below says where one ends
+      source:
+        driver: ${source-driver:REAL}
+        s3:
+          bucket: trading-data
+          prefix: "trades/"          # every object under it, in key order; `key:` is the other option
+          region: us-east-1
+          endpoint: "http://${S3_HOST:localhost}:9000"   # MinIO locally; drop it for real S3
+          path-style-access: true    # MinIO has no wildcard DNS for virtual-host addressing
+          access-key: "${S3_ACCESS_KEY:}"   # blank -> the SDK's default credential chain
+          secret-key: "${S3_SECRET_KEY:}"   # both halves or neither; one alone signs nothing
+          framing: DELIMITED         # DELIMITED | WHOLE (the whole object as one record)
+          delimiter: "\n"            # NDJSON; the YAML escape, never the byte itself
+          charset: UTF-8
+          poll-interval: 30s         # every poll is a billed ListObjectsV2; files are not ticks
+          reconnect-delay: 5s
+      deephaven:
+        table: s3_trades
+        table-type: APPEND_ONLY      # an object feed re-emits rather than converging onto a key
+        publish-mode: FULL
+        key-columns: []              # an append-only table has no keys, so this stays empty
+        # No source-key-column: an object's frames carry no per-record key, and the
+        # validator refuses the setting here rather than publishing a column of nulls.
+        ingest-timestamp-column: IngestTs
+        max-batch-rows: 10000
+        flush-interval: 500ms
+      fields:
+        - { tag: tradeId,           column: TradeID,   type: STRING }
+        - { tag: orderId,           column: OrderID,   type: STRING }
+        - { tag: symbol,            column: Symbol,    type: STRING }
+        - tag: side
+          column: Side
+          type: STRING
+          values: { "B": BUY, "S": SELL }
+        - { tag: quantity,          column: Quantity,  type: DOUBLE }
+        - { tag: price,             column: Price,     type: DOUBLE }
+        - { tag: "execution.venue", column: Venue,     type: STRING, default-value: UNKNOWN }
+        - { tag: tradeTime,         column: TradeTime, type: INSTANT }

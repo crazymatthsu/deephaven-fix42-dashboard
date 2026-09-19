@@ -106,7 +106,7 @@ claude-code/
 │   ├── src/remote_uri/         #   config, ingest, leaf, remote, collector, exposure, dashboard
 │   ├── amps/amps-config.xml    #   the demo AMPS broker config
 │   └── e2e/                    #   run_e2e.sh + pydeephaven assertions against leaves + collector
-├── dh-connectors/              # Spring Boot: AMPS / Kafka / TCP feeds -> Deephaven tables (doc 07)
+├── dh-connectors/              # Spring Boot: AMPS / Kafka / TCP / JDBC / S3 feeds -> Deephaven tables (doc 07)
 │   ├── core/ + source-{amps,kafka,tcp}/  # the pipeline + one driver module per transport
 │   └── connector-app/ + config/<env>/<flow>/<app>/  # the generic runner + its instances
 ├── docker/                     # podman-compose stack: kafka (KRaft) + deephaven (+ui)
@@ -139,7 +139,7 @@ claude-code/
 - [04 — Deephaven features & API survey](04-deephaven-features-api.md)
 - [05 — Implementation plan, build & testing](05-implementation-and-testing.md) *(module APIs, scenario catalog, demo runbook)*
 - [06 — State machine language choice: Python vs Java](06-state-machine-language-analysis.md) *(trade-offs + measured in-container throughput ceiling)*
-- [07 — dh-connectors](07-dh-connectors.md) *(AMPS / Kafka / TCP → Deephaven bridge: config model, the source SPI and the three transports, transforms, table types, delta handling, lifecycle)*
+- [07 — dh-connectors](07-dh-connectors.md) *(AMPS / Kafka / TCP / JDBC / S3 → Deephaven bridge: config model, the source SPI and the five transports, transforms, table types, delta handling, lifecycle)*
 - [08 — On-demand executions from AMPS](08-on-demand-executions-idea.md) *(**tabled idea, not a contract** — explored and set aside: two sources of truth, partial memory win)*
 - [09 — Multi-OMS drop-copy blotter](09-multi-oms-blotter.md) *(contract for `deephaven-app-multi-oms-blotter`: cross-hub linking via configurable tags, per-edge CumQty/LeavesQty/notional recon, break taxonomy, paged blotter UI)*
 - [10 — Multi-server Deephaven: remote-URI leaves and collector](10-deephaven-remote-uri.md) *(contract for `deephaven-remote-uri`: sharding by hub/chain key, the 400M-message sizing analysis, remote subscription/snapshot/query mechanisms, leaf exports, collector DAG, exposure semantics)*

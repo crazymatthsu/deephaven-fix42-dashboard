@@ -11,6 +11,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -187,15 +189,42 @@ class ConfigTreeTest {
         }
     }
 
+    /**
+     * A key whose <em>name</em> contains a credential word, and everything that follows it on
+     * the line. Only the first match on a line is examined, because the placeholder that
+     * follows a credential key routinely names the same word again
+     * ({@code password: "${JDBC_PASSWORD:}"}).
+     */
+    private static final Pattern CREDENTIAL_KEY = Pattern.compile(
+            "(?i)[A-Za-z0-9_.-]*(?:password|passwd|secret|token)[A-Za-z0-9_.-]*\\s*:\\s*(.*)$");
+
+    /** One {@code ${...}} placeholder and nothing else, with or without the YAML quotes. */
+    private static final Pattern PLACEHOLDER_ONLY = Pattern.compile("\"?\\$\\{[^{}]*}\"?");
+
     @Test
-    void noCredentialLiteralsInTheTree() throws IOException {
-        // These files are plaintext in git; secrets arrive as environment variables.
+    @DisplayName("a credential key carries one ${...} placeholder, or no value at all")
+    void credentialKeysCarryOnlyEnvironmentPlaceholders() throws IOException {
+        // These files are plaintext in git, so a secret may be NAMED here but never written.
+        // A lone `${VAR:}` is a name: the container resolves it, nothing sensitive is
+        // committed, and the connector's block keeps the key that documents it exists.
+        // Anything else on the line is the literal this rule exists to keep out of the repo.
         try (Stream<Path> files = Files.walk(CONFIG_ROOT)) {
             for (Path file : files.filter(Files::isRegularFile).toList()) {
-                String body = Files.readString(file).replaceAll("#.*", "");
-                assertThat(body.matches("(?s).*\\b(password|passwd|secret|token)\\s*:\\s*\\S.*"))
-                        .as("%s: a credential literal must never appear in a config file", file)
-                        .isFalse();
+                List<String> lines = Files.readAllLines(file);
+                for (int index = 0; index < lines.size(); index++) {
+                    String line = lines.get(index).replaceAll("#.*", "");
+                    Matcher key = CREDENTIAL_KEY.matcher(line);
+                    if (!key.find()) {
+                        continue;
+                    }
+                    String value = key.group(1).strip();
+                    assertThat(value.isEmpty() || PLACEHOLDER_ONLY.matcher(value).matches())
+                            .as("%s:%d: a credential key may only carry a single ${...} "
+                                    + "placeholder (quoted or not) -- these files are plaintext "
+                                    + "in git, so a literal here is a secret in the repository: "
+                                    + "%s", file, index + 1, lines.get(index).strip())
+                            .isTrue();
+                }
             }
         }
     }
@@ -209,7 +238,8 @@ class ConfigTreeTest {
         for (Instance instance : instances()) {
             for (ConnectorProperties connector : bind(instance).getConnectors()) {
                 assertThat(connector.getSource().configuredBlocks())
-                        .as("%s/%s: exactly one of amps/kafka/tcp", instance, connector.getName())
+                        .as("%s/%s: exactly one of amps/kafka/tcp/jdbc/s3",
+                                instance, connector.getName())
                         .hasSize(1);
                 assertThat(connector.getSource().getDriver())
                         .as("%s/%s: source.driver resolved", instance, connector.getName())

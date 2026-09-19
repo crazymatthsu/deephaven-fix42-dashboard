@@ -20,7 +20,8 @@
 # healthcheck runs inside the container network) and reach their sources and Deephaven on the
 # host through host.containers.internal. Override per invocation:
 #   AMPS_HOST / DEEPHAVEN_HOST   endpoint the containers dial (default host.containers.internal)
-#   KAFKA_HOST / TCP_HOST        the same, for the kafka and raw-socket sources
+#   KAFKA_HOST / TCP_HOST / JDBC_HOST / S3_HOST   the same, for the kafka, raw-socket,
+#                                jdbc and s3 (MinIO endpoint) sources
 #   IMAGE_TAG                    image tag (default local)
 #   DH_CONNECTOR_MEM             per-container memory limit (default 384m; the JVM sizes
 #                                itself from it via container awareness)
@@ -34,7 +35,7 @@ GRADLE_ROOT="$(dirname "$ROOT")"                   # the gradle build root
 PODMAN="${PODMAN:-podman}"
 
 usage() {
-    sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -80,6 +81,8 @@ generate() {
       AMPS_HOST: \${AMPS_HOST:-host.containers.internal}
       KAFKA_HOST: \${KAFKA_HOST:-host.containers.internal}
       TCP_HOST: \${TCP_HOST:-host.containers.internal}
+      JDBC_HOST: \${JDBC_HOST:-host.containers.internal}
+      S3_HOST: \${S3_HOST:-host.containers.internal}
       DEEPHAVEN_HOST: \${DEEPHAVEN_HOST:-host.containers.internal}
     volumes:
       - $ENV_DIR/common:/app/config/common:ro

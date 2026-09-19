@@ -1,9 +1,9 @@
 # `dh-connectors`
 
 A **multi-source connector framework** — [60East AMPS](https://www.crankuptheamps.com/) topics,
-Kafka topics and raw framed TCP feeds — that publishes the fields you map into Deephaven
-tables, plus the **Spring Boot applications** built on it. One application runs one or more
-connectors; everything is driven from configuration.
+Kafka topics, raw framed TCP feeds, database queries and S3 objects — that publishes the fields
+you map into Deephaven tables, plus the **Spring Boot applications** built on it. One
+application runs one or more connectors; everything is driven from configuration.
 
 The transport is one block in the connector's configuration. Everything after it — decoding,
 transforms, the mapping allowlist, `explode`, delta merging, batching, the four table types —
@@ -23,10 +23,12 @@ dh-connectors/
 ├── source-amps/      :dh-connectors:source-amps — the 60East AMPS driver
 ├── source-kafka/     :dh-connectors:source-kafka — the Kafka consumer driver
 ├── source-tcp/       :dh-connectors:source-tcp — the framed-socket driver (java.net)
+├── source-jdbc/      :dh-connectors:source-jdbc — the polled-query driver (java.sql)
+├── source-s3/        :dh-connectors:source-s3 — the object-store driver (AWS SDK v2)
 │                     Each carries its own client and registers a SourceFactory; an
 │                     application depends on the transports it actually dials.
 ├── connector-app/    :dh-connectors:connector-app — the GENERIC runner, which depends
-│                     on ALL THREE drivers. One image, deployed N times: a config-only
+│                     on ALL FIVE drivers. One image, deployed N times: a config-only
 │                     application is this app under its own name with its own
 │                     mounted configuration.
 ├── apps/             custom-code applications (auto-discovered by settings.gradle.kts);
@@ -37,7 +39,9 @@ dh-connectors/
 │       ├── common/   endpoints. Adding application #51 = mkdir + one application.yml.
 │       ├── default/{orders-and-positions,trades-and-ticks}/
 │       ├── cache/{portfolios,orders-composite}/
-│       └── streams/{trades-kafka,ticks-tcp}/
+│       ├── streams/{trades-kafka,ticks-tcp}/
+│       ├── db/{positions-jdbc}/
+│       └── files/{trades-s3}/
 ├── docker/           ONE shared spring-boot.Dockerfile for every app image
 └── scripts/          dh-connectors-compose.sh — generates + drives podman compose
                       from the config tree
@@ -47,11 +51,14 @@ Configuration layers, later sources winning (**the jar knows no environment**):
 baked `application.yml` (safe defaults, no connectors) → `config/<env>/common/` →
 `config/<env>/<flow>/<app-name>/`, the mounted pair arriving as
 `SPRING_CONFIG_ADDITIONAL_LOCATION=file:/app/config/common/,file:/app/config/instance/`.
-Endpoints are `${AMPS_HOST:localhost}`-style placeholders (`KAFKA_HOST`, `TCP_HOST` and
-`DEEPHAVEN_HOST` likewise) so the same files serve IDE runs and containers. Never define
-`dh-connectors.connectors` in `common/` — two lists merge **by index** — and never bake one;
-`ConfigTreeTest` enforces the tree's rules (every instance binds and validates, names exactly
-one transport, one table per app per env, no credentials) without booting anything.
+Endpoints are `${AMPS_HOST:localhost}`-style placeholders (`KAFKA_HOST`, `TCP_HOST`,
+`JDBC_HOST`, `S3_HOST` and `DEEPHAVEN_HOST` likewise) so the same files serve IDE runs and
+containers. Never define `dh-connectors.connectors` in `common/` — two lists merge **by
+index** — and never bake one; `ConfigTreeTest` enforces the tree's rules (every instance binds
+and validates, names exactly one transport, one table per app per env, no credential literals)
+without booting anything. A **credential key** — anything named `…password…`, `…secret…`,
+`…token…` — may carry a single `${VAR:}` placeholder and nothing else: the name of a secret is
+safe in git, the secret is not.
 
 ---
 
@@ -64,10 +71,10 @@ the rows land in — so any source can feed any format can feed any table type.
 
 ```mermaid
 flowchart LR
-    subgraph SRC["source: — exactly one of amps / kafka / tcp"]
+    subgraph SRC["source: — exactly one of amps / kafka / tcp / jdbc / s3"]
         direction TB
-        SOW["STATEFUL feed (amps.sow / kafka.compacted)<br/>state of the world: last record per key<br/>replayed on every connect — sow_and_subscribe (+OOF,<br/>so deletes arrive as out-of-focus), or a compacted<br/>topic seeked to the beginning (tombstones delete)"]
-        JRN["STREAMING feed (a journal topic, an uncompacted<br/>topic, a socket)<br/>a log, no state: the AMPS epoch bookmark or a Kafka<br/>seek replays it; a socket replays nothing at all"]
+        SOW["STATEFUL feed (amps.sow / kafka.compacted /<br/>jdbc.mode=SNAPSHOT)<br/>state of the world: last record per key<br/>replayed on every connect — sow_and_subscribe (+OOF,<br/>so deletes arrive as out-of-focus), a compacted topic<br/>seeked to the beginning (tombstones delete), or the<br/>whole query re-run (a vanished key deletes)"]
+        JRN["STREAMING feed (a journal topic, an uncompacted<br/>topic, a socket, an INCREMENTAL query, a bucket)<br/>a log, no state: the AMPS epoch bookmark, a Kafka<br/>seek or a re-read of every object replays it; a socket<br/>replays nothing at all"]
     end
 
     subgraph FMT["wire format — format: (how one payload reads)"]
@@ -78,7 +85,7 @@ flowchart LR
         COMP["COMPOSITE (composite-local / composite-global)<br/>several length-prefixed parts, each of a constituent<br/>format listed in composite-parts: [JSON, FIX]<br/>part-indexed tags: 0.orderId, 1.54 — like AMPS's own<br/>/0/orderId XPaths; a bare tag reads the merged<br/>namespace, first part wins (the composite-global spelling)"]
     end
 
-    SUB["RecordSource → SourceRecord(data, key, UPSERT / DELETE)<br/>AmpsRecordSource (HAClient: reconnect + resubscribe<br/>survive AMPS restarts) · KafkaRecordSource (assign +<br/>seek, never commits) · TcpRecordSource (framed socket,<br/>redials) · SimulatedSource (demo profile)<br/>COMPOSITE: CompositeMessageParser unframes the<br/>raw message — the binary length prefixes do not<br/>survive as a string"]
+    SUB["RecordSource → SourceRecord(data, key, UPSERT / DELETE)<br/>AmpsRecordSource (HAClient: reconnect + resubscribe<br/>survive AMPS restarts) · KafkaRecordSource (assign +<br/>seek, never commits) · TcpRecordSource (framed socket,<br/>redials) · JdbcRecordSource (polls a query; rows → JSON)<br/>· S3RecordSource (polls a listing; unseen key or<br/>changed ETag → read and frame) · SimulatedSource<br/>(demo profile)<br/>COMPOSITE: CompositeMessageParser unframes the<br/>raw message — the binary length prefixes do not<br/>survive as a string"]
 
     DEC["RecordDecoder<br/>payload → tag → raw value<br/>a key present means the payload carried the field:<br/>absent ≠ empty, which is what delta correctness rides on"]
 
@@ -137,20 +144,43 @@ Reading the two ends against each other:
 ## Sources
 
 `source:` carries a driver and **exactly one** transport block; the block that is present is
-what picks the implementation. Every concept the pipeline pivots on exists in all three
+what picks the implementation. Every concept the pipeline pivots on exists in all five
 vocabularies:
 
-| pipeline concept | `amps:` | `kafka:` | `tcp:` |
-|---|---|---|---|
-| **state** (and so the `KEYED` default) | a SOW topic — `sow: true` | a compacted topic — `compacted: true` | — never |
-| **record key** (`source-key-column`) | the SOW key | the message key | — none; the setting is refused |
-| **removal** (`DELETE`) | `sow_delete` / out-of-focus | a tombstone (null value) | — never |
-| **history** | `bookmark: epoch` replays the journal | `from: EARLIEST` / `LATEST` | the live stream, from when the socket opens |
-| **rehydration** (on every restart) | the SOW replay, or the bookmark again | assign + seek to the beginning again | redial; nothing replayed |
+| pipeline concept | `amps:` | `kafka:` | `tcp:` | `jdbc:` | `s3:` |
+|---|---|---|---|---|---|
+| **state** (and so the `KEYED` default) | a SOW topic — `sow: true` | a compacted topic — `compacted: true` | — never | a `SNAPSHOT` poll — the result set *is* the state | — never; an object feed re-emits |
+| **record key** (`source-key-column`) | the SOW key | the message key | — none; the setting is refused | the `key-column` of the row | — none; the setting is refused |
+| **removal** (`DELETE`) | `sow_delete` / out-of-focus | a tombstone (null value) | — never | a key that vanished from the snapshot | — never |
+| **history** | `bookmark: epoch` replays the journal | `from: EARLIEST` / `LATEST` | the live stream, from when the socket opens | `INCREMENTAL` reads forward from a watermark | new-or-changed objects under the prefix |
+| **rehydration** (on every restart) | the SOW replay, or the bookmark again | assign + seek to the beginning again | redial; nothing replayed | the full query again, from an empty watermark | re-list and re-read everything in scope |
 
 A compacted Kafka topic replayed from the beginning **is** the Kafka spelling of an AMPS SOW
 replay, and a tombstone is the Kafka spelling of an out-of-focus message. That is why Kafka
 needs no concepts of its own here.
+
+**JDBC is a query polled in one of two modes.** `SNAPSHOT` re-runs the whole query every
+`poll-interval` and upserts every row — that is state, so it defaults to `KEYED`, and with
+`key-column` set the source diffs the key set between polls and emits a `DELETE` for every key
+that stopped appearing (the SQL spelling of an out-of-focus message). `INCREMENTAL` reads
+forward from a high-water mark on `incremental-column` and is a journal, so it never deletes.
+The query is run **verbatim** — `INCREMENTAL` filters in this process rather than rewriting the
+SQL — and both the watermark and the seen-key set are **memory-only by design**: a restart
+re-reads everything, because the Deephaven table is the state and rehydration rebuilds it from
+nothing. A result-set row has no wire format, so the source synthesises one and `format: JSON`
+is required: each row becomes a flat JSON object keyed by column *label*, aliases included. The
+PostgreSQL driver ships inside the generic runner so a config-only app can reach a real
+database; any other driver arrives with a module under `apps/`.
+
+**S3 is one rule.** Every poll lists the objects in scope; any whose key is unseen, or whose
+ETag has changed since it was seen, is read and its frames emitted. That single rule covers both
+spellings — `key:` re-emits a rewritten object whole, `prefix:` emits each new object once — and
+exactly one of the two is configured. Framing is `DELIMITED` (split on the delimiter's byte
+sequence; an object is finite, so the tail after the last delimiter is a record, not a fragment)
+or `WHOLE` (one record per object). Frames are keyless upserts and there are never deletes, so
+`APPEND_ONLY` / `RING` are the natural targets. A local MinIO is the same connector plus
+`endpoint:` and `path-style-access: true`; credentials are `${...}` placeholders, and leaving
+both blank hands the job to the SDK's default provider chain.
 
 **Offsets: the connector owns its position.** The Kafka source does not `subscribe()` — it
 assigns every partition of the topic, seeks, and never commits (no `group.id`, no auto-commit).
@@ -169,8 +199,8 @@ never deletes, which is why `RING` / `APPEND_ONLY` / `BLINK` are the natural tar
 topic inside the server in a few lines of python, with no application to deploy. Use that when
 it is enough. This module earns its keep when you want what sits *between* the wire and the
 table: the mapping allowlist, value shaping, `explode`, startup validation, transforms and
-input-table **delete** semantics — plus one configuration language across AMPS, Kafka and a
-socket.
+input-table **delete** semantics — plus one configuration language across AMPS, Kafka, a
+socket, a database and a bucket.
 
 ## Run
 
@@ -209,6 +239,8 @@ per application directory, each flow a compose profile — and drives `podman co
 dh-connectors/scripts/dh-connectors-compose.sh local build      # gradle → podman images
 dh-connectors/scripts/dh-connectors-compose.sh local up cache   # one flow's apps
 dh-connectors/scripts/dh-connectors-compose.sh local up streams # the kafka + tcp apps
+dh-connectors/scripts/dh-connectors-compose.sh local up db      # the jdbc app
+dh-connectors/scripts/dh-connectors-compose.sh local up files   # the s3 app
 dh-connectors/scripts/dh-connectors-compose.sh local up         # every flow
 dh-connectors/scripts/dh-connectors-compose.sh local ps
 dh-connectors/scripts/dh-connectors-compose.sh local logs portfolios
@@ -217,8 +249,8 @@ dh-connectors/scripts/dh-connectors-compose.sh local down
 
 Services publish no ports (connectors are outbound clients; the actuator healthcheck runs
 inside the container network) and dial their sources and Deephaven on the host via
-`host.containers.internal` — override with `AMPS_HOST`, `KAFKA_HOST`, `TCP_HOST` or
-`DEEPHAVEN_HOST`. Config-only apps run
+`host.containers.internal` — override with `AMPS_HOST`, `KAFKA_HOST`, `TCP_HOST`, `JDBC_HOST`,
+`S3_HOST` or `DEEPHAVEN_HOST`. Config-only apps run
 `localhost/dh-connector-app:local`; an app with a module under `apps/<name>/` runs
 `localhost/dh-<name>:local` instead. Mind the podman machine's memory before starting many
 flows at once: each app is a JVM capped by `DH_CONNECTOR_MEM` (default `384m`), so a 6 GB VM
@@ -229,15 +261,18 @@ comfortably runs a flow or two, not fifty apps.
 ```bash
 ./gradlew :dh-connectors:core:test :dh-connectors:source-amps:test \
           :dh-connectors:source-kafka:test :dh-connectors:source-tcp:test \
+          :dh-connectors:source-jdbc:test :dh-connectors:source-s3:test \
           :dh-connectors:connector-app:test
 ```
 
-**292 tests, no broker and no Deephaven server required** — core 236, source-amps 10,
-source-kafka 9, source-tcp 7, connector-app 30 (the shipped demo examples in
-`ApplicationYamlBindingTest`, the whole `config/` tree in `ConfigTreeTest`). The transport
-suites need no server either: Kafka drives a `MockConsumer`, TCP a loopback `ServerSocket` the
-test starts itself. Six more check the generated python against a real server; they live in
-the `integrationTest` suite and are skipped unless you ask for them:
+**323 tests, no broker, no database, no bucket and no Deephaven server required** — core 248,
+source-amps 10, source-kafka 9, source-tcp 7, source-jdbc 8, source-s3 9, connector-app 32 (the
+shipped demo examples in `ApplicationYamlBindingTest`, the whole `config/` tree in
+`ConfigTreeTest`). The transport suites need no server either: Kafka drives a `MockConsumer`,
+TCP a loopback `ServerSocket` the test starts itself, JDBC a real in-memory H2 database, and S3
+a fake `S3ObjectStore` — a map of strings behind the same two-method seam the SDK implements.
+Six more check the generated python against a real server; they live in the `integrationTest`
+suite and are skipped unless you ask for them:
 
 ```bash
 podman run -d --name dh -p 10000:10000 \
@@ -277,18 +312,23 @@ One feature at a time, by suite:
 
 ```bash
 # The transports: the AMPS command each topic resolves to, Kafka seeks/tombstones against a
-# MockConsumer, TCP framing against a loopback socket
+# MockConsumer, TCP framing against a loopback socket, JDBC polls against H2, S3's
+# unseen-or-changed-etag rule against a fake object store
 ./gradlew :dh-connectors:source-amps:test :dh-connectors:source-kafka:test \
-          :dh-connectors:source-tcp:test --rerun
+          :dh-connectors:source-tcp:test :dh-connectors:source-jdbc:test \
+          :dh-connectors:source-s3:test --rerun
 ```
 
 The HTML reports land at `dh-connectors/<module>/build/reports/tests/test/index.html`.
 
 There is no AMPS-side live suite to ask for — AMPS has no public image — which is why the
 wire-level facts are pinned where they can be: `CompositeWireRoundTripTest` exercises the real
-60East client's framing, and everything downstream runs against the simulator. Kafka and TCP
-need no such apology: a `MockConsumer` is the vendor's own fake, and a loopback socket is the
-real thing.
+60East client's framing, and everything downstream runs against the simulator. Kafka, TCP and
+JDBC need no such apology: a `MockConsumer` is the vendor's own fake, a loopback socket is the
+real thing, and H2 is a real database. S3 is the one transport tested entirely behind a seam —
+but everything the source decides (what is new, how bytes become records, what a failure does
+to the polls after it) sits *above* `S3ObjectStore`, and the SDK's own behaviour is AWS's to
+test.
 
 ### Watching it instead of asserting it
 
@@ -312,8 +352,8 @@ Then open http://localhost:10000/ide and watch:
 
 The demo profile (`connector-app/src/main/resources/application-demo.yml`) is the worked,
 commented example of all four formats and four table types; the same six connectors, grouped
-into four deployable applications, live under `config/local/`, with two more showing the other
-two transports:
+into four deployable applications, live under `config/local/`, with four more showing the other
+four transports:
 
 | Connector | Source | Format | Deephaven table |
 |---|---|---|---|
@@ -325,6 +365,8 @@ two transports:
 | `orders-composite` | AMPS `orders.composite` (SOW) | **COMPOSITE** (`[JSON, FIX]` parts), part-indexed tags | `amps_composite`, **keyed** on `OrderId` |
 | `trades-kafka` | **Kafka** `trades.events`, uncompacted, from `EARLIEST` | JSON | `kafka_trades`, **append-only** |
 | `ticks-tcp` | **TCP** `:5001`, newline-delimited | JSON | `tcp_ticks`, **ring**, 5 000 rows |
+| `positions-jdbc` | **JDBC** a `SNAPSHOT` poll of a positions query, `key-column` set | JSON (synthesised per row) | `jdbc_positions`, **keyed** on `PositionKey` |
+| `trades-s3` | **S3** everything under `trades/`, NDJSON | JSON | `s3_trades`, **append-only** |
 
 ### Table types
 
@@ -351,7 +393,7 @@ dh-connectors:
   connectors:
     - name: my-connector
       format: NVFIX                 # FIX | NVFIX | JSON | COMPOSITE
-      source:                       # driver + EXACTLY ONE of amps: / kafka: / tcp:
+      source:                       # driver + EXACTLY ONE of amps:/kafka:/tcp:/jdbc:/s3:
         driver: ${source-driver:REAL}   # REAL | SIMULATED (the in-process generator)
         amps:
           host: amps.example.com
@@ -370,7 +412,7 @@ dh-connectors:
         - { tag: Price, column: Price, type: DOUBLE }
 ```
 
-The other two transports are the same connector with a different block. Kafka:
+The other four transports are the same connector with a different block. Kafka:
 
 ```yaml
       source:
@@ -397,6 +439,44 @@ A raw TCP feed:
           delimiter: "\n"           # the YAML escape, never the byte itself
           charset: UTF-8
           connect-timeout: 5s
+          reconnect-delay: 5s
+```
+
+A database query (`format: JSON` is required — the source synthesises the payload):
+
+```yaml
+      source:
+        driver: ${source-driver:REAL}
+        jdbc:
+          url: "jdbc:postgresql://${JDBC_HOST:localhost}:5432/trading"
+          username: trading_ro
+          password: "${JDBC_PASSWORD:}"   # a placeholder and nothing else, ever
+          mode: SNAPSHOT            # SNAPSHOT = state (KEYED); INCREMENTAL = a journal
+          query: "SELECT account, symbol, quantity FROM positions"   # run verbatim
+          key-column: position_key  # SNAPSHOT only: lets a vanished key become a DELETE
+          # incremental-column: updated_at   # INCREMENTAL only: the forward-reading mark
+          poll-interval: 5s
+          reconnect-delay: 5s
+          fetch-size: 1000          # rows per round trip; bounds the driver's buffering
+```
+
+Objects in a bucket:
+
+```yaml
+      source:
+        driver: ${source-driver:REAL}
+        s3:
+          bucket: trading-data
+          prefix: "trades/"         # EXACTLY ONE of prefix: / key:
+          region: us-east-1
+          endpoint: "http://${S3_HOST:localhost}:9000"   # MinIO; omit for real S3
+          path-style-access: true   # MinIO again; virtual-host addressing needs wildcard DNS
+          access-key: "${S3_ACCESS_KEY:}"   # both blank -> the SDK default credential chain
+          secret-key: "${S3_SECRET_KEY:}"
+          framing: DELIMITED        # DELIMITED | WHOLE (the whole object as one record)
+          delimiter: "\n"           # NDJSON; the YAML escape, never the byte itself
+          charset: UTF-8
+          poll-interval: 30s
           reconnect-delay: 5s
 ```
 
@@ -456,9 +536,11 @@ key, anything not rebuildable from the record body — name that column in `key-
         key-columns: [SourceKey]
 ```
 
-A compacted Kafka topic with a keyed table **must** do this: a tombstone carries no payload to
-rebuild the key from, so the message key has to be the key. A `tcp:` connector cannot: a socket
-carries no per-message key, and the validator says so rather than publishing a column of nulls.
+A compacted Kafka topic with a keyed table **must** do this, and so must a `jdbc:` snapshot with
+a `key-column`: a tombstone and a vanished row both carry no payload to rebuild the key from, so
+the source key has to *be* the key. A `tcp:` or `s3:` connector cannot: neither a socket nor an
+object gives a frame a key of its own, and the validator says so rather than letting the
+connector publish a column of nulls.
 
 `tag` is a FIX tag number for `FIX`, a field name for `NVFIX`, and a field name or dotted path
 (`execution.venue`) for `JSON`. `type` is one of `STRING BOOLEAN BYTE SHORT INT LONG FLOAT DOUBLE
@@ -538,7 +620,7 @@ Open <http://localhost:10000/ide> and the tables are in the Panels menu.
 ```
 invalid dh-connectors configuration:
   - connector 'x': deephaven.table-type=KEYED requires deephaven.key-columns (a stateful source defaults deephaven.table-type to KEYED)
-  - connector 'y': source needs exactly one of amps/kafka/tcp, and has none
+  - connector 'y': source needs exactly one of amps/kafka/tcp/jdbc/s3, and has none
 ```
 The rules and why each exists: [docs 07 §7](../docs/07-dh-connectors.md#7-startup-validation-connectorvalidator).
 
@@ -582,9 +664,12 @@ connector re-create it.
 **AMPS** is commercial software with no public image, so the demo stack in `../docker/` does
 not include one. Point `source.amps.host`/`port` (or `source.amps.uri`) at your own server.
 
-**Kafka** and a **TCP** feed have no such problem — point `source.kafka.bootstrap-servers` or
-`source.tcp.host`/`port` at whatever you are running; the compose generator passes `KAFKA_HOST`
-and `TCP_HOST` into every container beside `AMPS_HOST`.
+**Kafka**, a **TCP** feed, a **database** and a **bucket** have no such problem — point
+`source.kafka.bootstrap-servers`, `source.tcp.host`/`port`, `source.jdbc.url` or
+`source.s3.bucket`/`endpoint` at whatever you are running; the compose generator passes
+`KAFKA_HOST`, `TCP_HOST`, `JDBC_HOST` and `S3_HOST` into every container beside `AMPS_HOST`. A
+local S3 is a MinIO container plus `endpoint` and `path-style-access: true`; a local database is
+whatever the PostgreSQL driver baked into the runner can dial.
 
 For any of them, `source.driver: SIMULATED` runs the in-process generator instead, keeping the
 transport block so the configuration still validates as the real one —

@@ -20,7 +20,7 @@ java {
 dependencies {
     implementation("org.apache.kafka:kafka-clients:3.9.1")
     // 60East AMPS java client -- the --amps-uri sink (doc 10 §10). Same coordinates as
-    // :amps-connectors, so both modules resolve one artifact from Maven Central.
+    // :dh-connectors:source-amps, so both modules resolve one artifact from Maven Central.
     implementation("com.crankuptheamps:amps-client:5.3.4.1")
     implementation("org.slf4j:slf4j-simple:2.0.16")
 

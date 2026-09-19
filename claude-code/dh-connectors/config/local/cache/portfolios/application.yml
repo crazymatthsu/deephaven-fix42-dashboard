@@ -1,0 +1,34 @@
+# portfolios (local/cache) -- amps-demo's cache.entries with a map-valued /value, exploded to one row per
+# member (doc 07 §5.4); the member name keys the row alongside the outer key.
+#
+# Layered over the baked defaults and config/local/common/ at runtime; this file
+# owns the connector list. Reference examples with commentary: application-demo.yml.
+dh-connectors:
+  connectors:
+    - name: portfolios-json
+      enabled: true
+      format: JSON
+      source:
+        driver: ${source-driver:REAL}
+        amps:
+          host: ${AMPS_HOST:localhost}
+          port: 9007
+          topic: cache.entries
+          sow: true
+          subscription-mode: FULL      # explode needs whole records; a delta may omit the map
+      deephaven:
+        table: amps_portfolios
+        table-type: KEYED
+        publish-mode: FULL
+        key-columns: [OuterKey, Symbol]   # must include explode.key-column
+        ingest-timestamp-column: IngestTs
+        flush-interval: 250ms
+      fields:
+        - { tag: key, column: OuterKey, type: STRING }
+      explode:
+        tag: value                   # the object whose members become rows
+        key-column: Symbol           # the member's name
+        fields:                      # resolved inside each member's value
+          - { tag: qty, column: Qty,      type: DOUBLE }
+          - { tag: px,  column: Px,       type: DOUBLE }
+          - { tag: ".", column: Position, type: STRING }   # the member value, as JSON text

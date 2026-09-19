@@ -693,19 +693,29 @@ neither installed (`deephaven-scripts/tests/test_ingest_source.py`).
 Design and contract: [docs/03-deephaven-dag.md §2.1](docs/03-deephaven-dag.md).
 
 > Not to be confused with the next section. **This** replaces where the FIX 4.2 pipeline
-> gets its raw messages. **`amps-connectors`** is a separate application that bridges
-> *other* AMPS topics into *their own* Deephaven tables, and does not touch this pipeline.
+> gets its raw messages. **`dh-connectors`** is a separate application that bridges
+> *other* feeds into *their own* Deephaven tables, and does not touch this pipeline.
 
 ---
 
-## AMPS connectors (optional)
+## dh-connectors (optional)
 
-Separate from the FIX 4.2 pipeline above, `amps-connectors` is a Spring Boot application that
-subscribes to [60East AMPS](https://www.crankuptheamps.com/) topics and publishes the fields you
-map into Deephaven tables in the same server — so they appear in the IDE alongside
-`order_state_latest`. One application runs one or more connectors, all configured in
-`application.yml`.
+Separate from the FIX 4.2 pipeline above, `dh-connectors` is a **multi-source** connector
+framework plus the Spring Boot **applications** built on it: each subscribes to
+[60East AMPS](https://www.crankuptheamps.com/) topics, Kafka topics or raw framed TCP feeds and
+publishes the fields you map into Deephaven tables in the same server — so they appear in the
+IDE alongside `order_state_latest`. The transport is one block in a connector's configuration
+(`source: { amps: … | kafka: … | tcp: … }`) and everything after it is shared, so the three
+differ by a handful of lines. One application runs one or more connectors, entirely
+configuration-driven; deployable applications are directories under
+`dh-connectors/config/<env>/<flow>/<app-name>/`, run as containers by
+`dh-connectors/scripts/dh-connectors-compose.sh` (podman compose), with custom code the
+exception, not the rule.
 
+- **Sources** — AMPS (SOW or journal topics, composite message types, delta subscriptions),
+  Kafka (compacted or not; the connector assigns partitions and owns its offsets, so a restart
+  re-seeks rather than resuming), and raw TCP (delimited or 4-byte-length-prefixed framing).
+  One driver module each; the generic runner carries all three.
 - **Formats** — `FIX`, `NVFIX`, `JSON` and `COMPOSITE` (AMPS composite message types:
   multi-part messages addressed with part-indexed tags such as `0.orderId`), each with its own
   tag → column → type mapping. The mapping is an allowlist: an unmapped field is never
@@ -713,11 +723,15 @@ map into Deephaven tables in the same server — so they appear in the IDE along
 - **Readable values** — `decode: SIDE` publishes `54=1` as `BUY` from the built-in FIX 4.2
   tables, `values: {...}` rewrites inline for a feed they do not cover, and `default-value`
   fills a column the payload leaves out.
-- **SOW topic**, replayed with `sow_and_subscribe`, vs **journal topic**, resubscribed from the
-  `epoch` bookmark so a restart replays everything.
+- **Transforms** — `transforms: [name, …]` folds stateless `RecordTransform` beans over the
+  decoded tags between decode and mapping (SMT-style), so a derived field is mapped like any
+  other. Stateful enrichment belongs in Deephaven, not here.
+- **State vs stream** — an AMPS SOW topic and a compacted Kafka topic are state (replayed in
+  full on connect; removals arrive as out-of-focus messages or tombstones); a journal topic, an
+  uncompacted topic and a socket are streams.
 - **The Deephaven table type is yours to pick** — `KEYED`, `APPEND_ONLY`, `BLINK` or `RING`
-  (bounded to `ring-capacity` rows). Unset, it follows the topic: keyed for a SOW topic,
-  append-only for a journal topic.
+  (bounded to `ring-capacity` rows). Unset, it follows the feed: keyed for state, append-only
+  for a stream.
 - **Delta** subscriptions and delta publishing, so a partial AMPS update merges over the stored
   row instead of blanking the columns it omits.
 - **A row per map entry** — `explode` renders an object-valued field with dynamic keys (a map,
@@ -726,16 +740,18 @@ map into Deephaven tables in the same server — so they appear in the IDE along
   tables and replays every subscription from the start, rehydrating the tables.
 
 ```bash
-# with an AMPS server on localhost:9007
-./gradlew :amps-connectors:bootRun
+# the demo profile: the six example connectors over an in-process simulator, no broker needed
+./gradlew :dh-connectors:connector-app:bootRun --args="--spring.profiles.active=demo"
 
-# without one -- the demo profile swaps in an in-process simulator
-./gradlew :amps-connectors:bootRun --args="--spring.profiles.active=demo"
+# the deployable applications, containerised (see dh-connectors/README.md)
+dh-connectors/scripts/dh-connectors-compose.sh local build
+dh-connectors/scripts/dh-connectors-compose.sh local up cache
+dh-connectors/scripts/dh-connectors-compose.sh local up streams   # the kafka + tcp apps
 ```
 
 AMPS is commercial software with no public image, so the compose stack does not include one.
-Runbook and configuration reference: [amps-connectors/README.md](amps-connectors/README.md).
-Design and contract: [docs/07-amps-connectors.md](docs/07-amps-connectors.md).
+Runbook and configuration reference: [dh-connectors/README.md](dh-connectors/README.md).
+Design and contract: [docs/07-dh-connectors.md](docs/07-dh-connectors.md).
 
 ---
 
@@ -776,9 +792,12 @@ claude-code/
 │   ├── tests/                     #   pytest unit suite (pure python) + optional embedded-server e2e
 │   ├── data/                      #   generated YYYY/MM/DD/<SYMBOL>.parquet tree (git-ignored)
 │   └── README.md                  #   runbook, schema, generator, MD_* configuration, MinIO note
-├── amps-connectors/               # Spring Boot: AMPS topics -> Deephaven tables
-│   ├── src/main/java/com/fix42/dashboard/amps/
-│   └── src/main/resources/application.yml   # the whole configuration surface
+├── dh-connectors/                 # Spring Boot: AMPS / Kafka / TCP feeds -> Deephaven tables (doc 07)
+│   ├── core/                      #   the pipeline as a java-library + the source SPI
+│   ├── source-{amps,kafka,tcp}/   #   one driver module per transport
+│   ├── connector-app/             #   the generic runner (carries all three drivers)
+│   ├── apps/                      #   custom-code applications, auto-discovered
+│   └── config/<env>/<flow>/<app>/ #   the deployable applications, one directory each
 ├── docker/
 │   ├── docker-compose.yml         # kafka (KRaft) + deephaven, pinned images
 │   ├── docker-compose.remote-uri.yml  # amps + dh1 + dh2 + collector (the multi-server demo)
@@ -816,7 +835,7 @@ claude-code/
 | [04 — Features & API survey](docs/04-deephaven-features-api.md) | Kafka consumer, table publishers, listeners, `deephaven.ui`, app mode, `pydeephaven` |
 | [05 — Implementation & testing](docs/05-implementation-and-testing.md) | module APIs, scenario catalog, build layout, demo runbook |
 | [06 — State machine language choice](docs/06-state-machine-language-analysis.md) | python vs java for the stateful fold, with a measured throughput ceiling |
-| [07 — AMPS connectors](docs/07-amps-connectors.md) | the AMPS → Deephaven bridge: config model, SOW vs journal, table types, delta handling, lifecycle |
+| [07 — dh-connectors](docs/07-dh-connectors.md) | the AMPS / Kafka / TCP → Deephaven bridge: config model, the source SPI and the three transports, transforms, table types, delta handling, lifecycle |
 | [08 — On-demand executions](docs/08-on-demand-executions-idea.md) | **tabled idea, not a contract** — fetching executions from AMPS per click; why it was set aside, and the cheaper alternatives |
 | [09 — Multi-OMS drop-copy blotter](docs/09-multi-oms-blotter.md) | **the contract** for the second app: hub topology, cross-hub linking, per-edge reconciliation and the break taxonomy, dashboard, generator mode, e2e scope |
 | [10 — Multi-server Deephaven: remote-URI leaves and collector](docs/10-deephaven-remote-uri.md) | **the contract** for the multi-server demo: sharding by hub / chain key, the 400M-message sizing analysis (throughput, memory, what the collector holds), remote subscription / snapshot / query mechanisms, leaf exports, collector DAG, exposure semantics, e2e scope |

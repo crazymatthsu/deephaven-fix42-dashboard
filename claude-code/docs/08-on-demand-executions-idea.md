@@ -21,11 +21,11 @@ demand, and Deephaven would stop holding the history.
 
 ## 2. The shape that was designed
 
-Constraints taken as given: the AMPS query runs in the existing `:amps-connectors` app, the panel
+Constraints taken as given: the AMPS query runs in the existing `:dh-connectors` app, the panel
 must stay **live** (not a snapshot), and scope is the executions history only.
 
 ```
-  Deephaven                              amps-connectors                     AMPS
+  Deephaven                               dh-connectors                      AMPS
   ─────────                              ───────────────                     ────
   dashboard click
     └─ PUT /views/{viewId} {orderId} ──►  ExecutionQueryManager
@@ -120,7 +120,7 @@ These came out of the exploration and hold whether or not the idea is ever reviv
 - ~~**`TableBootstrapScript.createIfMissing` compares column names and order only.**~~ *Fixed.*
   A dtype or `key_cols` mismatch used to pass silently and fail later at `addToInputTable`; the
   generated python now checks column types and keys as well as names and order
-  ([doc 07 §8](07-amps-connectors.md)).
+  ([doc 07 §8](07-dh-connectors.md)).
 - **`FlightDeephavenGateway.deleteRows` returns early when the schema is not keyed.** Any on-demand
   table that needs row removal must be a keyed input table; an append-only one has no removal path
   and would grow exactly as much as the table being replaced.

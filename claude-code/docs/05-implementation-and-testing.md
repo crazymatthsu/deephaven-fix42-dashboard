@@ -7,7 +7,7 @@ DAG node names in [03-deephaven-dag.md](03-deephaven-dag.md).
 ## 1. Gradle build (root `claude-code/`)
 
 - Gradle 9.x Kotlin DSL, wrapper committed. `settings.gradle.kts` includes
-  `:fix-mock-generator`, `:deephaven-scripts`, `:amps-connectors` and
+  `:fix-mock-generator`, `:deephaven-scripts`, `:dh-connectors` and
   `:deephaven-app-java`; plugin `org.gradle.toolchains.foojay-resolver-convention`
   (JDK auto-provisioning).
 - **Java 21** via toolchain: `java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }`

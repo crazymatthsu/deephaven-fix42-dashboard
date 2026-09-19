@@ -1,0 +1,65 @@
+# trades-and-ticks (local/default) -- The `default` flow's journal topics: an append-only trade log (amps_trades)
+# and a bounded ring of the latest ticks (amps_ticks).
+#
+# Layered over the baked defaults and config/local/common/ at runtime; this file
+# owns the connector list. Reference examples with commentary: application-demo.yml.
+dh-connectors:
+  connectors:
+    - name: trades-json
+      enabled: true
+      format: JSON
+      source:
+        driver: ${source-driver:REAL}
+        amps:
+          host: ${AMPS_HOST:localhost}
+          port: 9007
+          topic: Trades
+          sow: false
+          subscription-mode: FULL
+          bookmark: epoch
+      deephaven:
+        table: amps_trades
+        table-type: APPEND_ONLY
+        publish-mode: FULL
+        key-columns: []
+        ingest-timestamp-column: IngestTs
+        max-batch-rows: 10000
+        flush-interval: 500ms
+      fields:
+        - { tag: tradeId,           column: TradeID,   type: STRING }
+        - { tag: orderId,           column: OrderID,   type: STRING }
+        - { tag: symbol,            column: Symbol,    type: STRING }
+        - tag: side
+          column: Side
+          type: STRING
+          values: { "B": BUY, "S": SELL }
+        - { tag: quantity,          column: Quantity,  type: DOUBLE }
+        - { tag: price,             column: Price,     type: DOUBLE }
+        - { tag: "execution.venue", column: Venue,     type: STRING, default-value: UNKNOWN }
+        - { tag: tradeTime,         column: TradeTime, type: INSTANT }
+    - name: ticks-json
+      enabled: true
+      format: JSON
+      source:
+        driver: ${source-driver:REAL}
+        amps:
+          host: ${AMPS_HOST:localhost}
+          port: 9007
+          topic: Ticks
+          sow: false
+          subscription-mode: FULL
+          bookmark: epoch
+      deephaven:
+        table: amps_ticks
+        table-type: RING
+        ring-capacity: 5000        # rows retained; ignored by every other table type
+        publish-mode: FULL
+        key-columns: []            # a ring table has no keys, so this must stay empty
+        ingest-timestamp-column: IngestTs
+        max-batch-rows: 2000
+        flush-interval: 250ms
+      fields:
+        - { tag: symbol,   column: Symbol,   type: STRING }
+        - { tag: price,    column: Price,    type: DOUBLE }
+        - { tag: size,     column: Size,     type: LONG }
+        - { tag: tickTime, column: TickTime, type: INSTANT }

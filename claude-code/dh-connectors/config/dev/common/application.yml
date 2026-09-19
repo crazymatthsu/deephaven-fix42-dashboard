@@ -1,0 +1,9 @@
+# Shared by every connector application in the `dev` environment: a template —
+# point DEEPHAVEN_HOST (and the apps' AMPS_HOST) at the real dev servers in the
+# deployment that mounts it. See config/local/common/application.yml for the rules.
+#
+# NEVER define `dh-connectors.connectors` here (lists merge by index; ConfigTreeTest enforces).
+dh-connectors:
+  deephaven:
+    host: ${DEEPHAVEN_HOST:localhost}
+    port: 10000

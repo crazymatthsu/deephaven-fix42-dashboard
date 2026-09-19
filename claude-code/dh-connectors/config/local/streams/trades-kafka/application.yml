@@ -1,0 +1,47 @@
+# trades-kafka (local/streams) -- the same trade feed as trades-and-ticks, arriving over Kafka instead of AMPS:
+# an uncompacted topic replayed from the beginning into an append-only table.
+#
+# The transport is the only thing that differs from the AMPS version -- the format,
+# the field mappings and the target table are written exactly the same way, which is
+# the point of the `source:` block.
+#
+# Layered over the baked defaults and config/local/common/ at runtime; this file
+# owns the connector list. Reference examples with commentary: application-demo.yml.
+dh-connectors:
+  connectors:
+    - name: trades-kafka
+      enabled: true
+      format: JSON
+      source:
+        driver: ${source-driver:REAL}
+        kafka:
+          bootstrap-servers: "${KAFKA_HOST:localhost}:9092"
+          topic: trades.events
+          compacted: false           # a stream of events, not state: no tombstones, no keying
+          from: EARLIEST             # replay the retained log, as `bookmark: epoch` does for AMPS
+          poll-timeout: 500ms
+          reconnect-delay: 5s
+          # Anything this file does not name goes here untouched (security, SSL, fetch
+          # sizing). Credentials arrive as environment placeholders, never as literals.
+          properties: {}
+      deephaven:
+        table: kafka_trades
+        table-type: APPEND_ONLY
+        publish-mode: FULL
+        key-columns: []              # an append-only table has no keys, so this stays empty
+        source-key-column: MessageKey   # the Kafka message key, kept as a column
+        ingest-timestamp-column: IngestTs
+        max-batch-rows: 10000
+        flush-interval: 500ms
+      fields:
+        - { tag: tradeId,           column: TradeID,   type: STRING }
+        - { tag: orderId,           column: OrderID,   type: STRING }
+        - { tag: symbol,            column: Symbol,    type: STRING }
+        - tag: side
+          column: Side
+          type: STRING
+          values: { "B": BUY, "S": SELL }
+        - { tag: quantity,          column: Quantity,  type: DOUBLE }
+        - { tag: price,             column: Price,     type: DOUBLE }
+        - { tag: "execution.venue", column: Venue,     type: STRING, default-value: UNKNOWN }
+        - { tag: tradeTime,         column: TradeTime, type: INSTANT }

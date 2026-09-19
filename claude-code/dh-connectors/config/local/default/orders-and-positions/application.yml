@@ -1,0 +1,70 @@
+# orders-and-positions (local/default) -- Two SOW-backed keyed tables from the `default` flow in one process:
+# FIX full updates (amps_orders) and NVFIX deltas merged end to end (amps_positions).
+#
+# Layered over the baked defaults and config/local/common/ at runtime; this file
+# owns the connector list. Reference examples with commentary: application-demo.yml.
+dh-connectors:
+  connectors:
+    - name: orders-fix
+      enabled: true
+      format: FIX
+      source:
+        driver: ${source-driver:REAL}
+        amps:
+          host: ${AMPS_HOST:localhost}
+          port: 9007
+          transport: tcp
+          topic: Orders
+          sow: true
+          subscription-mode: FULL
+          timeout: 10s
+          reconnect-delay: 5s
+      deephaven:
+        table: amps_orders
+        table-type: KEYED
+        publish-mode: FULL
+        key-columns: [ClOrdID]
+        ingest-timestamp-column: IngestTs
+        max-batch-rows: 5000
+        flush-interval: 250ms
+      fields:
+        - { tag: "11",  column: ClOrdID,      type: STRING }
+        - { tag: "37",  column: OrderID,      type: STRING }
+        - { tag: "1",   column: Account,      type: STRING, default-value: DUMMY }
+        - { tag: "55",  column: Symbol,       type: STRING }
+        - { tag: "54",  column: Side,         type: STRING, decode: SIDE }
+        - { tag: "38",  column: OrderQty,     type: DOUBLE }
+        - { tag: "44",  column: Price,        type: DOUBLE }
+        - { tag: "39",  column: OrdStatus,    type: STRING, decode: ORD_STATUS,
+            default-value: UNKNOWN }
+        - { tag: "40",  column: OrdType,      type: STRING, decode: ORD_TYPE }
+        - { tag: "59",  column: TimeInForce,  type: STRING, decode: TIME_IN_FORCE }
+        - { tag: "14",  column: CumQty,       type: DOUBLE }
+        - { tag: "151", column: LeavesQty,    type: DOUBLE }
+        - { tag: "6",   column: AvgPx,        type: DOUBLE }
+        - { tag: "60",  column: TransactTime, type: INSTANT }
+    - name: positions-nvfix
+      enabled: true
+      format: NVFIX
+      source:
+        driver: ${source-driver:REAL}
+        amps:
+          host: ${AMPS_HOST:localhost}
+          port: 9007
+          topic: Positions
+          sow: true
+          subscription-mode: DELTA
+      deephaven:
+        table: amps_positions
+        table-type: KEYED          # required: a delta publish needs a row to merge into
+        publish-mode: DELTA
+        key-columns: [Account, Symbol]
+        ingest-timestamp-column: IngestTs
+        flush-interval: 250ms
+      fields:
+        - { tag: Account,     column: Account,     type: STRING }
+        - { tag: Symbol,      column: Symbol,      type: STRING }
+        - { tag: Quantity,    column: Quantity,    type: DOUBLE }
+        - { tag: AvgCost,     column: AvgCost,     type: DOUBLE }
+        - { tag: MarketValue, column: MarketValue, type: DOUBLE }
+        - { tag: Currency,    column: Currency,    type: STRING }

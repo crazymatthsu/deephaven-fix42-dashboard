@@ -109,7 +109,7 @@ cycle on the update-graph thread. Four consequences worth stating:
   idempotence §3.3 relies on.
 - **The client's lifetime is the server's.** It runs inside the Deephaven process, so
   there is no "restart the connector when Deephaven restarts" problem — unlike the
-  out-of-process `:amps-connectors` app, which needs a generation check for exactly
+  out-of-process `:dh-connectors` app, which needs a generation check for exactly
   that (doc 07 §6).
 
 **Deployment caveat.** `amps-python-client` is a commercial binary wheel and is **not**

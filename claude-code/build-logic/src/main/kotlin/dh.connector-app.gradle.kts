@@ -1,7 +1,11 @@
-// The plugin every AMPS connector APPLICATION applies (the framework does not:
-// it is a plain java-library). This is why an app's build file is ~5 lines, and
-// why 50 of them stay cheap: Boot version, framework dependency, test suites,
-// JVM flags and the container image tasks all live here once.
+// The plugin every connector APPLICATION applies (core does not: it is a plain
+// java-library). This is why an app's build file is ~5 lines, and why 50 of them
+// stay cheap: Boot version, core dependency, test suites, JVM flags and the
+// container image tasks all live here once.
+//
+// Source modules (:dh-connectors:source-amps and friends) are NOT added here: an
+// application declares the transports it dials, and the generic runner declares
+// all of them.
 
 import org.springframework.boot.gradle.plugin.SpringBootPlugin
 import org.springframework.boot.gradle.tasks.run.BootRun
@@ -31,7 +35,7 @@ dependencies {
 
     // The whole pipeline arrives as a library + auto-configuration; an app is a main
     // class and configuration.
-    implementation(project(":amps-connectors:framework"))
+    implementation(project(":dh-connectors:core"))
 
     // Actuator (and the web server it needs) is not optional: the container
     // HEALTHCHECK in docker/spring-boot.Dockerfile and the compose readiness
@@ -66,8 +70,8 @@ testing {
             useJUnitJupiter()
             dependencies {
                 implementation(project())
-                implementation(project(":amps-connectors:framework"))
-                implementation(testFixtures(project(":amps-connectors:framework")))
+                implementation(project(":dh-connectors:core"))
+                implementation(testFixtures(project(":dh-connectors:core")))
                 implementation(platform(SpringBootPlugin.BOM_COORDINATES))
                 implementation("org.springframework.boot:spring-boot-starter-test")
                 runtimeOnly("org.junit.platform:junit-platform-launcher")
@@ -76,7 +80,7 @@ testing {
                 testTask.configure {
                     jvmArgs = arrowJvmArgs
                     // Live suites are opt-in; forward their switches to the test JVM:
-                    //   ./gradlew :amps-connectors:connector-app:integrationTest -Damps.live=true
+                    //   ./gradlew :dh-connectors:connector-app:integrationTest -Damps.live=true
                     for (key in listOf("amps.live", "amps.live.port")) {
                         System.getProperty(key)?.let { systemProperty(key, it) }
                     }
@@ -109,7 +113,7 @@ val stageDockerContext by tasks.registering(Sync::class) {
     from(tasks.named("bootJar")) {
         rename { "application.jar" }
     }
-    from(layout.settingsDirectory.file("amps-connectors/docker/spring-boot.Dockerfile")) {
+    from(layout.settingsDirectory.file("dh-connectors/docker/spring-boot.Dockerfile")) {
         rename { "Dockerfile" }
     }
 }

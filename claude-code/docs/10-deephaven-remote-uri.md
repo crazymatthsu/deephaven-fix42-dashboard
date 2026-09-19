@@ -196,7 +196,7 @@ replays from `EPOCH` and re-sends.
   the assignment and gives per-topic total order plus content filters and bookmark replay.
 - *Deephaven partitioned tables*: partition-by inside one server does not add fold threads or
   heap (doc 02 §1.5); it is the right tool *inside* a leaf for symbol fan-out, not for scale-out.
-- *Pushing rows from leaves into the collector* (the `amps-connectors` Flight gateway shape):
+- *Pushing rows from leaves into the collector* (the `dh-connectors` Flight gateway shape):
   works, but inverts ownership — the collector could no longer choose what it holds; pull by
   subscription keeps the "subset" decision on the collector.
 
@@ -460,7 +460,7 @@ topic per message is unchanged (`fix42.messages`, or the hub topic under `--mult
 chain key is not sent (AMPS topics carry no key). Rules: `--amps-uri` together with an explicit
 `--bootstrap-servers` is an error ("choose one sink"); `--dry-run`, `--emit-expected`, `--rate`,
 `--seed`, `--multi-oms`, `--children` behave exactly as before. The dependency is
-`com.crankuptheamps:amps-client:5.3.4.1` (Maven Central, as `:amps-connectors`).
+`com.crankuptheamps:amps-client:5.3.4.1` (Maven Central, as `:dh-connectors:source-amps`).
 
 **Deferred (specified, not built):** `--amps-shards k` — suffix the topic with
 `.s<floorMod(chainKey.hashCode(), k)>`, requires `--amps-uri`, `k ≥ 1`; the leaf-side

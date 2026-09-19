@@ -1,0 +1,41 @@
+# ticks-tcp (local/streams) -- a raw newline-delimited JSON tick feed off a socket, kept as a bounded ring.
+#
+# A socket carries no history and no message key, so there is nothing to replay on a
+# redial and nothing a removal could address: RING (or APPEND_ONLY, or BLINK) is what
+# this transport is for, and `deephaven.source-key-column` is refused outright.
+#
+# Layered over the baked defaults and config/local/common/ at runtime; this file
+# owns the connector list. Reference examples with commentary: application-demo.yml.
+dh-connectors:
+  connectors:
+    - name: ticks-tcp
+      enabled: true
+      format: JSON
+      source:
+        driver: ${source-driver:REAL}
+        tcp:
+          host: ${TCP_HOST:localhost}
+          port: 5001
+          framing: DELIMITED
+          # The YAML escape for the separator's code point, never the byte itself: a
+          # literal control character does not survive an editor, a diff or a paste.
+          delimiter: "\n"
+          charset: UTF-8
+          connect-timeout: 5s
+          reconnect-delay: 5s
+      deephaven:
+        table: tcp_ticks
+        table-type: RING
+        ring-capacity: 5000          # rows retained; ignored by every other table type
+        publish-mode: FULL
+        key-columns: []              # a ring table has no keys, so this must stay empty
+        ingest-timestamp-column: IngestTs
+        max-batch-rows: 2000
+        flush-interval: 250ms
+      fields:
+        - { tag: symbol,   column: Symbol,   type: STRING }
+        - { tag: bid,      column: Bid,      type: DOUBLE }
+        - { tag: ask,      column: Ask,      type: DOUBLE }
+        - { tag: last,     column: Last,     type: DOUBLE }
+        - { tag: size,     column: Size,     type: LONG }
+        - { tag: tickTime, column: TickTime, type: INSTANT }

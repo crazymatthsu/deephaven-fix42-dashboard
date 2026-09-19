@@ -1,0 +1,33 @@
+# orders-composite (local/cache) -- An AMPS composite message type (composite-local: json + fix parts, doc 07 §5.3);
+# part-indexed tags 0.orderId / 1.54 address the parts.
+#
+# Layered over the baked defaults and config/local/common/ at runtime; this file
+# owns the connector list. Reference examples with commentary: application-demo.yml.
+dh-connectors:
+  connectors:
+    - name: orders-composite
+      enabled: true
+      format: COMPOSITE
+      composite-parts: [JSON, FIX]
+      source:
+        driver: ${source-driver:REAL}
+        amps:
+          host: ${AMPS_HOST:localhost}
+          port: 9007
+          message-type: composite-json-fix   # the server's registered type name (goes in the URI)
+          topic: orders.composite
+          sow: true
+          subscription-mode: FULL
+      deephaven:
+        table: amps_composite
+        table-type: KEYED
+        publish-mode: FULL
+        key-columns: [OrderId]
+        ingest-timestamp-column: IngestTs
+        flush-interval: 250ms
+      fields:
+        - { tag: "0.orderId", column: OrderId, type: STRING }
+        - { tag: "0.account", column: Account, type: STRING }
+        - { tag: "1.54",      column: Side,    type: STRING, decode: SIDE }
+        - { tag: "1.38",      column: Qty,     type: DOUBLE }
+        - { tag: "1.44",      column: Price,   type: DOUBLE }

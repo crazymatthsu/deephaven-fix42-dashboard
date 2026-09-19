@@ -1,0 +1,72 @@
+# connector-app -- baked SAFE DEFAULTS only. The jar knows no environment.
+#
+# This application becomes a particular connector application through configuration
+# layered on top of this file, later sources winning:
+#
+#   1. this file                  boots anywhere; defines no connectors
+#   2. profile `demo`             the six simulated example connectors (application-demo.yml)
+#   3. mounted instance config    config/<env>/<flow>/<app-name>/ from the repo, arriving in
+#                                 the container as
+#                                 SPRING_CONFIG_ADDITIONAL_LOCATION=
+#                                   file:/app/config/common/,file:/app/config/instance/
+#
+# Endpoints are ${VAR:default} placeholders so the SAME instance files serve an IDE run
+# (defaults: localhost) and a container (the compose generator sets AMPS_HOST and
+# DEEPHAVEN_HOST to host.containers.internal).
+#
+# Never bake a connector list here: two `dh-connectors.connectors` lists merge BY INDEX,
+# so a baked entry would bleed through under any mounted list that is shorter.
+
+spring:
+  application:
+    # Deployments override this with SPRING_APPLICATION_NAME=<app-name> (the compose
+    # generator does) so each of the N instances of this one image identifies itself.
+    name: dh-connector
+  main:
+    banner-mode: "off"
+
+server:
+  # Serves only the actuator; connectors are outbound clients. Not published to the
+  # host by the compose generator -- healthchecks run inside the container network.
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+  endpoint:
+    health:
+      # /actuator/health/{liveness,readiness}, which the image HEALTHCHECK and any
+      # orchestrator probe. Auto-enabled only on kubernetes; podman needs it spelled out.
+      probes:
+        enabled: true
+
+logging:
+  level:
+    com.fix42.dashboard.connectors: INFO
+
+# Source driver for every connector. The `demo` profile flips this to SIMULATED; instance
+# files reference it as ${source-driver:REAL} so one switch simulates a whole application.
+source-driver: REAL
+
+dh-connectors:
+  enabled: true
+
+  # The Deephaven server every connector publishes into. Matches docker/docker-compose.yml:
+  # anonymous auth, python console, gRPC on 10000.
+  deephaven:
+    host: ${DEEPHAVEN_HOST:localhost}
+    port: 10000
+    tls: false
+    authentication: Anonymous
+    console-type: python
+    timeout: 30s
+    # The poll that notices Deephaven restarting. On a change the tables are re-created and
+    # every connector resubscribes from the start, rehydrating the tables.
+    health-check-interval: 5s
+    reconnect-delay: 5s
+
+  # No connectors baked in: they arrive from the demo profile or the mounted instance
+  # configuration.
+  connectors: []

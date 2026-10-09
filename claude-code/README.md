@@ -644,6 +644,35 @@ plan and verification log: [basket-oms-demo/PLAN.md](basket-oms-demo/PLAN.md); r
 
 ---
 
+## Order tree reconciliation — Raptor → algo → order router
+
+A sixth app, answering *"with Raptor's, the algo server's and the order router's orders
+all in Deephaven, how do I show the order tree for a moniker / symbol / side and
+reconcile each level's `CumQty` and `LeavesQty`?"*. `order-tree-recon` maps the three
+systems' native tables onto one node table (one adapter `view` per level), links every
+order to its parent through a `(System, Id)` index (DMA flow that skips the algo
+included), walks each tree to its Raptor root, and copies the root's moniker, symbol and
+side onto every node, so a moniker search returns whole trees. Each parent is then
+reconciled against its direct children with **signed** gaps. `FillGap < 0` means fills
+upstream never booked. `RouteGap < 0` means more open on the street than above it.
+These roll up into a per-(moniker, symbol, side) exposure table and a per-level ladder:
+client vs street shares bought and open, and what is held, over-routed or unbooked.
+
+```bash
+bash order-tree-recon/scripts/run_demo.sh               # podman compose up → wait for healthy → URLs
+open http://localhost:10000/iframe/widget/?name=order_tree_dashboard
+bash order-tree-recon/scripts/run_demo.sh down
+```
+
+Type a moniker prefix, press an exposure row, expand the native tree down to the venue
+orders. `order_tree("DUNE", "MSFT", "BUY")`, `find_tree("<any id from any system>")` and
+`exposure(...)` do the same from the console. To run it over real tables, rewrite only
+`order-tree-recon/src/order_tree_recon/sources.py`. Design, break taxonomy, the exposure
+identities and verification: [docs/14-order-tree-reconciliation.md](docs/14-order-tree-reconciliation.md);
+runbook: [order-tree-recon/README.md](order-tree-recon/README.md).
+
+---
+
 ## AMPS transaction log as the source (optional)
 
 The pipeline reads raw FIX from Kafka by default. Set `FIX42_SOURCE=amps` and it reads the
@@ -763,7 +792,7 @@ Design and contract: [docs/07-dh-connectors.md](docs/07-dh-connectors.md).
 ```
 claude-code/
 ├── docs/                          # analysis & design — the binding contracts
-│   ├── 00-overview.md … 12-market-data-sql-as-of-join.md
+│   ├── 00-overview.md … 14-order-tree-reconciliation.md
 ├── settings.gradle.kts            # gradle multi-module root (Java 21 toolchain)
 ├── build.gradle.kts
 ├── fix-mock-generator/            # Java 21: FIX builder + scenario engine + Kafka CLI
@@ -790,6 +819,7 @@ claude-code/
 │   └── README.md                  #   runbook, remote mechanisms, REMOTEURI_* configuration
 ├── market-data-demo/              # python: historical OHLC bars from parquet (local | S3) -> candlestick dashboard (doc 11)
 ├── basket-oms-demo/               # python: basket ticket + blotter with a context menu on mock orders, mock venue (doc 13)
+├── order-tree-recon/              # python: Raptor → algo → router order tree, per-edge + per-level CumQty/LeavesQty recon (doc 14)
 │   ├── src/market_data_demo/      #   layout, store (local/s3), config, mockgen, cli | reader, derived, charts, dashboard, app
 │   ├── scripts/                   #   generate_mock_data.sh, run_demo.sh (podman compose end to end)
 │   ├── tests/                     #   pytest unit suite (pure python) + optional embedded-server e2e
@@ -807,6 +837,7 @@ claude-code/
 │   ├── deephaven-amps.Dockerfile  # server image + amps-python-client, used by the remote-uri stack
 │   ├── docker-compose.market-data.yml # deephaven (+ optional MinIO, --profile s3) for the market-data demo
 │   ├── docker-compose.basket-oms.yml  # deephaven only, the basket OMS demo (doc 13)
+│   ├── docker-compose.order-tree.yml  # deephaven only, the order tree reconciliation demo (doc 14)
 │   ├── deephaven-market-data.Dockerfile # server image + boto3 (S3 listing), used by the market-data stack
 │   └── apps/                      # one folder per deephaven app; DH_APP picks one
 │       ├── _lib/loader.py         #   shared app-mode loader, mounted at /dh-app-lib
@@ -843,3 +874,6 @@ claude-code/
 | [09 — Multi-OMS drop-copy blotter](docs/09-multi-oms-blotter.md) | **the contract** for the second app: hub topology, cross-hub linking, per-edge reconciliation and the break taxonomy, dashboard, generator mode, e2e scope |
 | [10 — Multi-server Deephaven: remote-URI leaves and collector](docs/10-deephaven-remote-uri.md) | **the contract** for the multi-server demo: sharding by hub / chain key, the 400M-message sizing analysis (throughput, memory, what the collector holds), remote subscription / snapshot / query mechanisms, leaf exports, collector DAG, exposure semantics, e2e scope |
 | [11 — Market data demo](docs/11-market-data-demo.md) | **the contract** for the market-data app: the `YYYY/MM/DD/<SYMBOL>.parquet` layout and schema, the deterministic mock generator, local vs S3 stores (and why MinIO needs `MINIO_DOMAIN`), `MD_*` configuration, reader / resampling / charts / dashboard, exported globals, embedded-engine test scope |
+| [12 — Market data SQL: as-of and window joins](docs/12-market-data-sql-as-of-join.md) | learning note: what the experimental SQL adapter accepts for "the market around this order", three runnable recipes, and the native `aj` / window-join equivalents |
+| [13 — Basket OMS demo](docs/13-basket-oms-demo.md) | **the contract** for the basket OMS app: order core, input tables, context-menu blotter, mock venue, console API, deployment |
+| [14 — Order tree reconciliation](docs/14-order-tree-reconciliation.md) | **the contract** for the Raptor → algo → router order tree: the adapter contract, linking with ordered candidate systems (DMA), the bounded root walk, root-attribute inheritance, signed per-edge gaps and the break taxonomy, the exposure identities, the level ladder, the tree UI and its verification |

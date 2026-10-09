@@ -1,0 +1,56 @@
+# Order tree reconciliation -- Raptor -> algo -> order router, on mock order tables
+# (docs/14-order-tree-reconciliation.md, order-tree-recon/README.md).
+#
+#   podman compose -f docker/docker-compose.order-tree.yml up -d
+#   open http://localhost:10000/ide            # Panels ▸ order_tree_dashboard
+#   podman compose -f docker/docker-compose.order-tree.yml down
+#
+# or `bash order-tree-recon/scripts/run_demo.sh [up|down|status|logs]`.
+#
+# One service, the stock Deephaven image (deephaven.ui is bundled). No broker: the three
+# system tables are static mock tables built by the app, because the point of this demo
+# is what happens *after* the orders are in Deephaven -- the DAG is incremental, so the
+# same code runs unchanged over ticking tables (see the embedded live-fill test).
+#
+# Heap: the tables are tiny, so -Xmx2g is plenty; DH_XMX=1g works next to another stack.
+# DH_PORT moves the host port.
+# ---------------------------------------------------------------------------------------------
+
+name: order-tree-recon
+
+services:
+
+  # /otr-scripts = order-tree-recon/src      (the order_tree_recon package)
+  # /dh-app-lib  = apps/_lib                 (loader shared by every app)
+  # /app.d       = apps/order-tree-recon     (this app's descriptor)
+  #
+  # PYTHONPATH=/otr-scripts because app-mode scripts run with __file__ UNSET (verified on
+  # 42.4), so the entrypoint cannot bootstrap sys.path from its own location.
+  deephaven:
+    image: ghcr.io/deephaven/server:42.4
+    container_name: "${DH_CONTAINER:-otr-deephaven}"
+    hostname: deephaven
+    ports:
+      - "${DH_PORT:-10000}:10000"
+    volumes:
+      - ../order-tree-recon/src:/otr-scripts:ro,z
+      - ./apps/_lib:/dh-app-lib:ro,z
+      - ./apps/order-tree-recon:/app.d:ro,z
+    environment:
+      DH_APP: order-tree-recon
+      PYTHONPATH: "/otr-scripts"
+      START_OPTS: >-
+        -Xmx${DH_XMX:-2g}
+        -Ddeephaven.console.type=python
+        -Ddeephaven.application.dir=/app.d
+        -DAuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler
+      # --- doc 14 section 3 ---------------------------------------------------------------
+      OTR_SEED: "${OTR_SEED:-42}"
+      OTR_MOCK_FAMILIES: "${OTR_MOCK_FAMILIES:-24}"
+      OTR_QTY_TOL: "${OTR_QTY_TOL:-1e-6}"
+    healthcheck:
+      test: ["CMD", "/opt/grpc_health_probe/grpc_health_probe", "-addr=localhost:10000"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s

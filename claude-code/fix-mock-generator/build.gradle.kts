@@ -7,10 +7,6 @@ group = "com.fix42.dashboard"
 version = "0.1.0"
 description = "FIX 4.2 mock order-flow generator: scenario engine + Kafka/AMPS producer CLI"
 
-repositories {
-    mavenCentral()
-}
-
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)

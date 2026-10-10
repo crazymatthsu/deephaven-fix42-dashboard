@@ -11,6 +11,9 @@
 # OMS_* variables of docs/13-basket-oms-demo.md §6 -- e.g.
 #   OMS_MOCK_BASKETS=8 OMS_SIM_INTERVAL_MS=300 bash basket-oms-demo/scripts/run_demo.sh
 set -euo pipefail
+# Artifact sources -- container registries, pip index, ... -- from claude-code/repos.env and
+# your override file (docs/15). Loaded before anything pulls an image or installs a package.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/repos.sh"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"

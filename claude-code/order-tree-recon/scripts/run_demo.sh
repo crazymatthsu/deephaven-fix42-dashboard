@@ -11,6 +11,9 @@
 # OTR_* variables of docs/14-order-tree-reconciliation.md section 3 -- e.g.
 #   OTR_MOCK_FAMILIES=200 OTR_SEED=7 bash order-tree-recon/scripts/run_demo.sh
 set -euo pipefail
+# Artifact sources -- container registries, pip index, ... -- from claude-code/repos.env and
+# your override file (docs/15). Loaded before anything pulls an image or installs a package.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/repos.sh"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"

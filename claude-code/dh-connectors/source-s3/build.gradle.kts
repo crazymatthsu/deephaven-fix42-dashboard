@@ -12,10 +12,6 @@ group = "com.fix42.dashboard"
 version = "0.1.0"
 description = "S3 RecordSource for dh-connectors: polled object listings -> SourceRecord"
 
-repositories {
-    mavenCentral()
-}
-
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)

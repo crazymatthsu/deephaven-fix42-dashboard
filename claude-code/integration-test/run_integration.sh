@@ -18,6 +18,9 @@
 #   PYTEST_ARGS="-k restart"             extra pytest flags
 #
 set -euo pipefail
+# Artifact sources -- container registries, pip index, ... -- from claude-code/repos.env and
+# your override file (docs/15). Loaded before anything pulls an image or installs a package.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/repos.sh"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"

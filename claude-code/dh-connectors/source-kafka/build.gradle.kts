@@ -13,10 +13,6 @@ group = "com.fix42.dashboard"
 version = "0.1.0"
 description = "Kafka RecordSource for dh-connectors: consumer subscription -> SourceRecord"
 
-repositories {
-    mavenCentral()
-}
-
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)

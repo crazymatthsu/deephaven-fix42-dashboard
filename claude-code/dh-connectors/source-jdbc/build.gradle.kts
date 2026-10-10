@@ -14,10 +14,6 @@ group = "com.fix42.dashboard"
 version = "0.1.0"
 description = "JDBC RecordSource for dh-connectors: a polled query -> SourceRecord"
 
-repositories {
-    mavenCentral()
-}
-
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)

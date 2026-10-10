@@ -90,6 +90,11 @@ x-deephaven-leaf: &deephaven-leaf
   build:
     context: .
     dockerfile: deephaven-amps.Dockerfile
+    args:
+      # repos.env (docs/15): the base image and the pip index of the build.
+      DEEPHAVEN_IMAGE: ${DEEPHAVEN_IMAGE:-ghcr.io/deephaven/server:42.4}
+      PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+      PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
   image: localhost/fix42-deephaven-amps:42.4
   volumes:
     - ../deephaven-scripts/src:/scripts:ro,z
@@ -188,6 +193,11 @@ services:
     build:
       context: .
       dockerfile: deephaven-amps.Dockerfile
+      args:
+        # repos.env (docs/15): the base image and the pip index of the build.
+        DEEPHAVEN_IMAGE: ${DEEPHAVEN_IMAGE:-ghcr.io/deephaven/server:42.4}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
     image: localhost/fix42-deephaven-amps:42.4
     container_name: rx-collector
     hostname: collector

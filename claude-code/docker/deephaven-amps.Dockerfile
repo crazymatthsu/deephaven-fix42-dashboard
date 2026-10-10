@@ -21,9 +21,17 @@
 # the leaves with the in-server java client behind deephaven.uri / deephaven.barrage (doc 10 §3),
 # and a second gRPC stack inside the same JVM process would buy nothing. pydeephaven stays an
 # e2e-only dependency, installed in the e2e's own venv on the host.
-FROM ghcr.io/deephaven/server:42.4
+# Every external source comes from claude-code/repos.env (docs/15); compose passes these as
+# build args. The defaults are the public ones, so a plain `podman build` still works.
+ARG DEEPHAVEN_IMAGE=ghcr.io/deephaven/server:42.4
+FROM ${DEEPHAVEN_IMAGE}
+# pip reads PIP_INDEX_URL / PIP_TRUSTED_HOST from the environment; an empty trusted host is
+# unset rather than handed to pip as an empty value.
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_TRUSTED_HOST=
 
 # amps-python-client: commercial binary wheel on PyPI (manylinux x86_64/aarch64); not in the stock image.
 # The image runs as root with its venv on PATH, so a plain `pip install` lands in the interpreter
 # the server actually uses. The version matches the broker the demo runs against (AMPS 5.3.5.x).
-RUN pip install --no-cache-dir amps-python-client==5.3.5.7
+RUN if [ -z "$PIP_TRUSTED_HOST" ]; then unset PIP_TRUSTED_HOST; fi; \
+    pip install --no-cache-dir amps-python-client==5.3.5.7

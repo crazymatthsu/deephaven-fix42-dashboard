@@ -60,6 +60,11 @@ services:
     build:
       context: .
       dockerfile: deephaven-market-data.Dockerfile
+      args:
+        # repos.env (docs/15): the base image and the pip index of the build.
+        DEEPHAVEN_IMAGE: ${DEEPHAVEN_IMAGE:-ghcr.io/deephaven/server:42.4}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
     image: localhost/fix42-deephaven-market-data:42.4
     container_name: "${DH_CONTAINER:-md-deephaven}"
     hostname: deephaven
@@ -116,7 +121,7 @@ services:
   # volume: `down -v` wipes it, `down` keeps it.
   # ---------------------------------------------------------------------------
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    image: ${MINIO_IMAGE:-docker.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}  # repos.env (docs/15)
     container_name: md-minio
     hostname: minio
     profiles: ["s3"]

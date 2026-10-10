@@ -16,6 +16,14 @@
 #
 # deephaven.ui and deephaven.plot.express are already bundled in the base image (see the
 # README's "Deephaven image" section), so nothing else is added.
-FROM ghcr.io/deephaven/server:42.4
+# Every external source comes from claude-code/repos.env (docs/15); compose passes these as
+# build args. The defaults are the public ones, so a plain `podman build` still works.
+ARG DEEPHAVEN_IMAGE=ghcr.io/deephaven/server:42.4
+FROM ${DEEPHAVEN_IMAGE}
+# pip reads PIP_INDEX_URL / PIP_TRUSTED_HOST from the environment; an empty trusted host is
+# unset rather than handed to pip as an empty value.
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG PIP_TRUSTED_HOST=
 
-RUN pip install --no-cache-dir "boto3>=1.34"
+RUN if [ -z "$PIP_TRUSTED_HOST" ]; then unset PIP_TRUSTED_HOST; fi; \
+    pip install --no-cache-dir "boto3>=1.34"

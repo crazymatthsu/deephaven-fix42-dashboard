@@ -99,7 +99,9 @@ if [ -f "$GITATTRIBUTES" ]; then keep_or_copy "$GITATTRIBUTES" .gitattributes; f
 touch "$DEST/.gitignore"
 # A file without a final newline would glue our first line onto its last one.
 if [ -s "$DEST/.gitignore" ] && [ -n "$(tail -c 1 "$DEST/.gitignore")" ]; then echo >>"$DEST/.gitignore"; fi
-for line in '.venv/' '__pycache__/' '.pytest_cache/' '*.egg-info/' 'repos.local.env'; do
+# *.log: real drop-copy logs hold client orders and stay out of git; the synthetic samples do not.
+for line in '.venv/' '__pycache__/' '.pytest_cache/' '*.egg-info/' 'repos.local.env' \
+  '*.log' '!order-tree-recon/fix-samples/*.log'; do
   grep -qxF "$line" "$DEST/.gitignore" || printf '%s\n' "$line" >>"$DEST/.gitignore"
 done
 echo "  updated  .gitignore"

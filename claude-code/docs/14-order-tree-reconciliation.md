@@ -562,7 +562,9 @@ field at fault. A typo is an error, never a silently empty level.
 ### 12.3 Pointing it at your logs
 
 1. **Collect** each system's drop-copy logs into one folder. Every line containing
-   `8=FIX` is one message, and several files per system are fine (`algo_*.log`).
+   `8=FIX` is one message, and several files per system are fine (`algo_*.log`). Keep
+   that folder outside the repository: real drop copies hold client orders. `*.log` is
+   git-ignored everywhere except `fix-samples/`.
 2. **Find your tags.** Look at a few ExecutionReports per system:
    `grep -m5 '35=8' algo.log | tr '\001|' '\n\n' | sort -u` (SOH or `|`). For each
    level, decide which tag tells you it is that level, and which tag names its parent.

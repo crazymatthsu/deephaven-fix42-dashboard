@@ -492,11 +492,11 @@ five level tables.
 
 ```
 AMPS SOW topics (per system: 1..n)        order_tree_recon.amps_sow
-  raptor.orders ─────────────┐            sow_and_subscribe (oof, send_keys) per topic
-  algo.parent.orders ────────┤──────────► one blink event table per system:
-  algo.child.orders ─────────┤            Topic, SowKey, Action, Epoch, Arrival, RawFix
-  router.parent.orders ──────┤
-  router.child.orders ───────┘
+  SOW/RAPTOR/ORDERS ─────────┐            sow_and_subscribe (oof, send_keys) per topic
+  SOW/ALGO/ORDERS ───────────┤──────────► one blink event table per system:
+   (parents + children)      │            Topic, SowKey, Action, Epoch, Arrival, RawFix
+  SOW/OR/ORDERS ─────────────┘
+   (parents + venue orders)
                                           order_tree_recon.fixstate_dag
    events ── pick tags (python UDF) ──► T<tag> columns
      ├─ SOW mirror: latest per (Topic, SowKey) · oof removes · stale epochs drop
@@ -552,18 +552,18 @@ and how parent links are carried. This is `fixstate.DEFAULT_FIX_CONFIG`, also
 
 ```json
 {"systems": [
-  {"system": "RAPTOR", "topics": ["raptor.orders"], "files": ["raptor.*.fix"],
+  {"system": "RAPTOR", "topics": ["SOW/RAPTOR/ORDERS"], "files": ["SOW.RAPTOR.*.fix"],
    "levels": [
      {"level": "CLIENT"}
   ]},
-  {"system": "ALGO", "topics": ["algo.parent.orders", "algo.child.orders"], "files": ["algo.*.fix"], "tags": {"Destination": "847"},
+  {"system": "ALGO", "topics": ["SOW/ALGO/ORDERS"], "files": ["SOW.ALGO.*.fix"], "tags": {"Destination": "847"},
    "levels": [
-     {"level": "ALGO_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+     {"level": "ALGO_CHILD", "when": {"tag": "26009"}, "link_tag": "26009"},
      {"level": "ALGO_PARENT", "link_tag": "11"}
   ]},
-  {"system": "OR", "topics": ["router.parent.orders", "router.child.orders"], "files": ["router.*.fix"],
+  {"system": "OR", "topics": ["SOW/OR/ORDERS"], "files": ["SOW.OR.*.fix"],
    "levels": [
-     {"level": "OR_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+     {"level": "OR_CHILD", "when": {"tag": "26009"}, "link_tag": "26009"},
      {"level": "OR_PARENT", "link_tag": "11"}
   ]}
 ]}
@@ -574,7 +574,14 @@ How to read it:
 - **Cross-system links.** The parent link is the downstream order's own ClOrdID (11):
   the id the upstream sent it with, which the upstream reports as its OrderID (37) or one
   of its ClOrdIDs (11 / 41).
-- **In-system links.** An in-system child names its parent in a custom tag (20001 here).
+- **In-system links.** An in-system child names its parent's OrderID in tag 26009; a
+  parent leaves 26009 null. That also tells parents from children in a shared topic:
+  `SOW/ALGO/ORDERS` holds algo parents and their slices, `SOW/OR/ORDERS` router parents and
+  their venue orders. The first level's `when` (a non-empty 26009) picks the children and
+  the default level the parents, and an absent tag and an empty `26009=` both read as null.
+- **Files.** A file name can't hold the `/` of a topic, so the file source labels events
+  with the file name minus `.fix` (`SOW.ALGO.ORDERS.fix` -> `SOW.ALGO.ORDERS`), and the
+  samples are named that way.
 - **Levels.** Each level is chosen by its `when`. The first match wins, and a level
   without `when` is the system's default.
 
@@ -683,7 +690,7 @@ mirror and fold. With a locally built AMPS image (`AMPS_IMAGE`, as in doc 10),
 `OTR_SOURCE=amps OTR_AMPS_BROKER=local bash order-tree-recon/scripts/run_demo.sh` does three
 things:
 
-- starts a broker with the five SOW topics keyed on `/37` (`order-tree-recon/amps/amps-config.xml`);
+- starts a broker with the three SOW topics keyed on `/37` (`order-tree-recon/amps/amps-config.xml`);
 - builds the AMPS-enabled server;
 - publishes the samples with `python -m order_tree_recon.fixstate_mock --publish`.
   `OTR_PUBLISH_DELAY_MS=20 bash order-tree-recon/scripts/run_demo.sh publish` replays them
@@ -709,7 +716,7 @@ It runs this section's own setup:
 It starts from `down -v` and refuses a broker config that fails `--verify-config`. Then
 `test_order_tree_amps_e2e.py` plays the three systems from a host venv
 (`pydeephaven==42.4`, `amps-python-client==5.3.5.7`). It publishes FIX order states to
-the five SOW topics and `sow_delete`s records, keeping a log of every event the server
+the three SOW topics and `sow_delete`s records, keeping a log of every event the server
 should have seen. The oracle is the module's python twin of this path
 (`fixstate.fold_events`, then `reference.reconcile`). After **every** step the engine's
 `otr_recon` must equal it row for row, column for column. Every step changes the book,
@@ -717,7 +724,7 @@ so the state before a step can't satisfy the check for it.
 
 | # | Test | Proves |
 |---|---|---|
-| 1 | `the_app_is_subscribed_to_every_topic` | a completed snapshot on all five topics |
+| 1 | `the_app_is_subscribed_to_every_topic` | a completed snapshot on `SOW/RAPTOR/ORDERS`, `SOW/ALGO/ORDERS` and `SOW/OR/ORDERS` |
 | 2 | `an_empty_sow_is_an_empty_book` | starts clean, even on a stack someone left running |
 | 3 | `the_mock_book_matches_the_reference_row_for_row` | the mock book's 340 orders, in send order (accept, cancel/replace, partial and final fills, cancels), with the same breaks as the table path |
 | 4 | `ladder_and_exposure_match_the_reference` | every ladder and exposure row |
@@ -792,7 +799,7 @@ order-tree-recon/
 ├── README.md                    # runbook
 ├── build.gradle.kts / pyproject.toml / run_tests.sh
 ├── fix-samples/                 # the mock book as FIX order states, one file per SOW topic + fix_config.json
-├── amps/amps-config.xml         # a local AMPS with the five SOW topics (section 12.6)
+├── amps/amps-config.xml         # a local AMPS with the three SOW topics (section 12.6)
 ├── scripts/run_demo.sh          # podman compose up | down | status | logs
 ├── scripts/export_standalone.sh # section 13
 ├── src/order_tree_recon/

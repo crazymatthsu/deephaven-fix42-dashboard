@@ -81,13 +81,13 @@ def test_parse_fix_first_wins_and_garbage():
 
 
 def test_default_config(topology, fix_config):
-    assert fix_config.topics == {"RAPTOR": ("raptor.orders",), "ALGO": ("algo.parent.orders", "algo.child.orders"),
-                                 "OR": ("router.parent.orders", "router.child.orders")}
+    assert fix_config.topics == {"RAPTOR": ("SOW/RAPTOR/ORDERS",), "ALGO": ("SOW/ALGO/ORDERS",),
+                                 "OR": ("SOW/OR/ORDERS",)}
     algo = fix_config.state["ALGO"]
     assert algo.order_id == "T37" and algo.alt_id == "T11" and algo.arrival == "Arrival"
     assert algo.source("Destination") == "T847" and algo.source("Symbol") == "T55"
     assert algo.avg_px_needs_fill and dict(algo.side_codes)["1"] == "BUY"
-    assert fix_config.tags("ALGO") == ("37", "11", "41", "1", "55", "54", "38", "14", "151", "6", "39", "847", "20001")
+    assert fix_config.tags("ALGO") == ("37", "11", "41", "1", "55", "54", "38", "14", "151", "6", "39", "847", "26009")
     assert sorted(r.level for s in fix_config.systems for r in s.levels) == sorted(topology.names)
 
 
@@ -98,15 +98,15 @@ def test_default_config(topology, fix_config):
     ({"ALGO": {"tags": {"Symbol": "abc"}}}, "FIX tag number"),
     ({"ALGO": {"levels": [{"level": "ALGO_PARENT", "link_tag": "11"}]}}, "not mapped"),
     ({"RAPTOR": {"levels": [{"level": "CLIENT", "link_tag": "11"}]}}, "root level"),
-    ({"OR": {"levels": [{"level": "OR_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+    ({"OR": {"levels": [{"level": "OR_CHILD", "when": {"tag": "26009"}, "link_tag": "26009"},
                         {"level": "OR_PARENT"}]}}, "needs a parent link"),
     ({"OR": {"levels": [{"level": "OR_PARENT", "link_tag": "11"},
-                        {"level": "OR_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"}]}}, "must be the last"),
-    ({"OR": {"levels": [{"level": "OR_CHILD", "when": {"tag": "9", "equals": "a`b"}, "link_tag": "20001"},
+                        {"level": "OR_CHILD", "when": {"tag": "26009"}, "link_tag": "26009"}]}}, "must be the last"),
+    ({"OR": {"levels": [{"level": "OR_CHILD", "when": {"tag": "9", "equals": "a`b"}, "link_tag": "26009"},
                         {"level": "OR_PARENT", "link_tag": "11"}]}}, "without ` or"),
-    ({"OR": {"levels": [{"level": "OR_CHILD", "when": {"field": "20001"}, "link_tag": "20001"},
+    ({"OR": {"levels": [{"level": "OR_CHILD", "when": {"field": "26009"}, "link_tag": "26009"},
                         {"level": "OR_PARENT", "link_tag": "11"}]}}, "when must be"),
-    ({"OR": {"topics": ["raptor.orders"]}}, "also belong to another system"),
+    ({"OR": {"topics": ["SOW/RAPTOR/ORDERS"]}}, "also belong to another system"),
     ({"OR": {"topics": "router.orders"}}, "list of non-empty strings"),
     ({"OR": {"topics": ["bad topic"]}}, "not a valid name"),
     ({"OR": {"filter": ""}}, "content filter"),
@@ -265,18 +265,19 @@ def test_extra_ids_never_beat_current_ids(topology):
 
 
 def test_file_events(tmp_path, topology, fix_config):
-    (tmp_path / "raptor.orders.fix").write_bytes(
+    (tmp_path / "SOW.RAPTOR.ORDERS.fix").write_bytes(
         b"\xef\xbb\xbf# a SOW dump\n" + (A + "\r\n\n" + B.replace("|", "\x01") + "\n").encode())
     events, files = fixstate.file_events(fix_config, str(tmp_path))
-    assert [os.path.basename(f) for f in files["RAPTOR"]] == ["raptor.orders.fix"]
+    assert [os.path.basename(f) for f in files["RAPTOR"]] == ["SOW.RAPTOR.ORDERS.fix"]
+    # a file name can't hold SOW/RAPTOR/ORDERS's slashes: the topic label is the name sans .fix
     assert [(e["Topic"], e["Arrival"], e["Action"]) for e in events["RAPTOR"]] == [
-        ("raptor.orders", 1, UPSERT), ("raptor.orders", 2, UPSERT)]
+        ("SOW.RAPTOR.ORDERS", 1, UPSERT), ("SOW.RAPTOR.ORDERS", 2, UPSERT)]
     assert events["ALGO"] == [] and files["ALGO"] == []
 
 
 def test_committed_samples_match_the_generator(tmp_path):
     fixstate_mock.write_samples(str(tmp_path))
-    names = [f"{t}.fix" for t in fixstate_mock.TOPIC_OF_LEVEL.values()] + ["fix_config.json"]
+    names = sorted({fixstate_mock.sample_file(t) for t in fixstate_mock.TOPIC_OF_LEVEL.values()}) + ["fix_config.json"]
     for name in names:
         with open(os.path.join(SAMPLES_DIR, name), "rb") as committed, open(tmp_path / name, "rb") as fresh:
             assert committed.read() == fresh.read(), f"fix-samples/{name} is stale: regenerate (see its README)"
@@ -320,7 +321,7 @@ def test_check_on_the_sample_files():
     out = io.StringIO()
     assert fixstate_check.check(SAMPLES_DIR, out=out) == 0
     text = out.getvalue()
-    assert "algo.child.orders: 172, algo.parent.orders: 71" in text
+    assert "SOW.ALGO.ORDERS: 243" in text
     assert "links: ROOT 34, LINKED 305, ORPHAN 1, NO_LINK 0" in text
     assert "tag 11 = 'ALG-99999-01', not an id of any ALGO / RAPTOR order" in text
     assert "MISSING" not in text
@@ -330,7 +331,7 @@ def test_check_flags_a_wrong_link_tag(tmp_path):
     for name in os.listdir(SAMPLES_DIR):
         if name.endswith(".fix"):
             shutil.copy(os.path.join(SAMPLES_DIR, name), tmp_path / name)
-    cfg = _cfg(ALGO={"levels": [{"level": "ALGO_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+    cfg = _cfg(ALGO={"levels": [{"level": "ALGO_CHILD", "when": {"tag": "26009"}, "link_tag": "26009"},
                                 {"level": "ALGO_PARENT", "link_tag": "9999"}]})
     (tmp_path / "fix_config.json").write_text(json.dumps(cfg))
     out = io.StringIO()
@@ -396,10 +397,9 @@ def test_amps_sow_events_runs_a_sow_command_per_topic(monkeypatch, fix_config):
     monkeypatch.setitem(sys.modules, "AMPS", types.SimpleNamespace(Command=Command))
     holder = {}
     events = fixstate_check.amps_sow_events(fix_config, "tcp://x", client_factory=lambda n: holder.setdefault("c", Client(n)))
-    assert [c.topic for c in holder["c"].commands] == ["raptor.orders", "algo.parent.orders", "algo.child.orders",
-                                                      "router.parent.orders", "router.child.orders"]
+    assert [c.topic for c in holder["c"].commands] == ["SOW/RAPTOR/ORDERS", "SOW/ALGO/ORDERS", "SOW/OR/ORDERS"]
     assert all(c.name == "sow" for c in holder["c"].commands)
-    assert [(e["Topic"], e["SowKey"]) for e in events["ALGO"]] == [("algo.parent.orders", "k1"), ("algo.child.orders", "k1")]
+    assert [(e["Topic"], e["SowKey"]) for e in events["ALGO"]] == [("SOW/ALGO/ORDERS", "k1")]
 
 
 # --------------------------------------------------------------------------------------
@@ -429,7 +429,7 @@ def test_amps_settings_from_env():
 
 def test_handler_classifies_amps_commands(fix_config):
     source = amps_sow.AmpsSowSource(fix_config, amps_sow.AmpsSettings(["tcp://a"]))
-    h = source.handler("RAPTOR", "raptor.orders")
+    h = source.handler("RAPTOR", "SOW/RAPTOR/ORDERS")
     for m in [_Msg("group_begin"), _Msg("sow", A, "ka"), _Msg("sow", B, "kb"), _Msg("group_end"), _Msg("ack"),
               _Msg("publish", B, "kb"), _Msg("oof", B, "kb"), _Msg("sow_delete", "", "ka"), _Msg("heartbeat"),
               _Msg("group_begin"), _Msg("sow", A, "ka"), _Msg("group_end")]:
@@ -440,7 +440,7 @@ def test_handler_classifies_amps_commands(fix_config):
         (DELETE, 1, 5, "kb"), (DELETE, 1, 6, "ka"), (UPSERT, 2, 7, "ka"), (SNAPSHOT_END, 2, 8, ""),
     ]
     assert rows[0][5] == A and rows[2][5] == ""
-    status = {r["Topic"]: r for r in source.status()}["raptor.orders"]
+    status = {r["Topic"]: r for r in source.status()}["SOW/RAPTOR/ORDERS"]
     assert (status["Epoch"], status["snapshots"], status["last_snapshot_records"], status[DELETE]) == (2, 2, 1, 2)
     # The events the handler produced fold through the mirror twin: A came back in snapshot 2.
     events = [dict(zip(fixstate.EVENT_COLUMNS, r)) for r in rows]
@@ -462,11 +462,10 @@ def test_connect_subscribes_every_topic_with_oof(fix_config, topology):
                                     command_factory=lambda topic, flt, s: (topic, flt))
     source.connect()
     subs = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "sub"]
-    assert subs == [("raptor.orders", None), ("algo.parent.orders", None), ("algo.child.orders", None),
-                    ("router.parent.orders", "/39 != '2'"), ("router.child.orders", "/39 != '2'")]
+    assert subs == [("SOW/RAPTOR/ORDERS", None), ("SOW/ALGO/ORDERS", None), ("SOW/OR/ORDERS", "/39 != '2'")]
     assert calls[:2] == ["listener", "logon"] and source.connected
     source.stop()
-    assert calls[-1] == "close" and sum(1 for c in calls if isinstance(c, tuple) and c[0] == "unsub") == 5
+    assert calls[-1] == "close" and sum(1 for c in calls if isinstance(c, tuple) and c[0] == "unsub") == 3
 
 
 def test_default_command_is_sow_and_subscribe_with_oof_and_keys(monkeypatch):
@@ -479,8 +478,8 @@ def test_default_command_is_sow_and_subscribe_with_oof_and_keys(monkeypatch):
             return setter
 
     monkeypatch.setitem(sys.modules, "AMPS", types.SimpleNamespace(Command=Command))
-    command = amps_sow._default_command_factory("algo.child.orders", "/55 = 'AAPL'", amps_sow.AmpsSettings(["tcp://a"]))
-    assert command.calls == [("new", "sow_and_subscribe"), ("set_topic", "algo.child.orders"),
+    command = amps_sow._default_command_factory("SOW/ALGO/ORDERS", "/55 = 'AAPL'", amps_sow.AmpsSettings(["tcp://a"]))
+    assert command.calls == [("new", "sow_and_subscribe"), ("set_topic", "SOW/ALGO/ORDERS"),
                              ("set_options", "oof,send_keys"), ("set_batch_size", 1000), ("set_timeout", 10000),
                              ("set_filter", "/55 = 'AAPL'")]
 
@@ -601,3 +600,18 @@ def test_start_source_never_runs_two_clients_under_one_name(monkeypatch, fix_con
     assert first.stopped and amps_sow._ACTIVE == [second]
     third = amps_sow.start_source(fix_config, amps_sow.AmpsSettings(["tcp://b"], client_name="dh-2"))
     assert not second.stopped and amps_sow._ACTIVE == [second, third] and len(started) == 3
+
+
+def test_a_shared_topic_splits_parents_and_children_on_tag_26009(topology, fix_config):
+    """SOW/ALGO/ORDERS holds parents and children: a child names its parent in 26009, a
+    parent leaves it null -- absent or empty (``26009=``), both read as null."""
+    msgs = [
+        "35=8|37=AP-1|11=RPT-1|55=AAPL|54=1|38=300|14=0|151=300|39=0|",             # 26009 absent
+        "35=8|37=AP-2|11=RPT-2|26009=|55=AAPL|54=1|38=300|14=0|151=300|39=0|",      # 26009 empty
+        "35=8|37=AC-1|11=AC-1|26009=AP-1|55=AAPL|54=1|38=300|14=0|151=300|39=0|",   # a child
+    ]
+    events = {"ALGO": [fixstate.event("SOW/ALGO/ORDERS", raw, i + 1) for i, raw in enumerate(msgs)]}
+    rows, _ = fixstate.fold_events(fix_config, events)
+    levels = {r["OrderId"]: (r["Level"], r["LinkId"]) for r in rows}
+    assert levels == {"AP-1": ("ALGO_PARENT", "RPT-1"), "AP-2": ("ALGO_PARENT", "RPT-2"),
+                      "AC-1": ("ALGO_CHILD", "AP-1")}

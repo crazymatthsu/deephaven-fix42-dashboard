@@ -8,13 +8,14 @@ tested against the table path on the same book.
 
 The messages follow :data:`order_tree_recon.fixstate.DEFAULT_FIX_CONFIG`:
 
-* topics -- ``raptor.orders``; ``algo.parent.orders`` / ``algo.child.orders``;
-  ``router.parent.orders`` / ``router.child.orders`` (several SOW topics per system);
+* topics -- one SOW topic per system: ``SOW/RAPTOR/ORDERS``, ``SOW/ALGO/ORDERS`` (algo
+  parents and children), ``SOW/OR/ORDERS`` (router parents and venue orders);
 * bodies only, as AMPS delivers a ``fix`` topic (no ``8=`` / ``9=`` / ``10=``), with ``|``
   instead of SOH for readability (the parser takes both; the AMPS loader converts);
 * ClOrdID (11) is the cross-system link: an algo parent's 11 is the Raptor OrderID it was
   sent with, a router parent's 11 the algo child's id -- or, for DMA, the client ClOrdID
-  Raptor passed through; an in-system child names its parent in tag 20001;
+  Raptor passed through; an in-system child names its parent's OrderID in tag 26009, and a
+  parent leaves 26009 out (null) -- that is what tells them apart in a shared topic;
 * the ``dma`` client order is cancel/replaced mid-day (``11=...-R1``, ``41=`` the original)
   while its router parent keeps the original ClOrdID: that link resolves through Raptor's
   OrigClOrdID / id history.
@@ -40,20 +41,20 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from order_tree_recon import config, fixstate, mockdata, states
 from order_tree_recon.mockdata import MockData, MockOrder
 
-__all__ = ["TOPIC_OF_LEVEL", "PARENT_TAG", "AMENDED_SCENARIO", "send_order", "messages", "events",
+__all__ = ["TOPIC_OF_LEVEL", "PARENT_TAG", "AMENDED_SCENARIO", "sample_file", "send_order", "messages", "events",
            "write_samples", "publish", "config_json", "main"]
 
-#: Level -> the SOW topic its orders are published to.
+#: Level -> the SOW topic its orders are published to: one topic per system.
 TOPIC_OF_LEVEL: Dict[str, str] = {
-    "CLIENT": "raptor.orders",
-    "ALGO_PARENT": "algo.parent.orders",
-    "ALGO_CHILD": "algo.child.orders",
-    "OR_PARENT": "router.parent.orders",
-    "OR_CHILD": "router.child.orders",
+    "CLIENT": "SOW/RAPTOR/ORDERS",
+    "ALGO_PARENT": "SOW/ALGO/ORDERS",
+    "ALGO_CHILD": "SOW/ALGO/ORDERS",
+    "OR_PARENT": "SOW/OR/ORDERS",
+    "OR_CHILD": "SOW/OR/ORDERS",
 }
 _SYSTEM_OF_LEVEL = {"CLIENT": "RAPTOR", "ALGO_PARENT": "ALGO", "ALGO_CHILD": "ALGO", "OR_PARENT": "OR", "OR_CHILD": "OR"}
-#: The custom tag an in-system child carries its parent's OrderID in.
-PARENT_TAG = "20001"
+#: The tag an in-system child carries its parent's OrderID in; null (absent) on a parent.
+PARENT_TAG = "26009"
 #: The scenario whose client order is cancel/replaced.
 AMENDED_SCENARIO = "dma"
 _STATUS_CODE = {name: code for code, name in states.FIX_STATUS_CODES.items()}
@@ -151,6 +152,11 @@ def send_order(data: MockData) -> List[Tuple[str, str]]:
     return out
 
 
+def sample_file(topic: str) -> str:
+    """The ``fix-samples/`` file of a topic: ``SOW/ALGO/ORDERS`` -> ``SOW.ALGO.ORDERS.fix``."""
+    return topic.replace("/", ".") + ".fix"
+
+
 def messages(data: MockData) -> Dict[str, List[str]]:
     """``{topic: [message, ...]}`` in send order."""
     out: Dict[str, List[str]] = {topic: [] for topic in TOPIC_OF_LEVEL.values()}
@@ -162,9 +168,9 @@ def messages(data: MockData) -> Dict[str, List[str]]:
 def events(data: MockData) -> Dict[str, List[Dict[str, Any]]]:
     """The messages as a recorded ``sow_and_subscribe``: ``UPSERT`` events per system."""
     out: Dict[str, List[Dict[str, Any]]] = {"RAPTOR": [], "ALGO": [], "OR": []}
-    level_of_topic = {topic: level for level, topic in TOPIC_OF_LEVEL.items()}
+    system_of_topic = {topic: _SYSTEM_OF_LEVEL[level] for level, topic in TOPIC_OF_LEVEL.items()}
     for topic, msgs in messages(data).items():
-        system = _SYSTEM_OF_LEVEL[level_of_topic[topic]]
+        system = system_of_topic[topic]
         for raw in msgs:
             out[system].append(fixstate.event(topic, raw, len(out[system]) + 1))
     return out
@@ -188,10 +194,10 @@ def config_json(obj: Dict[str, Any]) -> str:
 
 def write_samples(out_dir: str, seed: int = config.DEFAULT_SEED,
                   families: int = config.DEFAULT_MOCK_FAMILIES) -> List[str]:
-    """Write one ``<topic>.fix`` per SOW topic and ``fix_config.json`` into ``out_dir``."""
+    """Write one file per SOW topic (:func:`sample_file`) and ``fix_config.json`` into ``out_dir``."""
     os.makedirs(out_dir, exist_ok=True)
     written: List[str] = []
-    contents = {f"{topic}.fix": "".join(m + "\n" for m in msgs)
+    contents = {sample_file(topic): "".join(m + "\n" for m in msgs)
                 for topic, msgs in messages(mockdata.generate(seed, families)).items()}
     contents["fix_config.json"] = config_json(fixstate.DEFAULT_FIX_CONFIG)
     for name, content in contents.items():

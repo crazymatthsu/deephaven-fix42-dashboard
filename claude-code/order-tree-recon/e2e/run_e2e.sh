@@ -5,7 +5,7 @@
 # Brings up the order-tree app with OTR_SOURCE=amps against a REAL AMPS broker from your local
 # AMPS image -- docker/docker-compose.order-tree.yml + docker-compose.order-tree-amps.yml with
 # the `broker` profile -- and runs test_order_tree_amps_e2e.py from a host venv. The test
-# publishes FIX order-state messages to the five SOW topics, mutates them (fills climbing the
+# publishes FIX order-state messages to the three SOW topics, mutates them (fills climbing the
 # chain, child-first arrival, sow_delete, a garbled quantity), restarts Deephaven, drops its
 # connection past the heartbeat and restarts AMPS. After every step it asserts the engine's
 # otr_recon equals the python twin of the FIX path, row for row.

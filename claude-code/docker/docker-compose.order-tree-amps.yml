@@ -35,7 +35,8 @@ services:
     environment:
       OTR_SOURCE: amps
 
-  # The local broker: the five SOW topics of order-tree-recon/amps/amps-config.xml.
+  # The local broker: the three SOW topics of order-tree-recon/amps/amps-config.xml
+  # (SOW/RAPTOR/ORDERS, SOW/ALGO/ORDERS, SOW/OR/ORDERS).
   amps:
     profiles: ["broker"]
     image: ${AMPS_IMAGE:-localhost/amps-demo:5.3.5.135}

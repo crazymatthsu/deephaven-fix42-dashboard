@@ -224,7 +224,7 @@ bucket's `NetUnbookedQty` incrementally. For the FIX / AMPS path, it asserts:
 The **integration test** (`e2e/`, 13 tests, doc 14 section 12.7) runs the AMPS path for
 real. It uses your local AMPS image under the overlay's `broker` profile, with its own
 compose project, containers and ports (10020, 39017) beside the demo. It plays the three
-systems: it publishes FIX order states to the five SOW topics, then changes them. After
+systems: it publishes FIX order states to the three SOW topics, then changes them. After
 every step the engine's `otr_recon` must equal the python twin of the FIX path, row for
 row. The steps:
 - the mock book in send order;

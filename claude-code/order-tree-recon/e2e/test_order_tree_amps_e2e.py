@@ -7,15 +7,17 @@ from ``down -v``, then runs this file. Running ``pytest`` directly works against
 is already up; without one every test skips, saying what is missing.
 
 The test plays Raptor, the algo server and the router. It publishes FIX order-state
-messages to the five SOW topics of ``fixstate.DEFAULT_FIX_CONFIG`` (the mapping the
-container mounts from ``fix-samples/``) and ``sow_delete``s records, and it keeps its own
+messages to the three SOW topics of ``fixstate.DEFAULT_FIX_CONFIG`` (the mapping the
+container mounts from ``fix-samples/``): ``SOW/RAPTOR/ORDERS``, ``SOW/ALGO/ORDERS`` and
+``SOW/OR/ORDERS``, where parents and children share a topic and a child names its parent's
+OrderID in tag 26009 (null on a parent). It ``sow_delete``s records, and it keeps its own
 log of every event the subscriber should see (:class:`Book`). The oracle is the module's
 pure-python twin of the FIX path: ``fixstate.fold_events`` (SOW mirror + latest-state fold +
 id history) feeding ``reference.reconcile``. After every step the engine's ``otr_recon``
 must equal it row for row, column for column. Every step changes the book, so the state
 before a step can never satisfy the check for it.
 
-1. the app subscribed to the five topics; an empty SOW is an empty book;
+1. the app subscribed to the three topics; an empty SOW is an empty book;
 2. the mock book's order states in send order (NEW, cancel/replace, partial and final
    fills, cancels: ``fixstate_mock.send_order``) match the reference, and so do the ladder,
    the exposure table and the query API;
@@ -388,7 +390,7 @@ def _app_ready_count() -> int:
 
 def test_the_app_is_subscribed_to_every_topic(dh):
     wait_for(lambda: subscribed(dh), "a completed snapshot on every topic", RESTART_TIMEOUT)
-    assert set(dh.status()) == set(ALL_TOPICS) == set(TOPIC_OF_LEVEL.values())
+    assert set(dh.status()) == set(ALL_TOPICS) == {"SOW/RAPTOR/ORDERS", "SOW/ALGO/ORDERS", "SOW/OR/ORDERS"}
 
 
 def test_an_empty_sow_is_an_empty_book(dh, book):
@@ -489,21 +491,21 @@ def test_a_fill_climbs_the_chain_one_hop_at_a_time(dh, book, mock_book):
 # --------------------------------------------------------------------------------------
 
 _T = "60=20261011-14:00:00.000"
-E2E_RAPTOR = [("raptor.orders",
+E2E_RAPTOR = [("SOW/RAPTOR/ORDERS",
                f"35=8|37=E2E-RPT-1|11=E2E-CL-1|1=EAGLE|55=AMZN|54=2|38=500|14=200|151=300|6=186.5|39=1|{_T}|")]
 E2E_ALGO = [
-    ("algo.parent.orders",
+    ("SOW/ALGO/ORDERS",
      f"35=8|37=E2E-ALG-1|11=E2E-RPT-1|55=AMZN|54=2|38=500|14=200|151=300|6=186.5|39=1|{_T}|847=VWAP|"),
-    ("algo.child.orders",
-     f"35=8|37=E2E-ALG-1-01|11=E2E-ALG-1-01|20001=E2E-ALG-1|55=AMZN|54=2|38=500|14=200|151=300|6=186.5|39=1|{_T}|847=VWAP|"),
+    ("SOW/ALGO/ORDERS",
+     f"35=8|37=E2E-ALG-1-01|11=E2E-ALG-1-01|26009=E2E-ALG-1|55=AMZN|54=2|38=500|14=200|151=300|6=186.5|39=1|{_T}|847=VWAP|"),
 ]
 E2E_ROUTER = [
-    ("router.parent.orders",
+    ("SOW/OR/ORDERS",
      f"35=8|37=E2E-OR-1|11=E2E-ALG-1-01|55=AMZN|54=2|38=500|14=200|151=300|6=186.5|39=1|{_T}|100=SOR|"),
-    ("router.child.orders",
-     f"35=8|37=E2E-OR-1.1|11=VE2E-1.1|20001=E2E-OR-1|55=AMZN|54=2|38=300|14=200|151=100|6=186.5|39=1|{_T}|100=NYSE|"),
-    ("router.child.orders",
-     f"35=8|37=E2E-OR-1.2|11=VE2E-1.2|20001=E2E-OR-1|55=AMZN|54=2|38=200|14=0|151=200|6=0|39=0|{_T}|100=IEX|"),
+    ("SOW/OR/ORDERS",
+     f"35=8|37=E2E-OR-1.1|11=VE2E-1.1|26009=E2E-OR-1|55=AMZN|54=2|38=300|14=200|151=100|6=186.5|39=1|{_T}|100=NYSE|"),
+    ("SOW/OR/ORDERS",
+     f"35=8|37=E2E-OR-1.2|11=VE2E-1.2|26009=E2E-OR-1|55=AMZN|54=2|38=200|14=0|151=200|6=0|39=0|{_T}|100=IEX|"),
 ]
 
 
@@ -556,7 +558,7 @@ def test_sow_delete_removes_an_order_and_reopens_its_edge(dh, book, mock_book):
 
 
 def test_a_garbled_quantity_folds_to_null_on_both_sides(dh, book):
-    topic = "router.child.orders"
+    topic = "SOW/OR/ORDERS"
     raw = book.latest(topic, "E2E-OR-1.2")
     # LeavesQty was 200: garbled, it folds to null -> 0 on both sides, so the router parent
     # now holds 200 its children don't show

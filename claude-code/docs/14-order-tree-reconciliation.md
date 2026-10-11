@@ -433,6 +433,12 @@ not an environment variable, because it is coupled to the adapters.
   - `OTR_SOURCE=fix-files` builds the app from `fix-samples/`, and `OTR_SOURCE=amps`
     comes up with empty tables while AMPS is unreachable.
 
+  Python's `faulthandler` is off while the embedded JVM runs. The JVM handles SIGSEGV
+  itself (safepoint polls, implicit null checks). At session end, pytest's faulthandler
+  plugin restores its pre-JVM handlers, or re-enables itself under `-X dev` /
+  `PYTHONFAULTHANDLER`, and that used to kill Deephaven's atexit shutdown (the Jetty
+  stop) with exit 139 after every test had passed. A native crash in this suite
+  therefore leaves an `hs_err_pid*.log`, not a Python traceback.
 - **A real AMPS broker** (section 12.7): `order-tree-recon/e2e/run_e2e.sh` runs the
   overlay's `broker` profile on a local AMPS 5.3.5 image, publishes FIX order states and
   checks the engine against the python twin after every step, through Deephaven and AMPS

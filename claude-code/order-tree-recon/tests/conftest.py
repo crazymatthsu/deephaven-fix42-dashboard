@@ -2,11 +2,25 @@
 
 from __future__ import annotations
 
+import faulthandler
+import sys
 from typing import Any, Dict, List
 
 import pytest
 
 from order_tree_recon import config, mockdata, reference
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure():
+    """Keep faulthandler off over an embedded Deephaven JVM (see the ``server`` fixture).
+
+    Under ``PYTHONFAULTHANDLER`` / ``-X dev`` pytest re-enables it on its way out, on top of
+    the JVM's handlers: it would catch the JVM's next routine SIGSEGV and abort the process.
+    """
+    deephaven_server = sys.modules.get("deephaven_server")
+    if deephaven_server is not None and deephaven_server.Server.instance is not None:
+        faulthandler.disable()
 
 
 @pytest.fixture(scope="session")

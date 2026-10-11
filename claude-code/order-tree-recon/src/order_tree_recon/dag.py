@@ -9,7 +9,7 @@ and incremental: when a fill ticks on a venue order, only that tree's rows recom
 
     level tables --canonicalize--> otr_nodes (last_by NodeKey)
                                      |-> otr_id_index   (System, Id) -> NodeKey over OrderId + AltId
-    extra_ids (optional) ------------+                  (+ every historical id, for FIX tapes)
+    extra_ids (optional) ------------+                  (+ every id an order was ever sent with)
     otr_levels (static) -------------+-> parent resolution: one natural_join per candidate system
                                      |-> root walk: max_depth natural_joins -> RootKey, Depth, TreePath
                                      |-> root attributes: RootMoniker / RootSymbol / RootSide on every node
@@ -209,8 +209,8 @@ def _id_index(nodes: Table, extra_ids: Optional[Table] = None) -> Table:
     owning system's namespace. On a collision the ``AltId`` row wins (merge order).
 
     ``extra_ids`` (``System, Id, OrderId``) adds ids an order was known by *before* --
-    a FIX order's amended-away ClOrdIDs (:mod:`order_tree_recon.fix_dag`) -- so a child
-    that still names the original ClOrdID links. Rows for orders that are not nodes are
+    an amended-away ClOrdID in an earlier order-state message
+    (:mod:`order_tree_recon.states_dag`) -- so a child that still names it links. Rows for orders that are not nodes are
     dropped, and a current id always beats a historical one.
     """
     by_order = nodes.where("OrderId != ``").view(["System", "Id = OrderId", "NodeKey"])
@@ -452,7 +452,7 @@ def build_order_tree(
             exactly one entry per topology level.
         qty_tol: Absolute quantity tolerance; defaults to ``config.qty_tolerance()``.
         extra_ids: Optional ``System, Id, OrderId`` table of further ids each order is
-            known by (see ``_id_index``); :func:`order_tree_recon.fix_dag.fix_level_tables`
+            known by (see ``_id_index``); :func:`order_tree_recon.states_dag.state_level_tables`
             returns one.
 
     Returns:

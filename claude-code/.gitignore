@@ -18,9 +18,6 @@ __pycache__/
 .idea/
 .DS_Store
 *.log
-# ...except the synthetic FIX tapes the order tree demo ships (doc 14 section 12). Real
-# drop-copy logs hold client orders: keep them out of the repository (this rule helps).
-!order-tree-recon/fix-samples/*.log
 
 # Company artifact-repository overrides (docs/15) -- never commit them
 repos.local.env

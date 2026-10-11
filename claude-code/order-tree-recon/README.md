@@ -33,10 +33,11 @@ No broker: the app builds three mock tables (`raptor_orders`, `algo_orders`,
 adapter per level, and builds the DAG. The DAG is incremental, so the same code runs over
 ticking tables. The embedded test proves it with a live fill.
 
-The same book as FIX 4.2 drop copies (`fix-samples/`), read through the FIX layer:
+The same book as order-state messages (`state-samples/`: CSV and JSON Lines), read through
+the field mapping:
 
 ```bash
-OTR_SOURCE=fix-files bash order-tree-recon/scripts/run_demo.sh
+OTR_SOURCE=state-files bash order-tree-recon/scripts/run_demo.sh
 ```
 
 **Try:** type `du` in *Moniker*, press the `DUNE / MSFT / BUY` exposure row, and expand
@@ -83,33 +84,39 @@ Only [`src/order_tree_recon/sources.py`](src/order_tree_recon/sources.py) change
 
 ---
 
-## Using your own FIX messages
+## Using your own order-state messages
 
-When the orders only exist as drop copies (ExecutionReports), map each system's tags in
-one JSON file. No code changes. Doc 14 section 12 has the details.
+When each system sends its orders' states (one message per change, each the order's
+complete state), map each system's field names in one JSON file. No code changes are
+needed. Doc 14 section 12 has the details.
 
-1. Put each system's logs in one folder (any number of files; every line containing
-   `8=FIX` is a message, with SOH or `|` delimiters and any log prefix).
-2. Copy [`fix-samples/fix_config.json`](fix-samples/fix_config.json) next to them and edit
-   it: which files belong to which system, which tag marks a child level (`when`), and
-   which tag names the parent (`link_tag`, usually `11` across systems and a custom tag
-   inside one).
+1. Put each system's messages in one folder, outside the repository: `.csv` with a
+   header row, `.jsonl` with one JSON object per line, or `.json` as an array.
+2. Copy [`state-samples/state_config.json`](state-samples/state_config.json) next to them
+   and edit it. For each system you set:
+   - its files;
+   - which field is the order id (`order_id`) and, optionally, a second id (`alt_id`);
+   - which of your fields fill `Symbol`, `Side`, `OrderQty`, `CumQty`, `LeavesQty`,
+     `AvgPx`, `Status`, ... (`fields`);
+   - how to tell parent from child (`when`) and which field holds the parent's id
+     (`link`);
+   - `sequence`, if messages can arrive out of order.
 3. Dry-run the mapping on the host. No Deephaven or container is needed:
 
    ```bash
-   PYTHONPATH=src python -m order_tree_recon.fix_check /path/to/logs
+   PYTHONPATH=src python -m order_tree_recon.states_check /path/to/files
    ```
 
-   It shows the orders per level, how they linked, the breaks, and why the first
-   unlinked orders did not link.
+   It shows the columns it found, any mapped field that no file has, orders per level,
+   how they linked, the breaks, and why the first unlinked orders did not link.
 4. Run the dashboard on them:
 
    ```bash
-   OTR_SOURCE=fix-files OTR_FIX_HOST_DIR=/path/to/logs bash order-tree-recon/scripts/run_demo.sh
+   OTR_SOURCE=state-files OTR_STATE_HOST_DIR=/path/to/files bash order-tree-recon/scripts/run_demo.sh
    ```
 
-For a live feed (Kafka, or any append-only table with a `RawFix` column), call
-`fix_dag.build_from_fix(...)` yourself. Doc 14 section 12.4 has a complete snippet.
+For a live feed (Kafka JSON, or any append-only table with one row per message), call
+`states_dag.build_from_states(...)` yourself. Doc 14 section 12.4 has a complete snippet.
 
 ---
 
@@ -163,9 +170,9 @@ malformed value is a startup error.
 | `OTR_QTY_TOL` | `1e-6` | absolute tolerance for quantity comparisons |
 | `OTR_SEED` | `42` | mock data seed |
 | `OTR_MOCK_FAMILIES` | `24` | random healthy families on top of the 11 catalog scenarios |
-| `OTR_SOURCE` | `mock` | `mock` or `fix-files` (FIX drop-copy logs) |
-| `OTR_FIX_HOST_DIR` | `order-tree-recon/fix-samples` | the host folder with the logs and `fix_config.json`, mounted at `/otr-fix` (`OTR_FIX_DIR`) |
-| `OTR_FIX_CONFIG` | `/otr-fix/fix_config.json` | another mapping file (relative to `/otr-fix`); the built-in default if neither exists |
+| `OTR_SOURCE` | `mock` | `mock` or `state-files` (order-state message files) |
+| `OTR_STATE_HOST_DIR` | `order-tree-recon/state-samples` | the host folder with the files and `state_config.json`, mounted at `/otr-states` (`OTR_STATE_DIR`) |
+| `OTR_STATE_CONFIG` | `/otr-states/state_config.json` | another mapping file (relative to `/otr-states`); the built-in default if neither exists |
 
 `DH_PORT` (10000), `DH_XMX` (2g) and `DH_CONTAINER` (`otr-deephaven`) move the port, the
 heap and the container name.
@@ -182,19 +189,20 @@ pip install deephaven-server==42.4                  # ~600 MB, needs JDK 17+
 OTR_DH_TEST=1 PYTHONPATH=src python -m pytest tests # + the embedded-engine suite
 ```
 
-The host suite (114 tests) checks the python reference: every scenario's breaks, the edge
+The host suite (110 tests) checks the python reference: every scenario's breaks, the edge
 taxonomy, signed gaps, DMA linking via `AltId`, nested algo depth, `TOO_DEEP` and
 cycles, depth-first `TreePath`, both identities on every complete bucket, the filter
-builders and the mock book. It also checks the FIX layer: the parser, config validation,
-the fold, the id history, `fix_check`, the committed `fix-samples/`, and the mock book as
-FIX tapes reconciling exactly like the table path. The embedded suite asserts the Deephaven DAG matches the
+builders and the mock book. It also checks the order-state layer: config validation, the
+CSV / JSON readers, the fold (latest state, sequence order, id history), `states_check`,
+the committed `state-samples/`, and the mock book as state messages reconciling exactly
+like the table path, even when delivered out of order. The embedded suite asserts the Deephaven DAG matches the
 reference **row for row** (every `otr_recon` column, every ladder and exposure row). It
 also builds the tree, the API, the app and the dashboard, and turns the router table into
 a keyed input table to show that one new venue fill re-derives `UNBOOKED_FILL` and the
-bucket's `NetUnbookedQty` incrementally. For the FIX path, it asserts the engine's fold
-equals the python fold row for row and the tree equals the reference. It also shows that
-an appended ExecutionReport ticks through to a break, and builds the app with
-`OTR_SOURCE=fix-files`.
+bucket's `NetUnbookedQty` incrementally. For the order-state path, it asserts the
+engine's fold equals the python fold row for row (shuffled feeds, typed columns) and the
+tree equals the reference. It also shows that an appended state message ticks through to
+a break, and builds the app with `OTR_SOURCE=state-files`.
 
 ---
 
@@ -204,13 +212,16 @@ an appended ExecutionReport ticks through to a break, and builds the app with
 upstream system indexes under. Check which id the downstream system stores (order id
 vs `ClOrdID`), and put the other one in the upstream level's `AltId`.
 
-**FIX: a whole level is `ORPHAN` or `NO_LINK`.** Run `fix_check` on the folder. `NO_LINK`
-means the level's `link_tag` is on none of the order's reports. `ORPHAN` means the tag
-is there but its value is not an id the parent system reports (in its `id_tags`). The
-first unlinked orders are printed with the value they carried.
+**Order states: a whole level is `ORPHAN` or `NO_LINK`.** Run `states_check` on the folder.
+`NO_LINK` means the level's `link` field is empty in the orders' latest state (often a
+misspelled field name; `states_check` flags mapped fields that no file has). `ORPHAN`
+means the field has a value that is not an id of the parent system (its `order_id`,
+`alt_id` or `id_fields`). The first unlinked orders are printed with the value they
+carried.
 
-**FIX: a system shows 0 messages.** Its `files` globs matched nothing. The startup banner
-and `fix_check` both list what each glob matched. Globs are relative to the folder.
+**Order states: a system shows 0 messages.** Its `files` globs matched nothing. The
+startup banner and `states_check` both list what each glob matched. Globs are relative to
+the folder.
 
 **Every child is `MISMATCH`.** The systems code `Side` differently (FIX `1`/`2` vs
 `BUY`/`SELL`). Decode in the adapter, as `RAPTOR_SIDE` does.

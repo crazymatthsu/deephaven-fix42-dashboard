@@ -11,8 +11,8 @@ The question this answers:
 > systems' exposure to **bought shares** and **open order shares**?
 
 The submodule [`order-tree-recon/`](../order-tree-recon/) is the runnable answer. It runs
-on mock Raptor / algo / router tables in their own native shapes, or on the three systems'
-**FIX drop-copy messages** (section 12), and every number in this doc is checked against
+on mock Raptor / algo / router tables in their own native shapes, or on the **order-state
+messages** each system sends (section 12), and every number in this doc is checked against
 the real engine (section 10). It is self-contained and can be exported into another
 project with one script (section 13). This doc is **binding** for
 that module the way docs 09 and 13 are for theirs: table names, column names and
@@ -112,8 +112,8 @@ Rules that matter in a real deployment:
   `OrderId` while DMA flow stamps Raptor's outbound `ClOrdID`. Index both (`AltId`), or
   the DMA router parents come out `ORPHAN`. If a cancel/replace rotates the id a
   downstream system stored, pass every id an order was ever known by as `extra_ids`
-  (`System, Id, OrderId`) to `build_order_tree`. Current ids win a collision. The FIX
-  layer does this for every OrderID, ClOrdID and OrigClOrdID (section 12).
+  (`System, Id, OrderId`) to `build_order_tree`. Current ids win a collision. The
+  order-state layer does this for every id field of every message (section 12).
 - **The input tables can be anything that is a Deephaven table**: Kafka, a JDBC poll
   (doc 07), parquet, or a remote URI from other servers (doc 10). The DAG is
   incremental, so ticking sources need no code change (section 10, live-fill test).
@@ -378,9 +378,9 @@ All values go through `sanitize_id` (doc 09's rules) before reaching a query str
 | `OTR_QTY_TOL` | `1e-6` | absolute tolerance for every quantity comparison |
 | `OTR_SEED` | `42` | mock data seed |
 | `OTR_MOCK_FAMILIES` | `24` | random healthy families on top of the scenario catalog |
-| `OTR_SOURCE` | `mock` | `mock`, or `fix-files`: FIX drop-copy logs (section 12) |
-| `OTR_FIX_DIR` | `/otr-fix` | where `fix-files` reads; compose mounts `OTR_FIX_HOST_DIR` (default `order-tree-recon/fix-samples`) there |
-| `OTR_FIX_CONFIG` | `<OTR_FIX_DIR>/fix_config.json` | the tag mapping; the built-in `fix.DEFAULT_FIX_CONFIG` if that file does not exist |
+| `OTR_SOURCE` | `mock` | `mock`, or `state-files`: order-state message files (section 12) |
+| `OTR_STATE_DIR` | `/otr-states` | where `state-files` reads; compose mounts `OTR_STATE_HOST_DIR` (default `order-tree-recon/state-samples`) there |
+| `OTR_STATE_CONFIG` | `<OTR_STATE_DIR>/state_config.json` | the field mapping; the built-in `states.DEFAULT_STATE_CONFIG` if that file does not exist |
 
 A malformed value is a startup error. The topology is code (`config.DEFAULT_LEVELS`),
 not an environment variable, because it is coupled to the adapters.
@@ -397,23 +397,29 @@ not an environment variable, because it is coupled to the adapters.
 
 - **Reference oracle.** [`reference.py`](../order-tree-recon/src/order_tree_recon/reference.py)
   computes every `otr_recon` column, the ladder and the exposure table with dicts and
-  loops. 114 host tests pin it down: every scenario's expected breaks, the edge taxonomy
+  loops. 110 host tests pin it down: every scenario's expected breaks, the edge taxonomy
   case by case, signed gaps, DMA via `AltId`, candidate order, nested algo, `TOO_DEEP`
   and cycles, depth-first `TreePath`, both identities on every complete bucket, the
-  filter builders and the mock book's invariants. For the FIX layer: the parser, config
-  validation, the fold, the id history, `fix_check`, and the mock book written as FIX
-  tapes, which reconciles exactly like the table path (every column but `AltId`).
+  filter builders and the mock book's invariants. For the order-state layer: config
+  validation, value parsing, the CSV / JSON readers, the fold (latest state, sequence
+  ordering and ties, id history), `states_check`, and the mock book written as
+  order-state messages. That book reconciles exactly like the table path: one cell
+  differs, the deliberately amended ClOrdID. It still does when the sequenced feeds
+  arrive shuffled.
 - **Embedded engine** (`OTR_DH_TEST=1`, `deephaven-server==42.4`). The DAG matches the
   reference **row for row**: 340 nodes × 54 columns, 132 ladder rows, 29 exposure rows,
   zero differences. Also covered: tree, query API and app entrypoint. A **live-fill**
   test makes the router table a keyed input table and adds one venue fill the router
   parent never booked. The parent turns `UNBOOKED_FILL` and the bucket's
-  `NetUnbookedQty` becomes 100 incrementally, with no rebuild. For the FIX path, the
-  engine's fold of the raw messages (with a null, garbage and a report without an
-  OrderID mixed in) equals the python fold row for row, the tree it builds equals the
-  reference on every `otr_recon` column, and an appended ExecutionReport on an
-  append-only message table ticks through to `UNBOOKED_FILL`. `OTR_SOURCE=fix-files`
-  builds the app and dashboard from `fix-samples/`.
+  `NetUnbookedQty` becomes 100 incrementally, with no rebuild. For the order-state
+  path:
+  - the engine's fold equals the python fold row for row, with the sequenced feeds
+    shuffled and malformed values mixed in;
+  - typed columns (as `json_spec` delivers them) give the same rows as text;
+  - the tree equals the reference on every `otr_recon` column;
+  - a state message appended to an append-only table ticks through to `UNBOOKED_FILL`;
+  - a missing column is a clear error;
+  - `OTR_SOURCE=state-files` builds the app and dashboard from `state-samples/`.
 - **Browser.** The app was loaded through the same loader path Application Mode uses
   and driven in headless Chromium: typing a prefix, pinning a bucket by row press,
   expanding a tree to the venue level, searching by a venue order id. The
@@ -453,202 +459,206 @@ The scenario catalog ([`mockdata.py`](../order-tree-recon/src/order_tree_recon/m
 - **Id collisions across namespaces** are harmless (the index is per system). Within one
   system, an `AltId` that equals another order's `OrderId` resolves to the `AltId` owner,
   so keep id schemes distinct.
-- **Relationship to doc 09.** Doc 09 folds FIX drop-copy tapes through a full state
-  machine (one hub's OMS view). This module reads current-state order tables, wherever
-  they come from, and since section 12 also reads drop copies directly with a much
-  lighter fold (latest report wins). A doc 09 deployment can still feed it by mapping
+- **Relationship to doc 09.** Doc 09 starts from FIX drop-copy tapes and folds them
+  through a state machine. This module starts *after* that, from order states: tables
+  (section 3) or state messages (section 12). A doc 09 deployment can feed it by mapping
   `oms_orders_latest` per hub through adapters (`LinkId = ExtOrdID`).
 
-## 12. Real FIX messages
+## 12. Order-state messages
 
-When the three systems' orders exist only as FIX drop copies, the FIX layer turns raw
-messages into the five level tables. Everything from section 4 on is unchanged.
+When each system **sends its orders' states** (one message per change, each carrying the
+order's complete current state), a JSON field mapping turns the three feeds into the
+five level tables. No code changes, and everything from section 4 on is unchanged.
 
 ```
-FIX logs, a Kafka topic, ... -- any table with a string column RawFix, one message per row
-   └─ fix_dag.fix_level_tables(topology, fix_config, {"RAPTOR": t1, "ALGO": t2, "OR": t3})
+one table per system, one row per state message: CSV / JSON files, a Kafka topic, ...
+   └─ states_dag.state_level_tables(topology, state_config, {"RAPTOR": t1, "ALGO": t2, "OR": t3})
         ├─ one table per level (the section 3 contract) ──┐
         └─ extra_ids: System, Id, OrderId ────────────────┴─> dag.build_order_tree(..., extra_ids=...)
 ```
 
-`fix_dag.build_from_fix(topology, fix_config, messages)` does both steps in one call.
-`OTR_SOURCE=fix-files` calls it on log files (section 12.3).
+`states_dag.build_from_states(topology, state_config, messages)` does both steps in one
+call. `OTR_SOURCE=state-files` calls it on files (section 12.3).
 
 ### 12.1 How messages become orders
 
-An ExecutionReport (35=8) carries the order's **cumulative** state: OrdStatus (39),
-OrderQty (38), CumQty (14), LeavesQty (151), AvgPx (6). So an order's current state is
-just its latest report, keyed by a stable order id: OrderID (37) by default, which FIX
-4.2 keeps across a cancel/replace. No state machine is needed. A trade bust or
-correction is itself a report that restates CumQty / LeavesQty, so it lands correctly.
-
-| Field | Rule | Column |
-|---|---|---|
-| 11, 39, 38, 14, 151, 6, 55, 54, `destination_tag` | latest **non-empty** value per order | `AltId`, `Status`, `OrderQty`, `CumQty`, `LeavesQty`, `AvgPx` (null unless CumQty > 0), `Symbol`, `Side`, `Destination` |
-| `moniker_tag`, every `link_tag` and `when` tag | **first** non-empty value per order | `Moniker`, `LinkId`, the level |
-| every `id_tags` value (37, 11, 41) | all of them | `extra_ids`: the id history |
-
-- Only 35=8 with a non-empty order id is used. Requests (D/F/G), heartbeats and other
-  messages are skipped.
-- Side and OrdStatus codes are decoded to names (`1` → `BUY`, `5` → `SELL_SHORT`,
-  `4` → `CANCELED`, ...), so all three systems share one coding. A malformed number
-  reads as empty, never as an error.
-- **First** non-empty for links and the moniker: firms often stamp custom tags on the
-  first report only, and a parent link does not legitimately change.
-- **The id history** is why a cancel/replace never breaks a link. If a downstream order
-  still names the upstream's original ClOrdID, that id stays in the upstream's index.
-  The samples show it: the `dma` client order and its router parent are both replaced,
-  the router parent links through its original ClOrdID, and without `extra_ids` it would
-  be `ORPHAN`.
-- Parsing is tolerant: SOH, `|` or `^A` delimiters, and any prefix before `8=FIX`
-  (QuickFIX timestamps, session names). The first occurrence of a tag wins.
-- On the engine, one python UDF call per message picks the configured tags into string
-  columns. The rest is `where` / `last_by` / `first_by` / `natural_join`, so a ticking
-  message table gives ticking order state, and a live feed only parses new messages.
-  Measured on the test machine: 200 000 router messages picked in 6.6 s and folded in
-  8.3 s in total. Parsing is the cost, and that is fine for a day of drop copies.
+- **Latest state wins.** An order's state is its latest message, keyed by the system's
+  `order_id` field. "Latest" means the last to arrive, or, with a `sequence` field, the
+  highest sequence. A tie goes to the later arrival. Numeric sequences compare as
+  numbers (`12` after `9`); anything else, such as ISO-8601 timestamps, compares as
+  text. Configure a `sequence` whenever a system's messages can arrive out of order
+  (several producers, partitions keyed by something other than the order, replays).
+- **The level** is chosen on the latest state by the first `levels` rule whose `when`
+  matches. That is how parents and children in one feed are told apart.
+- **Values:**
+  - text is trimmed, and a missing field is empty;
+  - quantities and prices must be plain decimals or numeric columns. Anything else
+    (`1,000`, `n/a`) reads as null, never as an error;
+  - `side_codes` / `status_codes` translate a system's codes (`"fix"` = FIX 4.2, or
+    your own map), so all three systems share one coding.
+- **The id history.** Every value of a system's `id_fields` (default: `order_id` and
+  `alt_id`) in *any* message becomes an id of that order. If Raptor's ClOrdID changes
+  mid-day but the router parent still carries the original, the link still resolves.
+  The samples do exactly this; without the history that router parent would be `ORPHAN`.
+- On the engine, it is `update_view` → `where` → `last_by` (or `sorted_last`) → `update`
+  → one `view` per level, so a ticking message table gives a ticking tree. Typed columns
+  are used as they are (numeric quantities, a numeric or timestamp sequence).
 
 ### 12.2 The mapping config
 
-One JSON file maps each system's tags. This is the default (`fix.DEFAULT_FIX_CONFIG`,
-also `fix-samples/fix_config.json`):
+One JSON file maps each system's field names. This is the default
+(`states.DEFAULT_STATE_CONFIG`, also `state-samples/state_config.json`), written for the
+mock tables' field names:
 
 ```json
 {"systems": [
-  {"system": "RAPTOR", "files": ["raptor*.log"], "moniker_tag": "1", "levels": [
-    {"level": "CLIENT"}
+  {"system": "RAPTOR", "files": ["raptor*.csv"], "order_id": "OrderId", "alt_id": "ClOrdID", "side_codes": "fix",
+   "fields": {"Moniker": "Moniker", "Symbol": "Symbol", "Side": "Side", "OrderQty": "OrderQty",
+              "CumQty": "CumQty", "LeavesQty": "LeavesQty", "AvgPx": "AvgPx", "Status": "OrdStatus"},
+   "levels": [
+     {"level": "CLIENT"}
   ]},
-  {"system": "ALGO", "files": ["algo*.log"], "destination_tag": "847", "levels": [
-    {"level": "ALGO_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
-    {"level": "ALGO_PARENT", "link_tag": "11"}
+  {"system": "ALGO", "files": ["algo*.jsonl"], "order_id": "AlgoOrderId", "sequence": "Version",
+   "fields": {"Symbol": "Symbol", "Side": "Side", "OrderQty": "Qty", "CumQty": "Filled",
+              "LeavesQty": "Open", "AvgPx": "AvgPrice", "Status": "State", "Destination": "Strategy"},
+   "levels": [
+     {"level": "ALGO_CHILD", "when": {"field": "ParentAlgoOrderId"}, "link": "ParentAlgoOrderId"},
+     {"level": "ALGO_PARENT", "link": "RaptorOrderId"}
   ]},
-  {"system": "OR", "files": ["router*.log"], "levels": [
-    {"level": "OR_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
-    {"level": "OR_PARENT", "link_tag": "11"}
+  {"system": "OR", "files": ["router*.csv"], "order_id": "RouterOrderId", "sequence": "UpdateTime",
+   "fields": {"Symbol": "Symbol", "Side": "Side", "OrderQty": "Qty", "CumQty": "CumQty",
+              "LeavesQty": "LeavesQty", "AvgPx": "AvgPx", "Status": "Status", "Destination": "Venue"},
+   "levels": [
+     {"level": "OR_CHILD", "when": {"field": "ParentRouterOrderId"}, "link": "ParentRouterOrderId"},
+     {"level": "OR_PARENT", "link": "UpstreamOrderId"}
   ]}
 ]}
 ```
 
-How to read it: a **cross-system** parent link is the downstream order's own ClOrdID
-(11), the id the upstream sent the order with. The upstream reports that id as its
-OrderID or as one of its ClOrdIDs, and both are in its id index. An **in-system** child
-names its parent in a custom tag (20001 here). Each level is chosen by its `when`; the
-first match wins, and a level without `when` is the system's default.
-
 | Key (per system) | Default | Meaning |
 |---|---|---|
 | `system` | required | a topology system: `RAPTOR`, `ALGO`, `OR` |
-| `files` | `[]` | globs relative to the FIX directory |
-| `levels` | required | `[{"level", "when"?, "link_tag"?}]`; every topology level mapped exactly once |
-| `order_id_tag` | `"37"` | the stable per-order key |
-| `id_tags` | `["37", "11", "41"]` | every id other systems may reference this order by |
-| `moniker_tag` | `"1"` (Account) | `null`: no moniker; only the root level needs one |
-| `destination_tag` | `"100"` (ExDestination) | display only (strategy for algo, venue for street); `null`: none |
+| `order_id` | required | the field holding this system's order id |
+| `alt_id` | none | a second id downstream systems may reference (fills `AltId`, e.g. Raptor's ClOrdID) |
+| `id_fields` | `[order_id, alt_id]` | every field whose values, in any message, identify the order (the id history) |
+| `fields` | `{}` | canonical column → your field: `Moniker`, `Symbol`, `Side`, `OrderQty`, `CumQty`, `LeavesQty`, `AvgPx`, `Status`, `Destination`; an unmapped column stays empty |
+| `side_codes`, `status_codes` | none | `"fix"` or `{"your code": "NAME"}`; unlisted values pass through |
+| `sequence` | none (arrival order) | the field that orders one order's messages |
+| `levels` | required | `[{"level", "when"?, "link"?}]`: every topology level mapped exactly once |
+| `files` | `[]` | globs relative to the state directory (`state-files` only) |
 
-`when` is `{"tag": T}` (the tag is present) or `{"tag": T, "equals": "V"}`. Root levels
-take no `link_tag`; every other level needs one. A firm whose algo server flags children
-in tag 9100 and names the parent in 9101 writes:
+`when` is `{"field": F}` (F is non-empty) or `{"field": F, "equals": "V"}`. A level
+without `when` is the system's default and comes last. `link` is the field holding the
+parent's id: the upstream system's id for a cross-system hop, the parent order's id
+inside a system. Root levels have no `link`. Field names must be identifiers (letters,
+digits, `_`), because they become Deephaven column names. File columns are made legal
+the same way (`Order Id` → `Order_Id`), and `states_check` prints the names it found.
+A router that flags its children instead of leaving the parent id empty writes:
 
 ```json
-{"system": "ALGO", "files": ["algo_dropcopy_*.log"], "destination_tag": "847", "levels": [
-  {"level": "ALGO_CHILD", "when": {"tag": "9100", "equals": "CHILD"}, "link_tag": "9101"},
-  {"level": "ALGO_PARENT", "link_tag": "11"}
-]}
+   "levels": [
+     {"level": "OR_CHILD", "when": {"field": "OrderRole", "equals": "CHILD"}, "link": "ParentOrderId"},
+     {"level": "OR_PARENT", "link": "ExternalOrderId"}
+  ]
 ```
 
-`fix.parse_fix_config` validates all of it at startup and names the system, level and
-field at fault. A typo is an error, never a silently empty level.
+`states.parse_state_config` validates everything at startup and names the system, level
+and field at fault.
 
-### 12.3 Pointing it at your logs
+### 12.3 Pointing it at your files
 
-1. **Collect** each system's drop-copy logs into one folder. Every line containing
-   `8=FIX` is one message, and several files per system are fine (`algo_*.log`). Keep
-   that folder outside the repository: real drop copies hold client orders. `*.log` is
-   git-ignored everywhere except `fix-samples/`.
-2. **Find your tags.** Look at a few ExecutionReports per system:
-   `grep -m5 '35=8' algo.log | tr '\001|' '\n\n' | sort -u` (SOH or `|`). For each
-   level, decide which tag tells you it is that level, and which tag names its parent.
-   For a cross-system hop that is usually 11; inside a system it is usually custom.
-3. **Write `fix_config.json`** in the same folder, starting from
-   `order-tree-recon/fix-samples/fix_config.json`.
-4. **Dry-run it on the host** (pure python, no Deephaven, no container):
+1. **Put each system's messages in one folder**, outside the repository (they hold
+   client orders). Formats: `.csv` (a header row), `.jsonl` / `.ndjson` (one JSON object
+   per line; nested values are kept as JSON text), `.json` (an array of objects).
+   Several files per system are fine. A line that is not a message is counted, not fatal.
+2. **Write `state_config.json`** in the same folder, starting from
+   `order-tree-recon/state-samples/state_config.json`.
+3. **Dry-run it on the host.** This is pure python, with no Deephaven and no container:
 
    ```bash
    cd order-tree-recon
-   PYTHONPATH=src python -m order_tree_recon.fix_check /path/to/logs
+   PYTHONPATH=src python -m order_tree_recon.states_check /path/to/files
    ```
 
-   It prints the files each glob matched, the orders per level, `ROOT` / `LINKED` /
-   `ORPHAN` / `NO_LINK` counts, the breaks, and the first unlinked orders with the
-   reason (`link tag 11 = 'X', not an id of any ALGO / RAPTOR order`, or
-   `link tag 9101 is on none of its ExecutionReports`). Iterate on the config until the
-   links look right.
-5. **Run the dashboard on them:**
+   It prints, per system:
+   - the files matched, the message count and the columns found;
+   - mapped fields that no file has (`MISSING: ...`);
+   - orders per level and `ROOT` / `LINKED` / `ORPHAN` / `NO_LINK` counts;
+   - the breaks;
+   - the first unlinked orders, with the reason (`UpstreamOrderId = 'X', not an id of
+     any ALGO / RAPTOR order`, or `RaptorOrderID is empty in its latest state`).
+
+   Iterate on the config until the links look right.
+4. **Run the dashboard on them:**
 
    ```bash
-   OTR_SOURCE=fix-files OTR_FIX_HOST_DIR=/path/to/logs bash order-tree-recon/scripts/run_demo.sh
+   OTR_SOURCE=state-files OTR_STATE_HOST_DIR=/path/to/files bash order-tree-recon/scripts/run_demo.sh
    ```
 
-   The banner lists the files and message counts per system. The raw messages are
-   globals too (`fix_raptor_messages`, `fix_algo_messages`, `fix_or_messages`).
+   The banner lists the files and message counts per system. The messages are globals
+   too: `state_raptor_updates`, `state_algo_updates`, `state_or_updates`.
 
 ### 12.4 Live feeds
 
-The fold needs every message of the day (first values, id history), so a live source
-must be an **append** table, never a blink table. With Kafka (one topic per system, the
-message as the record value):
+Any table with one row per state message works. With Kafka JSON (one topic per system),
+declare the fields you map, typed as you like:
 
 ```python
-from deephaven import dtypes
+from deephaven import dtypes as dt
 from deephaven.stream.kafka import consumer as kc
-from order_tree_recon import config, fix, fix_dag, query_api
+from order_tree_recon import config, query_api, states, states_dag
 from order_tree_recon.dashboard import build_dashboard
 
-def drop_copies(topic):
+def order_states(topic, columns):
     return kc.consume(
         {"bootstrap.servers": "kafka:9092"}, topic,
-        offsets=kc.ALL_PARTITIONS_SEEK_TO_BEGINNING,       # replay the day
+        offsets=kc.ALL_PARTITIONS_SEEK_TO_BEGINNING,           # replay the day
         key_spec=kc.KeyValueSpec.IGNORE,
-        value_spec=kc.simple_spec("RawFix", dtypes.string),
+        value_spec=kc.json_spec(list(columns.items())),
         table_type=kc.TableType.append(),
     )
 
-topology = config.default_topology()
-fix_config = fix.load_fix_config("/otr-fix/fix_config.json", topology)
-tables = fix_dag.build_from_fix(topology, fix_config, {
-    "RAPTOR": drop_copies("raptor.dropcopy"),
-    "ALGO": drop_copies("algo.dropcopy"),
-    "OR": drop_copies("router.dropcopy"),
+algo = order_states("algo.order-states", {
+    "AlgoOrderId": dt.string, "ParentAlgoOrderId": dt.string, "RaptorOrderId": dt.string,
+    "Strategy": dt.string, "Symbol": dt.string, "Side": dt.string, "State": dt.string,
+    "Qty": dt.int64, "Filled": dt.int64, "Open": dt.int64, "AvgPrice": dt.double, "Version": dt.int64,
 })
+# raptor = order_states("raptor.order-states", {...}); router = order_states("router.order-states", {...})
+
+topology = config.default_topology()
+state_config = states.load_state_config("/otr-states/state_config.json", topology)
+tables = states_dag.build_from_states(topology, state_config, {"RAPTOR": raptor, "ALGO": algo, "OR": router})
 globals().update(tables)
 globals().update(query_api.make_query_api(tables))
 order_tree_dashboard = build_dashboard(tables)
 ```
 
-Any other append-only table with a `RawFix` column works the same way: an input table,
-or a table publisher your FIX engine writes to. Order the messages of one order in time
-within its table (file order, or one Kafka partition per order).
+Use an **append** table. The id history needs every message of the day, and the
+append-only path is the one the tests cover. An input table, a table publisher or a
+JDBC poll works the same way.
 
-### 12.5 What the FIX layer assumes
+### 12.5 What the order-state layer assumes
 
-- **Standard FIX 4.2 state tags** (11, 39, 38, 14, 151, 6, 55, 54). A system that
-  reports, say, the symbol elsewhere needs `FixSystem.state_tags` and the canonical view
-  in `fix_dag._system_tables` (and its twin `fix.fold_system`) changed in one place each.
-- **A stable order key per system.** If a system issues a new OrderID on every replace,
-  set `order_id_tag` to a tag that is stable (an internal order id). Otherwise each
-  replace shows up as a new order.
-- **Unique ids within a system.** ClOrdIDs are unique per FIX session. Two sessions
-  feeding one system can collide; current ids beat history, but give such sessions
-  distinct `system` names or prefixes if they reuse ids.
-- `AltId` becomes the latest ClOrdID for every system. That is harmless, because the
-  index is per system and holds every id anyway.
+- **Each message is the order's complete state.** A missing field reads as empty, not as
+  "unchanged". If a system sends *deltas* (only the changed fields), fold them to full
+  states first. In Deephaven that is one `last_by` per field over its non-empty values,
+  joined back on the order id.
+- **One order id per order per system,** stable for the order's life. If a system
+  re-keys an order on amend, use a stable field as `order_id` and put the changing one
+  in `id_fields`.
+- **Unique ids within a system.** Current ids beat history on a collision, but two
+  orders that share an id in one system will mislink. Keep id schemes distinct, or
+  prefix them.
+- Measured on the test machine: 200 000 messages from one system fold into 86 000
+  orders in 0.8 s. The first build in a server session also spends about 6 s compiling
+  the formulas, once. A live feed only processes new messages.
 
 ## 13. Using the module in another project
 
 The module is self-contained. The `order_tree_recon` package imports only the standard
 library, `deephaven` and `deephaven.ui` (the dashboard only), and has no pip
-dependencies. The pure modules (`config`, `reference`, `mockdata`, `fix`, `fix_mock`,
-`fix_check`, the filter builders) run on any Python 3.10+. What it borrows from this
+dependencies. The pure modules (`config`, `reference`, `mockdata`, `states`, `states_mock`,
+`states_check`, the filter builders) run on any Python 3.10+. What it borrows from this
 repository is four small pieces of scaffolding: the compose file, the app folder with
 the shared loader, `repos.env` with `scripts/repos.sh` (doc 15), and `.gitattributes`.
 
@@ -677,22 +687,22 @@ server's venv), then from the console or your own Application Mode script:
 
 ```python
 from order_tree_recon import app
-app.main(globals())                 # honours OTR_SOURCE / OTR_FIX_DIR / ... (section 9)
+app.main(globals())                 # honours OTR_SOURCE / OTR_STATE_DIR / ... (section 9)
 ```
 
 Or, as a library:
 
 ```python
-from order_tree_recon import config, dag, fix, fix_dag, query_api
+from order_tree_recon import config, dag, query_api, states, states_dag
 topology = config.default_topology()
-# from FIX messages (section 12): {system: table with a RawFix column}
-tables = fix_dag.build_from_fix(topology, fix.load_fix_config("fix_config.json", topology), messages)
+# from order-state messages (section 12): {system: table, one row per state message}
+tables = states_dag.build_from_states(topology, states.load_state_config("state_config.json", topology), messages)
 # or from order tables already in Deephaven (section 3): {level: canonical table}
 tables = dag.build_order_tree(topology, level_tables)
 api = query_api.make_query_api(tables)     # order_tree / find_tree / exposure
 ```
 
-What you change for your firm is one of: the FIX mapping config (section 12), or the
+What you change for your firm is one of: the order-state field mapping (section 12), or the
 adapters in `sources.py` (section 3). Change `config.DEFAULT_LEVELS` only if your flow
 has a different shape. The DAG, the API and the dashboard stay as they are.
 
@@ -702,7 +712,7 @@ has a different shape. The DAG, the API and the dashboard stay as they are.
 order-tree-recon/
 ├── README.md                    # runbook
 ├── build.gradle.kts / pyproject.toml / run_tests.sh
-├── fix-samples/                 # the mock book as FIX 4.2 drop copies + fix_config.json
+├── state-samples/               # the mock book as order-state messages (CSV / JSONL) + state_config.json
 ├── scripts/run_demo.sh          # podman compose up | down | status | logs
 ├── scripts/export_standalone.sh # section 13
 ├── src/order_tree_recon/
@@ -710,13 +720,13 @@ order-tree-recon/
 │   ├── reference.py             # pure: the oracle of every DAG formula
 │   ├── mockdata.py              # pure: native Raptor / algo / router tables + scenarios
 │   ├── query_api.py             # pure filter builders + the console API
-│   ├── fix.py                   # pure: FIX parser, mapping config, fold (python twin)   <- section 12
-│   ├── fix_mock.py              # pure: the mock book as FIX tapes (writes fix-samples/)
-│   ├── fix_check.py             # pure: dry-run a mapping on your logs
-│   ├── fix_dag.py               # FIX messages -> level tables + id history, in Deephaven
+│   ├── states.py                # pure: field mapping, CSV / JSON readers, fold (python twin)   <- section 12
+│   ├── states_mock.py           # pure: the mock book as order-state messages (writes state-samples/)
+│   ├── states_check.py          # pure: dry-run a mapping on your files
+│   ├── states_dag.py            # order-state messages -> level tables + id history, in Deephaven
 │   ├── sources.py               # native tables + per-level adapters  <- rewrite for real tables
 │   ├── dag.py                   # section 4
 │   ├── dashboard.py             # section 7
-│   └── app.py                   # Application-Mode entrypoint (OTR_SOURCE=mock | fix-files)
+│   └── app.py                   # Application-Mode entrypoint (OTR_SOURCE=mock | state-files)
 └── tests/                       # host suite + the opt-in embedded-engine suite
 ```

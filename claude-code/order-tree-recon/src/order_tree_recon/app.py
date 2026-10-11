@@ -10,9 +10,10 @@ Two sources (``OTR_SOURCE``):
 * ``mock`` (default) -- generated native Raptor / algo / router tables and the adapters
   in :mod:`order_tree_recon.sources`. To run over your own order *tables*, replace the
   native tables and edit the adapters (doc 14 section 3).
-* ``fix-files`` -- FIX drop-copy logs in ``OTR_FIX_DIR``, mapped by a JSON tag config
-  (:mod:`order_tree_recon.fix`, :mod:`order_tree_recon.fix_dag`; doc 14 section 12).
-  The raw messages are published as ``fix_<system>_messages``.
+* ``state-files`` -- order-state messages (CSV / JSON Lines) in ``OTR_STATE_DIR``, mapped
+  by a JSON field config (:mod:`order_tree_recon.states`,
+  :mod:`order_tree_recon.states_dag`; doc 14 section 12). The messages are published as
+  ``state_<system>_updates``.
 
 Either way the DAG, the API and the dashboard are unchanged.
 
@@ -59,21 +60,22 @@ def _mock_source(topology: config.Topology, tol: float,
     return native, tables, banner
 
 
-def _fix_files_source(topology: config.Topology, tol: float,
-                      environ: Optional[Mapping[str, str]]) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
-    from order_tree_recon import fix, fix_dag
+def _state_files_source(topology: config.Topology, tol: float,
+                        environ: Optional[Mapping[str, str]]) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+    from order_tree_recon import states, states_dag
 
-    directory = config.fix_dir(environ)
-    config_path = config.fix_config_path(environ)
-    fix_config = fix.load_fix_config(config_path, topology)
-    messages, files = fix_dag.fix_file_tables(fix_config, directory)
-    tables = fix_dag.build_from_fix(topology, fix_config, messages, tol)
-    published = {f"fix_{system.lower()}_messages": table for system, table in messages.items()}
-    banner = [f"fix-files: {directory}, mapping {config_path or '(built-in DEFAULT_FIX_CONFIG)'}"]
-    for system in fix_config.systems:
+    directory = config.state_dir(environ)
+    config_path = config.state_config_path(environ)
+    state_config = states.load_state_config(config_path, topology)
+    messages, files, bad = states_dag.state_file_tables(state_config, directory)
+    tables = states_dag.build_from_states(topology, state_config, messages, tol)
+    published = {f"state_{system.lower()}_updates": table for system, table in messages.items()}
+    banner = [f"state-files: {directory}, mapping {config_path or '(built-in DEFAULT_STATE_CONFIG)'}"]
+    for system in state_config.systems:
         names = ", ".join(os.path.basename(f) for f in files[system.system]) or "NO FILES MATCHED"
+        unusable = f", {bad[system.system]} unusable lines" if bad[system.system] else ""
         banner.append(f"  {system.system:<7} {list(system.files)} -> {names}; "
-                      f"{messages[system.system].size} messages")
+                      f"{messages[system.system].size} messages{unusable}")
     if not any(files.values()):
         banner.append(f"WARNING: no file in {directory} matches any 'files' glob -- every table is empty")
     return published, tables, banner
@@ -83,8 +85,8 @@ def build(environ: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """Build every global: the source tables, ``otr_*`` tables, the API, the dashboard."""
     topology = config.default_topology()
     tol = config.qty_tolerance(environ)
-    if config.source(environ) == "fix-files":
-        published, tables, banner = _fix_files_source(topology, tol, environ)
+    if config.source(environ) == "state-files":
+        published, tables, banner = _state_files_source(topology, tol, environ)
     else:
         published, tables, banner = _mock_source(topology, tol, environ)
     api = query_api.make_query_api(tables)

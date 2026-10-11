@@ -9,7 +9,7 @@
 # DEST gets the same layout as claude-code/, so every relative path in the scripts, the
 # compose file and the docs keeps working:
 #
-#   order-tree-recon/       the package, tests, fix-samples/, run_tests.sh, scripts/run_demo.sh
+#   order-tree-recon/       the package, tests, state-samples/, run_tests.sh, scripts/run_demo.sh
 #   docker/                 docker-compose.order-tree.yml, apps/_lib/loader.py, apps/order-tree-recon/
 #   scripts/repos.sh        the artifact-repository loader (docs/15)
 #   repos.env               public defaults (+ repos.local.env.example: your JFrog override)
@@ -99,9 +99,7 @@ if [ -f "$GITATTRIBUTES" ]; then keep_or_copy "$GITATTRIBUTES" .gitattributes; f
 touch "$DEST/.gitignore"
 # A file without a final newline would glue our first line onto its last one.
 if [ -s "$DEST/.gitignore" ] && [ -n "$(tail -c 1 "$DEST/.gitignore")" ]; then echo >>"$DEST/.gitignore"; fi
-# *.log: real drop-copy logs hold client orders and stay out of git; the synthetic samples do not.
-for line in '.venv/' '__pycache__/' '.pytest_cache/' '*.egg-info/' 'repos.local.env' \
-  '*.log' '!order-tree-recon/fix-samples/*.log'; do
+for line in '.venv/' '__pycache__/' '.pytest_cache/' '*.egg-info/' 'repos.local.env'; do
   grep -qxF "$line" "$DEST/.gitignore" || printf '%s\n' "$line" >>"$DEST/.gitignore"
 done
 echo "  updated  .gitignore"
@@ -123,22 +121,23 @@ Exported from `deephaven-fix42-dashboard/claude-code` by
 ```bash
 bash order-tree-recon/run_tests.sh                    # unit tests (Python 3.10+, creates .venv)
 bash order-tree-recon/scripts/run_demo.sh             # podman compose up, mock order tables
-OTR_SOURCE=fix-files bash order-tree-recon/scripts/run_demo.sh   # the sample FIX tapes
+OTR_SOURCE=state-files bash order-tree-recon/scripts/run_demo.sh  # the sample order states
 # open http://localhost:10000/iframe/widget/?name=order_tree_dashboard
 bash order-tree-recon/scripts/run_demo.sh down
 ```
 
 ## Your own data
 
-- **FIX drop-copy logs** -- put the files and a `fix_config.json` (start from
-  `order-tree-recon/fix-samples/fix_config.json`) in one folder, then
-  `OTR_SOURCE=fix-files OTR_FIX_HOST_DIR=/abs/path bash order-tree-recon/scripts/run_demo.sh`.
-  Doc 14 section 12 covers the config, and live feeds (Kafka) as well.
+- **Order-state messages** (CSV / JSON Lines files) -- put them and a `state_config.json`
+  (start from `order-tree-recon/state-samples/state_config.json`) in one folder, check the
+  mapping with `PYTHONPATH=order-tree-recon/src python -m order_tree_recon.states_check DIR`,
+  then `OTR_SOURCE=state-files OTR_STATE_HOST_DIR=/path bash order-tree-recon/scripts/run_demo.sh`.
+  Doc 14 section 12 covers the config, and live feeds (Kafka JSON) as well.
 - **Order tables already in Deephaven** -- edit `order-tree-recon/src/order_tree_recon/sources.py`
   (doc 14 section 3).
 - **Your own Deephaven server** -- put `order-tree-recon/src` on its `PYTHONPATH` and run
   `from order_tree_recon import app; app.main(globals())` in the console, or call
-  `fix_dag.build_from_fix(...)` / `dag.build_order_tree(...)` from your own script.
+  `states_dag.build_from_states(...)` / `dag.build_order_tree(...)` from your own script.
   The package needs nothing but `deephaven` and `deephaven.ui`.
 
 ## Company artifact repositories (JFrog)

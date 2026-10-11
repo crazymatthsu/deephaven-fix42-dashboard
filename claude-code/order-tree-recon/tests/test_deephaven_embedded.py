@@ -11,9 +11,10 @@ deephaven-server==42.4`` -- ~600 MB with its JVM jars, needs JDK 17+) and
 * the DAG is incremental: one new fill on a venue order (a keyed input table here,
   your live order feed in production) re-derives the break and the bucket exposure
   without rebuilding anything;
-* the FIX path: the engine's fold of raw messages equals :func:`fix.fold_all`, the tree
-  it builds equals the reference, an appended ExecutionReport ticks through to a break,
-  and ``OTR_SOURCE=fix-files`` builds the app from ``fix-samples/``.
+* the order-state path: the engine's fold of the message tables (delivered out of order,
+  text or typed columns) equals :func:`states.fold_all`, the tree it builds equals the
+  reference, an appended state message ticks through to a break, and
+  ``OTR_SOURCE=state-files`` builds the app from ``state-samples/``.
 """
 
 from __future__ import annotations
@@ -207,43 +208,84 @@ def test_app_entrypoint_builds_everything(server):
 
 
 # --------------------------------------------------------------------------------------
-# The FIX path (fix_dag)
+# The order-state path (states_dag)
 # --------------------------------------------------------------------------------------
 
-SAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fix-samples")
+SAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state-samples")
+
+
+def _sorted(rows):
+    return sorted(rows, key=lambda r: (r["Level"], r["OrderId"]))
+
+
+def _engine_levels(levels):
+    return _sorted(dict(r, Level=level) for level, table in levels.items() for r in _rows(table))
 
 
 @pytest.fixture(scope="module")
-def fix_book(server, book):
-    from order_tree_recon import fix, fix_dag, fix_mock
+def state_book(server):
+    import random
+
+    from order_tree_recon import states, states_dag
 
     topology = config.default_topology()
-    cfg = fix.load_fix_config("", topology)
-    tapes = fix_mock.tapes(book)
-    # A null, an empty line, garbage and a report without an order id: all skipped.
-    noise = [None, "", "garbage", fix_mock.fix_message([("35", "8"), ("37", ""), ("14", "abc")])]
-    messages = {system: fix_dag.fix_messages_table(lines + noise) for system, lines in tapes.items()}
-    levels, ids = fix_dag.fix_level_tables(topology, cfg, messages)
-    rows, py_ids = fix.fold_all(cfg, tapes)
-    return {"cfg": cfg, "tapes": tapes, "levels": levels, "ids": ids, "rows": rows, "py_ids": py_ids}
+    cfg = states.load_state_config("", topology)
+    messages = {s.system: states.read_state_files(s.files, SAMPLES_DIR) for s in cfg.systems}
+    # Noise on both sides: a message without an order id (skipped) and an order whose
+    # numbers are malformed (null, never an error) and whose side code is unknown.
+    inputs = {}
+    for system, (msgs, columns, _, _) in messages.items():
+        inputs[system] = list(msgs) + [{c: "" for c in columns}]
+    inputs["RAPTOR"].append(dict({c: "" for c in messages["RAPTOR"][1]}, OrderId="ZZ-NOISE", Side="Q",
+                                 OrderQty="1,000", CumQty="abc", LeavesQty=" 5 ", AvgPx="inf", OrdStatus="NEW"))
+    rows, py_ids = states.fold_all(cfg, inputs)
+    # The engine gets the sequenced systems shuffled: the sequence field restores the order.
+    rng = random.Random(11)
+    tables = {}
+    for system, msgs in inputs.items():
+        msgs = list(msgs)
+        if system in ("ALGO", "OR"):
+            rng.shuffle(msgs)
+        tables[system] = states_dag.state_table(msgs, messages[system][1])
+    levels, ids = states_dag.state_level_tables(topology, cfg, tables)
+    return {"cfg": cfg, "messages": messages, "tables": tables, "levels": levels, "ids": ids,
+            "rows": rows, "py_ids": py_ids}
 
 
-def test_fix_fold_matches_python_fold(fix_book):
-    def key(r):
-        return (r["Level"], r["OrderId"])
-
-    engine = [dict(r, Level=level) for level, table in fix_book["levels"].items() for r in _rows(table)]
-    assert sorted(engine, key=key) == sorted(fix_book["rows"], key=key)
-    assert {(r["System"], r["Id"], r["OrderId"]) for r in _rows(fix_book["ids"])} == set(fix_book["py_ids"])
+def test_state_fold_matches_python_fold(state_book):
+    assert _engine_levels(state_book["levels"]) == _sorted(state_book["rows"])
+    assert {(r["System"], r["Id"], r["OrderId"]) for r in _rows(state_book["ids"])} == set(state_book["py_ids"])
 
 
-def test_fix_path_recon_matches_reference(fix_book, book):
-    from order_tree_recon import dag, fix_mock
+def test_state_fold_accepts_typed_columns(state_book):
+    """A Kafka json_spec table: numeric quantities, a numeric sequence, null prices."""
+    from deephaven import new_table
+    from deephaven.column import double_col, long_col, string_col
+    from deephaven.constants import NULL_DOUBLE
+
+    from order_tree_recon import states_dag
+
+    msgs, _, _, _ = state_book["messages"]["ALGO"]
+    text_columns = ("AlgoOrderId", "ParentAlgoOrderId", "RaptorOrderId", "Strategy", "Symbol", "Side", "State")
+    typed = new_table(
+        [string_col(c, [m[c] for m in msgs]) for c in text_columns]
+        + [long_col(c, [int(m[c]) for m in msgs]) for c in ("Version", "Qty", "Filled", "Open")]
+        + [double_col("AvgPrice", [float(m["AvgPrice"]) if m["AvgPrice"] else NULL_DOUBLE for m in msgs])]
+    )
+    topology = config.default_topology()
+    levels, _ = states_dag.state_level_tables(topology, state_book["cfg"], {"ALGO": typed})
+    algo = {k: v for k, v in levels.items() if k.startswith("ALGO")}
+    expected = [r for r in state_book["rows"] if r["Level"].startswith("ALGO")]
+    assert _engine_levels(algo) == _sorted(expected)
+
+
+def test_state_path_recon_matches_reference(state_book, book):
+    from order_tree_recon import dag, states_mock
     from order_tree_recon.query_api import make_query_api
 
     topology = config.default_topology()
-    tables = dag.build_order_tree(topology, fix_book["levels"], 1e-6, extra_ids=fix_book["ids"])
-    ref = reference.reconcile(topology, fix_book["rows"], 1e-6, extra_ids=fix_book["py_ids"])
+    tables = dag.build_order_tree(topology, state_book["levels"], 1e-6, extra_ids=state_book["ids"])
+    ref = reference.reconcile(topology, state_book["rows"], 1e-6, extra_ids=state_book["py_ids"])
     engine = {r["NodeKey"]: r for r in _rows(tables["otr_recon"])}
     assert set(engine) == set(ref)
     diffs = [
@@ -254,31 +296,27 @@ def test_fix_path_recon_matches_reference(fix_book, book):
     ]
     assert diffs == []
 
-    # The router parent of the amended DMA order linked through Raptor's id history, and
-    # find_tree resolves the amended-away ClOrdID too.
-    _, client_id = book.scenario_roots[fix_mock.AMENDED_SCENARIO]
-    client = next(r for r in fix_book["rows"] if r["OrderId"] == client_id)
-    original = client["AltId"][: -len("-R1")]
-    tree = _rows(make_query_api(tables)["find_tree"](original))
+    # find_tree resolves the amended-away ClOrdID through the id history.
+    _, client_id = book.scenario_roots[states_mock.AMENDED_SCENARIO]
+    client = next(r for r in state_book["rows"] if r["OrderId"] == client_id)
+    tree = _rows(make_query_api(tables)["find_tree"](client["AltId"][: -len("-R1")]))
     assert {r["RootKey"] for r in tree} == {f"RAPTOR|{client_id}"}
     assert all(r["LinkState"] in ("ROOT", "LINKED") for r in tree)
 
 
-def test_fix_messages_tick_through_to_a_break(fix_book, book):
-    """An appended venue fill the router parent never books -> UNBOOKED_FILL, live."""
+def test_state_messages_tick_through_to_a_break(state_book, book):
+    """An appended venue state the router parent never books -> UNBOOKED_FILL, live."""
     from deephaven import input_table
-    from order_tree_recon import fix_dag, fix_mock, mockdata as md
+
+    from order_tree_recon import states_dag
 
     topology = config.default_topology()
-    router = input_table(init_table=fix_dag.fix_messages_table(fix_book["tapes"]["OR"]))  # append-only
-    messages = {
-        "RAPTOR": fix_dag.fix_messages_table(fix_book["tapes"]["RAPTOR"]),
-        "ALGO": fix_dag.fix_messages_table(fix_book["tapes"]["ALGO"]),
-        "OR": router,
-    }
-    tables = fix_dag.build_from_fix(topology, fix_book["cfg"], messages, 1e-6)
+    router_msgs, router_columns, _, _ = state_book["messages"]["OR"]
+    router = input_table(init_table=states_dag.state_table(router_msgs, router_columns))  # append-only
+    messages = dict(state_book["tables"], OR=router)
+    tables = states_dag.build_from_states(topology, state_book["cfg"], messages, 1e-6)
 
-    system, order_id = book.scenario_roots["working"]
+    _, order_id = book.scenario_roots["working"]
     root = next(r for r in book.roots if r.order_id == order_id)
     venue = next(o for o in root.walk() if o.level == "OR_CHILD" and o.leaves >= 100)
     parent_key = f"OR|{venue.link_id}"
@@ -288,38 +326,44 @@ def test_fix_messages_tick_through_to_a_break(fix_book, book):
         return rows[0]["BreakKind"] if rows else None
 
     assert kind_of(parent_key) == "NONE"
-    fill = fix_mock.fix_message([
-        ("35", "8"), ("37", venue.order_id), ("150", "1"), ("39", "1"), ("55", venue.symbol),
-        ("54", md.SIDE_TO_FIX[venue.side]), ("38", str(int(venue.qty))), ("14", str(int(venue.cum + 100))),
-        ("151", str(int(venue.leaves - 100))), ("6", repr(venue.px)),
-    ])
-    router.add(fix_dag.fix_messages_table([fill]))
+    latest = [m for m in router_msgs if m["RouterOrderId"] == venue.order_id][-1]
+    filled = dict(latest, UpdateTime="2026-10-09T23:59:59.999", CumQty=str(int(venue.cum + 100)),
+                  LeavesQty=str(int(venue.leaves - 100)), Status="PARTIALLY_FILLED")
+    router.add(states_dag.state_table([filled], router_columns))
 
     assert _wait_for(lambda: kind_of(parent_key) == "UNBOOKED_FILL")
     bucket = _rows(tables["otr_exposure"].where(["RootMoniker == `ACME`", "RootSymbol == `MSFT`", "RootSide == `BUY`"]))
     assert bucket[0]["NetUnbookedQty"] == 100.0
 
 
-def test_app_entrypoint_fix_files(server, book, ref):
+def test_app_entrypoint_state_files(server, book, ref):
     from order_tree_recon import app
 
-    built = app.build({"OTR_SOURCE": "fix-files", "OTR_FIX_DIR": SAMPLES_DIR})
-    for name in ("fix_raptor_messages", "fix_algo_messages", "fix_or_messages", "otr_recon", "otr_tree",
+    built = app.build({"OTR_SOURCE": "state-files", "OTR_STATE_DIR": SAMPLES_DIR})
+    for name in ("state_raptor_updates", "state_algo_updates", "state_or_updates", "otr_recon", "otr_tree",
                  "order_tree", app.DASHBOARD_NAME):
         assert name in built, name
     assert built["otr_nodes"].size == len(mockdata.canonical_rows(book))
     assert built["otr_breaks"].size == sum(n["Breaks"] for n in ref.values())
 
 
-def test_fix_files_with_a_system_missing(server, tmp_path):
-    """Only Raptor's log present: the other levels are empty, everything still builds."""
+def test_state_files_with_a_system_missing(server, tmp_path):
+    """Only Raptor's file present: the other levels are empty, everything still builds."""
     import shutil
 
     from order_tree_recon import app
 
-    shutil.copy(os.path.join(SAMPLES_DIR, "raptor.log"), tmp_path / "raptor.log")
-    built = app.build({"OTR_SOURCE": "fix-files", "OTR_FIX_DIR": str(tmp_path)})
+    shutil.copy(os.path.join(SAMPLES_DIR, "raptor.csv"), tmp_path / "raptor.csv")
+    built = app.build({"OTR_SOURCE": "state-files", "OTR_STATE_DIR": str(tmp_path)})
     nodes = _rows(built["otr_recon"].view(["Level", "LinkState"]))
     assert nodes and {(n["Level"], n["LinkState"]) for n in nodes} == {("CLIENT", "ROOT")}
-    assert built["fix_algo_messages"].size == 0
+    assert built["state_algo_updates"].size == 0
     assert app.DASHBOARD_NAME in built
+
+
+def test_missing_column_is_a_clear_error(server, state_book):
+    from order_tree_recon import states_dag
+
+    table = state_book["tables"]["OR"].drop_columns(["UpstreamOrderId"])
+    with pytest.raises(ValueError, match="UpstreamOrderId"):
+        states_dag.state_level_tables(config.default_topology(), state_book["cfg"], {"OR": table})

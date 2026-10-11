@@ -9,7 +9,7 @@
 # folder and no other.
 #
 # Everything main.py leaves in globals() -- raptor_orders, algo_orders, router_orders
-# (or fix_raptor_messages, fix_algo_messages, fix_or_messages with OTR_SOURCE=fix-files),
+# (or state_raptor_updates, state_algo_updates, state_or_updates with OTR_SOURCE=state-files),
 # the otr_* tables, order_tree / find_tree / exposure and order_tree_dashboard -- shows
 # up in the web IDE's Panels menu and via pydeephaven's session.open_table().
 

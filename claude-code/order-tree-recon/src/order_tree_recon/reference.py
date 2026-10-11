@@ -103,7 +103,7 @@ def reconcile(
             ``NodeKey`` replace earlier ones, as the DAG's ``last_by`` does).
         qty_tol: Absolute quantity tolerance.
         extra_ids: Optional ``(System, Id, OrderId)`` triples: further ids an order is
-            known by (a FIX order's amended-away ClOrdIDs). Indexed before the current
+            known by (amended-away ClOrdIDs from earlier order-state messages). Indexed before the current
             ids, so a current id wins a collision; triples for unknown orders are ignored.
 
     Returns:

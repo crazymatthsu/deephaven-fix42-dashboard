@@ -427,34 +427,37 @@ def _native_rows(roots: Sequence[MockOrder]) -> Tuple[List[Dict[str, Any]], List
 def canonical_rows(data: MockData) -> List[Dict[str, Any]]:
     """The python twin of :mod:`order_tree_recon.sources`' adapter views.
 
-    Same role split (an algo / router row with a blank parent id is a parent), same
-    renames, same FIX side decoding -- so the reference oracle sees exactly the rows the
-    DAG's ``nodes`` table is built from.
+    Same role split (an algo / router row with a blank or missing parent id is a parent),
+    same renames, same FIX side decoding, and a missing field is ``None`` the way a null
+    column value is -- so the reference oracle sees exactly the rows the DAG's ``nodes``
+    table is built from.
     """
     rows: List[Dict[str, Any]] = []
     for r in data.raptor:
         rows.append({
-            "Level": "CLIENT", "OrderId": r["OrderId"], "AltId": r["ClOrdID"], "LinkId": "",
-            "Moniker": r["Moniker"], "Symbol": r["Symbol"], "Side": FIX_TO_SIDE.get(r["Side"], r["Side"]),
-            "OrderQty": r["OrderQty"], "CumQty": r["CumQty"], "LeavesQty": r["LeavesQty"],
-            "AvgPx": r["AvgPx"], "Status": r["OrdStatus"], "Destination": "",
+            "Level": "CLIENT", "OrderId": r.get("OrderId"), "AltId": r.get("ClOrdID"), "LinkId": "",
+            "Moniker": r.get("Moniker"), "Symbol": r.get("Symbol"),
+            "Side": FIX_TO_SIDE.get(r.get("Side"), r.get("Side")),
+            "OrderQty": r.get("OrderQty"), "CumQty": r.get("CumQty"), "LeavesQty": r.get("LeavesQty"),
+            "AvgPx": r.get("AvgPx"), "Status": r.get("OrdStatus"), "Destination": "",
         })
     for a in data.algo:
-        is_parent = a["ParentAlgoOrderId"] == ""
+        # Same role split as the adapter: an empty *or missing* parent id is a parent.
+        is_parent = not a.get("ParentAlgoOrderId")
         rows.append({
-            "Level": "ALGO_PARENT" if is_parent else "ALGO_CHILD", "OrderId": a["AlgoOrderId"], "AltId": "",
-            "LinkId": a["RaptorOrderId"] if is_parent else a["ParentAlgoOrderId"],
-            "Moniker": "", "Symbol": a["Symbol"], "Side": a["Side"],
-            "OrderQty": a["Qty"], "CumQty": a["Filled"], "LeavesQty": a["Open"],
-            "AvgPx": a["AvgPrice"], "Status": a["State"], "Destination": a["Strategy"],
+            "Level": "ALGO_PARENT" if is_parent else "ALGO_CHILD", "OrderId": a.get("AlgoOrderId"), "AltId": "",
+            "LinkId": a.get("RaptorOrderId") if is_parent else a.get("ParentAlgoOrderId"),
+            "Moniker": "", "Symbol": a.get("Symbol"), "Side": a.get("Side"),
+            "OrderQty": a.get("Qty"), "CumQty": a.get("Filled"), "LeavesQty": a.get("Open"),
+            "AvgPx": a.get("AvgPrice"), "Status": a.get("State"), "Destination": a.get("Strategy"),
         })
     for o in data.router:
-        is_parent = o["ParentRouterOrderId"] == ""
+        is_parent = not o.get("ParentRouterOrderId")
         rows.append({
-            "Level": "OR_PARENT" if is_parent else "OR_CHILD", "OrderId": o["RouterOrderId"], "AltId": "",
-            "LinkId": o["UpstreamOrderId"] if is_parent else o["ParentRouterOrderId"],
-            "Moniker": "", "Symbol": o["Symbol"], "Side": o["Side"],
-            "OrderQty": o["Qty"], "CumQty": o["CumQty"], "LeavesQty": o["LeavesQty"],
-            "AvgPx": o["AvgPx"], "Status": o["Status"], "Destination": o["Venue"],
+            "Level": "OR_PARENT" if is_parent else "OR_CHILD", "OrderId": o.get("RouterOrderId"), "AltId": "",
+            "LinkId": o.get("UpstreamOrderId") if is_parent else o.get("ParentRouterOrderId"),
+            "Moniker": "", "Symbol": o.get("Symbol"), "Side": o.get("Side"),
+            "OrderQty": o.get("Qty"), "CumQty": o.get("CumQty"), "LeavesQty": o.get("LeavesQty"),
+            "AvgPx": o.get("AvgPx"), "Status": o.get("Status"), "Destination": o.get("Venue"),
         })
     return rows

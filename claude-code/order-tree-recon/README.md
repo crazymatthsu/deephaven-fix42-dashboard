@@ -181,6 +181,7 @@ malformed value is a startup error.
 | `OTR_FIX_CONFIG` | `/otr-fix/fix_config.json` | another mapping file (relative to `/otr-fix`); the built-in default if neither exists |
 | `OTR_AMPS_URI` | — | `amps`: the AMPS URI(s), comma separated for an HA pair |
 | `OTR_AMPS_CLIENT_NAME` | `dh-order-tree` | unique per server (a duplicate logon displaces the other) |
+| `OTR_AMPS_HEARTBEAT` | `5` | seconds between AMPS heartbeats, `0` = off; they turn a half-open connection into a reconnect + snapshot |
 | `OTR_AMPS_BROKER` | — | `local`: also start a local AMPS from `AMPS_IMAGE` and publish the samples into it |
 
 `DH_PORT` (10000), `DH_XMX` (2g) and `DH_CONTAINER` (`otr-deephaven`) move the port, the
@@ -196,9 +197,12 @@ bash run_tests.sh                                   # host suite: pure python, n
 
 pip install deephaven-server==42.4                  # ~600 MB, needs JDK 17+
 OTR_DH_TEST=1 PYTHONPATH=src python -m pytest tests # + the embedded-engine suite
+
+bash e2e/run_e2e.sh                                 # + a real AMPS: the integration test (podman, AMPS_IMAGE)
+KEEP_STACK=1 bash e2e/run_e2e.sh                    # ... and leave that stack up afterwards
 ```
 
-The host suite (132 tests) checks the python reference: every scenario's breaks, the edge
+The host suite (138 tests) checks the python reference: every scenario's breaks, the edge
 taxonomy, signed gaps, DMA linking via `AltId`, nested algo depth, `TOO_DEEP` and
 cycles, depth-first `TreePath`, both identities on every complete bucket, the filter
 builders and the mock book. It also checks the FIX / AMPS layer: the parser, the tag
@@ -217,7 +221,23 @@ bucket's `NetUnbookedQty` incrementally. For the FIX / AMPS path, it asserts:
 - the app builds with `OTR_SOURCE=fix-files` and with `OTR_SOURCE=amps` while AMPS is
   unreachable.
 
-No real AMPS broker was available to test against.
+The **integration test** (`e2e/`, 13 tests, doc 14 section 12.7) runs the AMPS path for
+real. It uses your local AMPS image under the overlay's `broker` profile, with its own
+compose project, containers and ports (10020, 39017) beside the demo. It plays the three
+systems: it publishes FIX order states to the three SOW topics, then changes them. After
+every step the engine's `otr_recon` must equal the python twin of the FIX path, row for
+row. The steps:
+- the mock book in send order;
+- a fill climbing the chain hop by hop;
+- a family arriving child-first;
+- a `sow_delete`;
+- a garbled quantity;
+- a Deephaven restart;
+- a connection dropped by heartbeat, whose re-snapshot must drop a delete it missed;
+- an AMPS restart.
+
+The embedded suite needs `deephaven-server` **and** `deephaven-plugin-ui` in one venv
+(otherwise the dashboard check fails), and an arm64 JDK 21 on Apple silicon.
 
 ---
 

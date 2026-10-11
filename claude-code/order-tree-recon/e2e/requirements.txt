@@ -1,0 +1,14 @@
+# Client-side dependencies of the order-tree AMPS integration test (doc 14 section 12.7).
+#
+# pydeephaven reads the server's tables; its version tracks the server image
+# (docker/deephaven-amps.Dockerfile -> ghcr.io/deephaven/server:42.4). Bump both together.
+pydeephaven==42.4
+# pydeephaven 42.4 builds its ticket pool with BitArray(1024), which bitstring 5.0 removed:
+# Session() raises TypeError on a fresh venv. Its own requirement is unpinned, so pin it here.
+bitstring>=4,<5
+# The publisher: the test plays Raptor, the algo server and the router from the host. Same
+# version as the image's client and the 5.3.5 broker. Wheels exist for macOS arm64, Linux
+# x86_64/aarch64 and Windows amd64.
+amps-python-client==5.3.5.7
+pyarrow>=14.0
+pytest>=8.0

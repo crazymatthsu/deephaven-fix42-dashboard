@@ -127,8 +127,11 @@ def reconcile(
         key = f"{system}|{order_id}"
         if id_ and key in nodes:
             index[(system, id_)] = key
+    # Blank ids are never indexed (the DAG filters them out of every part): a blank
+    # OrderId would otherwise become every NO_LINK node's parent.
     for node in nodes.values():
-        index[(node["System"], node["OrderId"])] = node["NodeKey"]
+        if node["OrderId"]:
+            index[(node["System"], node["OrderId"])] = node["NodeKey"]
     for node in nodes.values():
         if node["AltId"]:
             index[(node["System"], node["AltId"])] = node["NodeKey"]

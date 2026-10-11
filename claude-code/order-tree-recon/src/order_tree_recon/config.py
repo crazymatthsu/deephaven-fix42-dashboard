@@ -295,6 +295,8 @@ def parse_topology(levels: Iterable[Mapping[str, Any]], max_depth: Optional[int]
         parents = item.get("parents", [])
         if isinstance(parents, str) or not isinstance(parents, (list, tuple)):
             raise ValueError(f"topology[{name}]: 'parents' must be a list of system names")
+        if not all(isinstance(parent, str) for parent in parents):
+            raise ValueError(f"topology[{name}]: 'parents' must be a list of system names, got {parents!r}")
         if len(set(parents)) != len(parents):
             raise ValueError(f"topology[{name}]: 'parents' lists a system twice")
         street = item.get("street", False)
@@ -308,7 +310,7 @@ def parse_topology(levels: Iterable[Mapping[str, Any]], max_depth: Optional[int]
     systems = {spec.system for spec in specs}
     for spec in specs:
         for parent in spec.parents:
-            if not isinstance(parent, str) or parent not in systems:
+            if parent not in systems:
                 raise ValueError(
                     f"topology[{spec.name}]: parent system {parent!r} is not declared by any level "
                     f"(known: {sorted(systems)})"

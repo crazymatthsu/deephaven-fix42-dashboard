@@ -9,6 +9,9 @@
 # the Java client behind deephaven.barrage (doc 10 s3), and pydeephaven stays an
 # e2e-only dependency.
 pydeephaven==42.4
+# pydeephaven 42.4 builds its ticket pool with BitArray(1024), which bitstring 5.0 removed:
+# Session() raises TypeError on a fresh venv. Its own requirement is unpinned, so pin it here.
+bitstring>=4,<5
 
 # to_arrow().to_pandas() -- pyarrow arrives via pydeephaven, pinned loosely here
 # so the assertion helpers have a guaranteed pandas.

@@ -107,7 +107,10 @@ Rules that matter in a real deployment:
 
 - **Role split.** Use whatever parent/child flag your algo server and router really
   have. If an order matches two role filters, `last_by(NodeKey)` keeps the DAG alive,
-  but the order shows up at only one level.
+  but the order shows up at only one level. A blank parent id must test **null as well
+  as `""`** (`isNull(P) || P == ```): a JSON or Kafka feed omits the field, and `P == ```
+  alone is false on null, which files the parent as a child with no link (`NO_LINK`) and
+  orphans its whole subtree. The mock adapters and their python twin do this.
 - **Which id a downstream system stores.** In the mock, the algo server stores Raptor's
   `OrderId` while DMA flow stamps Raptor's outbound `ClOrdID`. Index both (`AltId`), or
   the DMA router parents come out `ORPHAN`. If a cancel/replace rotates the id a
@@ -335,7 +338,9 @@ once per level (five times over). Ladder and exposure are flat aggregations inst
 - **One filter, four tables.** Moniker and symbol are type-in combo boxes fed by
   `otr_moniker_list`/`otr_symbol_list` with a case-insensitive **prefix** match, so
   typing `du` already shows DUNE. Side is a picker. All three match the **root's**
-  attributes, and pressing an exposure row pins its exact bucket.
+  attributes. Pressing an exposure row pins its bucket **exactly** (typing returns to
+  prefix matching): under a prefix match a pinned symbol `C` would also show `CAT`,
+  `CSCO` and every other symbol starting with C.
 - **include unlinked** (default on) adds trees whose root isn't a client order (orphans)
   to a moniker search, as long as they match the symbol and side. An orphan router order
   can't inherit a moniker, and it is exactly the order a moniker search must not hide.
@@ -384,6 +389,7 @@ All values go through `sanitize_id` (doc 09's rules) before reaching a query str
 | `OTR_AMPS_URI` | — | `amps` only: the AMPS URI(s), comma separated for an HA pair, e.g. `tcp://amps-host:9007/amps/fix` |
 | `OTR_AMPS_CLIENT_NAME` | `dh-order-tree` | the client name AMPS sees (unique per server: a duplicate logon displaces the other) |
 | `OTR_AMPS_BATCH_SIZE` / `OTR_AMPS_TIMEOUT_MS` / `OTR_AMPS_MAX_PENDING` | `1000` / `10000` / `250000` | SOW batch size, command timeout, events buffered between two update cycles |
+| `OTR_AMPS_HEARTBEAT` | `5` | seconds between AMPS heartbeats (`0` = off). Without them a half-open connection stalls the feed silently; with them it drops within a couple of intervals and the reconnect snapshot repairs the book (section 12.7) |
 
 A malformed value is a startup error. The topology is code (`config.DEFAULT_LEVELS`),
 not an environment variable, because it is coupled to the adapters.
@@ -400,7 +406,7 @@ not an environment variable, because it is coupled to the adapters.
 
 - **Reference oracle.** [`reference.py`](../order-tree-recon/src/order_tree_recon/reference.py)
   computes every `otr_recon` column, the ladder and the exposure table with dicts and
-  loops. 132 host tests pin it down: every scenario's expected breaks, the edge taxonomy
+  loops. 138 host tests pin it down: every scenario's expected breaks, the edge taxonomy
   case by case, signed gaps, DMA via `AltId`, candidate order, nested algo, `TOO_DEEP`
   and cycles, depth-first `TreePath`, both identities on every complete bucket, the
   filter builders and the mock book's invariants. For the FIX order-state layer:
@@ -427,8 +433,11 @@ not an environment variable, because it is coupled to the adapters.
   - `OTR_SOURCE=fix-files` builds the app from `fix-samples/`, and `OTR_SOURCE=amps`
     comes up with empty tables while AMPS is unreachable.
 
-  Not run here: a real AMPS broker (there is none in this environment).
-  `order-tree-recon/amps/amps-config.xml` and the overlay's `broker` profile are untested.
+- **A real AMPS broker** (section 12.7): `order-tree-recon/e2e/run_e2e.sh` runs the
+  overlay's `broker` profile on a local AMPS 5.3.5 image, publishes FIX order states and
+  checks the engine against the python twin after every step, through Deephaven and AMPS
+  restarts and a connection dropped by heartbeat. Its first run found that
+  `amps-config.xml` did not load at all (a `--` inside an XML comment).
 - **Browser.** The app was loaded through the same loader path Application Mode uses
   and driven in headless Chromium: typing a prefix, pinning a bucket by row press,
   expanding a tree to the venue level, searching by a venue order id. The
@@ -483,11 +492,11 @@ five level tables.
 
 ```
 AMPS SOW topics (per system: 1..n)        order_tree_recon.amps_sow
-  raptor.orders ─────────────┐            sow_and_subscribe (oof, send_keys) per topic
-  algo.parent.orders ────────┤──────────► one blink event table per system:
-  algo.child.orders ─────────┤            Topic, SowKey, Action, Epoch, Arrival, RawFix
-  router.parent.orders ──────┤
-  router.child.orders ───────┘
+  SOW/RAPTOR/ORDERS ─────────┐            sow_and_subscribe (oof, send_keys) per topic
+  SOW/ALGO/ORDERS ───────────┤──────────► one blink event table per system:
+   (parents + children)      │            Topic, SowKey, Action, Epoch, Arrival, RawFix
+  SOW/OR/ORDERS ─────────────┘
+   (parents + venue orders)
                                           order_tree_recon.fixstate_dag
    events ── pick tags (python UDF) ──► T<tag> columns
      ├─ SOW mirror: latest per (Topic, SowKey) · oof removes · stale epochs drop
@@ -543,18 +552,18 @@ and how parent links are carried. This is `fixstate.DEFAULT_FIX_CONFIG`, also
 
 ```json
 {"systems": [
-  {"system": "RAPTOR", "topics": ["raptor.orders"], "files": ["raptor.*.fix"],
+  {"system": "RAPTOR", "topics": ["SOW/RAPTOR/ORDERS"], "files": ["SOW.RAPTOR.*.fix"],
    "levels": [
      {"level": "CLIENT"}
   ]},
-  {"system": "ALGO", "topics": ["algo.parent.orders", "algo.child.orders"], "files": ["algo.*.fix"], "tags": {"Destination": "847"},
+  {"system": "ALGO", "topics": ["SOW/ALGO/ORDERS"], "files": ["SOW.ALGO.*.fix"], "tags": {"Destination": "847"},
    "levels": [
-     {"level": "ALGO_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+     {"level": "ALGO_CHILD", "when": {"tag": "26009"}, "link_tag": "26009"},
      {"level": "ALGO_PARENT", "link_tag": "11"}
   ]},
-  {"system": "OR", "topics": ["router.parent.orders", "router.child.orders"], "files": ["router.*.fix"],
+  {"system": "OR", "topics": ["SOW/OR/ORDERS"], "files": ["SOW.OR.*.fix"],
    "levels": [
-     {"level": "OR_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+     {"level": "OR_CHILD", "when": {"tag": "26009"}, "link_tag": "26009"},
      {"level": "OR_PARENT", "link_tag": "11"}
   ]}
 ]}
@@ -565,7 +574,14 @@ How to read it:
 - **Cross-system links.** The parent link is the downstream order's own ClOrdID (11):
   the id the upstream sent it with, which the upstream reports as its OrderID (37) or one
   of its ClOrdIDs (11 / 41).
-- **In-system links.** An in-system child names its parent in a custom tag (20001 here).
+- **In-system links.** An in-system child names its parent's OrderID in tag 26009; a
+  parent leaves 26009 null. That also tells parents from children in a shared topic:
+  `SOW/ALGO/ORDERS` holds algo parents and their slices, `SOW/OR/ORDERS` router parents and
+  their venue orders. The first level's `when` (a non-empty 26009) picks the children and
+  the default level the parents, and an absent tag and an empty `26009=` both read as null.
+- **Files.** A file name can't hold the `/` of a topic, so the file source labels events
+  with the file name minus `.fix` (`SOW.ALGO.ORDERS.fix` -> `SOW.ALGO.ORDERS`), and the
+  samples are named that way.
 - **Levels.** Each level is chosen by its `when`. The first match wins, and a level
   without `when` is the system's default.
 
@@ -674,14 +690,53 @@ mirror and fold. With a locally built AMPS image (`AMPS_IMAGE`, as in doc 10),
 `OTR_SOURCE=amps OTR_AMPS_BROKER=local bash order-tree-recon/scripts/run_demo.sh` does three
 things:
 
-- starts a broker with the five SOW topics keyed on `/37` (`order-tree-recon/amps/amps-config.xml`);
+- starts a broker with the three SOW topics keyed on `/37` (`order-tree-recon/amps/amps-config.xml`);
 - builds the AMPS-enabled server;
 - publishes the samples with `python -m order_tree_recon.fixstate_mock --publish`.
   `OTR_PUBLISH_DELAY_MS=20 bash order-tree-recon/scripts/run_demo.sh publish` replays them
   slowly enough to watch the tree tick.
 
-This broker setup has not been run here: there is no AMPS in this environment. Check the
-config with `ampServer --verify-config` first.
+The broker setup is exercised by the integration test below, and its config passes
+`ampServer --verify-config` on 5.3.5.135.
+
+### 12.7 The integration test against a real AMPS
+
+```bash
+bash order-tree-recon/e2e/run_e2e.sh              # down -v -> up -> pytest -> down -v
+KEEP_STACK=1 bash order-tree-recon/e2e/run_e2e.sh # leave the stack and the book up
+```
+
+It runs this section's own setup:
+- the base compose file plus the AMPS overlay, profile `broker`, with your AMPS image
+  (`AMPS_IMAGE`);
+- `fix-samples/fix_config.json` as the mapping;
+- its own compose project (`order-tree-amps-e2e`), containers (`otr-e2e-deephaven`,
+  `otr-e2e-amps`) and ports (10020, 39017), so it never touches the demo.
+
+It starts from `down -v` and refuses a broker config that fails `--verify-config`. Then
+`test_order_tree_amps_e2e.py` plays the three systems from a host venv
+(`pydeephaven==42.4`, `amps-python-client==5.3.5.7`). It publishes FIX order states to
+the three SOW topics and `sow_delete`s records, keeping a log of every event the server
+should have seen. The oracle is the module's python twin of this path
+(`fixstate.fold_events`, then `reference.reconcile`). After **every** step the engine's
+`otr_recon` must equal it row for row, column for column. Every step changes the book,
+so the state before a step can't satisfy the check for it.
+
+| # | Test | Proves |
+|---|---|---|
+| 1 | `the_app_is_subscribed_to_every_topic` | a completed snapshot on `SOW/RAPTOR/ORDERS`, `SOW/ALGO/ORDERS` and `SOW/OR/ORDERS` |
+| 2 | `an_empty_sow_is_an_empty_book` | starts clean, even on a stack someone left running |
+| 3 | `the_mock_book_matches_the_reference_row_for_row` | the mock book's 340 orders, in send order (accept, cancel/replace, partial and final fills, cancels), with the same breaks as the table path |
+| 4 | `ladder_and_exposure_match_the_reference` | every ladder and exposure row |
+| 5 | `the_query_api_works_over_the_amps_book` | `order_tree`, `find_tree` from a venue id |
+| 6 | `a_fill_climbs_the_chain_one_hop_at_a_time` | each hop's edge is `UNBOOKED_FILL` until the next system up publishes the fill; `NetUnbookedQty` 100 until the client order does |
+| 7 | `orders_arriving_child_first_link_up_when_their_parents_land` | router first is `ORPHAN` and unattributed; algo second still roots at an orphan algo parent; Raptor last links all 6 under the moniker |
+| 8 | `sow_delete_removes_an_order_and_reopens_its_edge` | the OOF removes the venue order; the router parent is `PHANTOM_FILL` until it is republished |
+| 9 | `a_garbled_quantity_folds_to_null_on_both_sides` | `151=lots` reads as null (0 in every sum) in the engine and the twin alike; the next good message flows |
+| 10 | `a_restarted_deephaven_rebuilds_the_book_from_the_sow` | identical book from one snapshot per topic (epoch 1), no other upserts |
+| 11 | `a_dropped_connection_resyncs_the_deletes_it_missed` | Deephaven paused past the heartbeat. AMPS drops it, and a delete and a fill happen meanwhile. The re-snapshot (a new epoch) drops the deleted record and lands the fill. With `OTR_AMPS_HEARTBEAT=0` this test fails (checked): AMPS keeps the frozen client's connection open, nothing reconnects, and the resync path never runs |
+| 12 | `a_restarted_amps_is_resubscribed` | the SOW survives on its volume, the HA client re-snapshots, a new fill flows |
+| 13 | `every_snapshot_completed_and_the_client_is_connected` | per topic: connected, `snapshots == Epoch` |
 
 ## 13. Using the module in another project
 
@@ -744,7 +799,7 @@ order-tree-recon/
 ├── README.md                    # runbook
 ├── build.gradle.kts / pyproject.toml / run_tests.sh
 ├── fix-samples/                 # the mock book as FIX order states, one file per SOW topic + fix_config.json
-├── amps/amps-config.xml         # a local AMPS with the five SOW topics (section 12.6)
+├── amps/amps-config.xml         # a local AMPS with the three SOW topics (section 12.6)
 ├── scripts/run_demo.sh          # podman compose up | down | status | logs
 ├── scripts/export_standalone.sh # section 13
 ├── src/order_tree_recon/
@@ -763,5 +818,6 @@ order-tree-recon/
 │   ├── dag.py                   # section 4
 │   ├── dashboard.py             # section 7
 │   └── app.py                   # Application-Mode entrypoint (OTR_SOURCE=mock | amps | fix-files)
-└── tests/                       # host suite + the opt-in embedded-engine suite
+├── tests/                       # host suite + the opt-in embedded-engine suite
+└── e2e/                         # the integration test against a real AMPS (section 12.7)
 ```

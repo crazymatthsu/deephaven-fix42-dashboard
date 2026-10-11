@@ -21,6 +21,12 @@ new snapshot (a new epoch) re-sends every live record, and at its ``group_end`` 
 drops whatever was not re-sent -- records deleted while disconnected, for which no ``oof``
 could arrive.
 
+The client asks for **heartbeats** (``OTR_AMPS_HEARTBEAT``, 5 s): without them a half-open
+connection (a dropped firewall session, a frozen peer) stalls the feed silently, with no
+disconnect for the HA client to act on. With them both sides drop it within a couple of
+intervals and the re-snapshot above repairs the book. The integration test proves it by
+pausing the Deephaven container past the timeout (``e2e/``, doc 14 section 12.7).
+
 The bridge is the one ``dh_app/amps_ingest.py`` uses for the FIX pipeline::
 
     AMPS receive thread             EventBuffer (per system)     update-graph thread
@@ -48,6 +54,7 @@ __all__ = [
     "BATCH_SIZE_ENV",
     "TIMEOUT_ENV",
     "MAX_PENDING_ENV",
+    "HEARTBEAT_ENV",
     "SUBSCRIBE_OPTIONS",
     "COMMAND_ACTIONS",
     "AmpsSettings",
@@ -61,11 +68,14 @@ CLIENT_NAME_ENV = "OTR_AMPS_CLIENT_NAME"
 BATCH_SIZE_ENV = "OTR_AMPS_BATCH_SIZE"
 TIMEOUT_ENV = "OTR_AMPS_TIMEOUT_MS"
 MAX_PENDING_ENV = "OTR_AMPS_MAX_PENDING"
+HEARTBEAT_ENV = "OTR_AMPS_HEARTBEAT"
 
 DEFAULT_CLIENT_NAME = "dh-order-tree"
 DEFAULT_BATCH_SIZE = 1000
 DEFAULT_TIMEOUT_MS = 10_000
 DEFAULT_MAX_PENDING = 250_000
+#: Seconds between AMPS heartbeats; 0 turns them off.
+DEFAULT_HEARTBEAT = 5
 #: ``oof``: deletes / expiries arrive as ``oof``; ``send_keys``: publishes carry the SowKey.
 SUBSCRIBE_OPTIONS = "oof,send_keys"
 
@@ -100,7 +110,7 @@ class AmpsSettings:
 
     def __init__(self, uris: Sequence[str], client_name: str = DEFAULT_CLIENT_NAME,
                  batch_size: int = DEFAULT_BATCH_SIZE, timeout_ms: int = DEFAULT_TIMEOUT_MS,
-                 max_pending: int = DEFAULT_MAX_PENDING) -> None:
+                 max_pending: int = DEFAULT_MAX_PENDING, heartbeat: int = DEFAULT_HEARTBEAT) -> None:
         if not uris:
             raise ValueError(f"{URI_ENV}: at least one AMPS URI is required, e.g. tcp://amps-host:9007/amps/fix")
         self.uris = tuple(uris)
@@ -108,6 +118,12 @@ class AmpsSettings:
         self.batch_size = batch_size
         self.timeout_ms = timeout_ms
         self.max_pending = max_pending
+        self.heartbeat = heartbeat
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, AmpsSettings) and vars(self) == vars(other)
+
+    __hash__ = None  # type: ignore[assignment]  # mutable attributes; equality only
 
     @classmethod
     def from_env(cls, environ: Optional[Mapping[str, str]] = None) -> "AmpsSettings":
@@ -119,12 +135,14 @@ class AmpsSettings:
             _int_env(env, BATCH_SIZE_ENV, DEFAULT_BATCH_SIZE, 1),
             _int_env(env, TIMEOUT_ENV, DEFAULT_TIMEOUT_MS, 0),
             _int_env(env, MAX_PENDING_ENV, DEFAULT_MAX_PENDING, 1),
+            _int_env(env, HEARTBEAT_ENV, DEFAULT_HEARTBEAT, 0),
         )
 
     def describe(self) -> str:
         """For the log: the URIs with any password masked."""
         uris = ", ".join(_CREDENTIALS.sub(r"\1:****@", u) for u in self.uris)
-        return f"{uris} as {self.client_name} (batch {self.batch_size}, timeout {self.timeout_ms} ms)"
+        heartbeat = f"heartbeat {self.heartbeat} s" if self.heartbeat else "no heartbeat"
+        return f"{uris} as {self.client_name} (batch {self.batch_size}, timeout {self.timeout_ms} ms, {heartbeat})"
 
 
 class EventBuffer:
@@ -180,6 +198,8 @@ def _default_client_factory(settings: AmpsSettings) -> Any:
     for uri in settings.uris:
         chooser.add(uri)
     client.set_server_chooser(chooser)
+    if settings.heartbeat:
+        client.set_heartbeat(settings.heartbeat)
     return client
 
 
@@ -396,7 +416,13 @@ class AmpsSowSource:
             traceback.print_exc()
 
     def _on_connection_state(self, state: Any) -> None:
-        print(f"[order-tree] AMPS connection state: {state}", flush=True)
+        # The python client passes True on connect and False on disconnect (before logon and
+        # resubscription, so "connected" can precede the re-snapshot).
+        connected = bool(state)
+        if connected != self.connected:
+            print(f"[order-tree] AMPS {'connected' if connected else 'disconnected'}: "
+                  f"{self.settings.describe()}", flush=True)
+        self.connected = connected
 
 
 #: Strong references: a collected source takes its AMPS client -- and the streams -- with it.
@@ -404,7 +430,21 @@ _ACTIVE: List[AmpsSowSource] = []
 
 
 def start_source(config: FixStateConfig, settings: AmpsSettings, background: bool = True, **kwargs: Any) -> AmpsSowSource:
-    """Create, start and keep alive an :class:`AmpsSowSource`; its ``tables`` are ready at once."""
+    """Create, start and keep alive an :class:`AmpsSowSource`; its ``tables`` are ready at once.
+
+    Idempotent: the app script re-run in a console (after a failed build, say) gets the
+    running source back. Two HA clients under one client name would displace each other's
+    logon and reconnect forever, so a running source with the same name but another
+    mapping or other settings is stopped first.
+    """
+    for running in list(_ACTIVE):
+        if running.settings.client_name != settings.client_name:
+            continue
+        if running.settings == settings and running.config == config:
+            print(f"[order-tree] AMPS source already running: {settings.describe()}", flush=True)
+            return running
+        running.stop()
+        _ACTIVE.remove(running)
     source = AmpsSowSource(config, settings, **kwargs)
     source.start(background=background)
     _ACTIVE.append(source)

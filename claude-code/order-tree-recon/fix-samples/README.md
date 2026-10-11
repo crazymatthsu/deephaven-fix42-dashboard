@@ -7,13 +7,11 @@ what `run_demo.sh publish` loads into a local AMPS, and the mapping `OTR_SOURCE=
 when you don't supply your own. The FIX layer is described in
 [docs/14 section 12](../../docs/14-order-tree-reconciliation.md#12-fix-order-states-from-amps-sow-topics).
 
-| File (= SOW topic) | System | Orders |
-|---|---|---|
-| `raptor.orders.fix` | `RAPTOR` | client orders: `37` Raptor OrderID, `11` the client's ClOrdID, `1` moniker (Account) |
-| `algo.parent.orders.fix` | `ALGO` | algo parents: `11` = the Raptor OrderID they were sent with, `847` strategy |
-| `algo.child.orders.fix` | `ALGO` | algo slices: `20001` = the parent's OrderID |
-| `router.parent.orders.fix` | `OR` | router parents: `11` = the algo child id, or the client ClOrdID for DMA |
-| `router.child.orders.fix` | `OR` | venue orders: `20001` = the router parent, `100` venue |
+| File | SOW topic | System | Orders |
+|---|---|---|---|
+| `SOW.RAPTOR.ORDERS.fix` | `SOW/RAPTOR/ORDERS` | `RAPTOR` | client orders: `37` Raptor OrderID, `11` the client's ClOrdID, `1` moniker (Account) |
+| `SOW.ALGO.ORDERS.fix` | `SOW/ALGO/ORDERS` | `ALGO` | algo parents (`26009` null; `11` = the Raptor OrderID they were sent with, `847` strategy) and algo slices (`26009` = the parent's OrderID) |
+| `SOW.OR.ORDERS.fix` | `SOW/OR/ORDERS` | `OR` | router parents (`26009` null; `11` = the algo child id, or the client ClOrdID for DMA) and venue orders (`26009` = the router parent, `100` venue) |
 | `fix_config.json` | | the mapping these follow (= `fixstate.DEFAULT_FIX_CONFIG`) |
 
 One message per line, each the order's **complete** state, as AMPS delivers a `fix` topic:

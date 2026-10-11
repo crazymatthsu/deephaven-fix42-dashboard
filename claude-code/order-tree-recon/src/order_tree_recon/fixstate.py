@@ -32,12 +32,16 @@ The mapping config (JSON)
 Standard FIX tags are the defaults, so a system usually only lists its topics and levels::
 
     {"systems": [
-      {"system": "RAPTOR", "topics": ["raptor.orders"], "levels": [{"level": "CLIENT"}]},
-      {"system": "ALGO", "topics": ["algo.parent.orders", "algo.child.orders"],
-       "tags": {"Destination": "847"},
-       "levels": [{"level": "ALGO_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+      {"system": "RAPTOR", "topics": ["SOW/RAPTOR/ORDERS"], "levels": [{"level": "CLIENT"}]},
+      {"system": "ALGO", "topics": ["SOW/ALGO/ORDERS"], "tags": {"Destination": "847"},
+       "levels": [{"level": "ALGO_CHILD", "when": {"tag": "26009"}, "link_tag": "26009"},
                   {"level": "ALGO_PARENT", "link_tag": "11"}]},
       ...]}
+
+A system's parents and children can share one topic: the ``when`` rule tells them apart.
+Here a child carries its parent's OrderID in tag 26009 and a parent leaves 26009 null, so
+the first rule (``when`` a non-empty 26009) picks the children and the default rule the
+parents -- an absent tag and an empty one (``26009=``) both read as null.
 
 Per system: ``topics`` (AMPS SOW topics), ``files`` (globs for the file source), ``filter``
 (an AMPS content filter), ``order_id_tag`` "37", ``alt_id_tag`` "11", ``id_tags``
@@ -116,14 +120,14 @@ DEFAULT_TAGS: Dict[str, str] = {
 #: The mapping fix-samples/ and the demo follow. Your topics and tags will differ.
 DEFAULT_FIX_CONFIG: Dict[str, Any] = {
     "systems": [
-        {"system": "RAPTOR", "topics": ["raptor.orders"], "files": ["raptor.*.fix"],
+        {"system": "RAPTOR", "topics": ["SOW/RAPTOR/ORDERS"], "files": ["SOW.RAPTOR.*.fix"],
          "levels": [{"level": "CLIENT"}]},
-        {"system": "ALGO", "topics": ["algo.parent.orders", "algo.child.orders"], "files": ["algo.*.fix"],
+        {"system": "ALGO", "topics": ["SOW/ALGO/ORDERS"], "files": ["SOW.ALGO.*.fix"],
          "tags": {"Destination": "847"},
-         "levels": [{"level": "ALGO_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+         "levels": [{"level": "ALGO_CHILD", "when": {"tag": "26009"}, "link_tag": "26009"},
                     {"level": "ALGO_PARENT", "link_tag": "11"}]},
-        {"system": "OR", "topics": ["router.parent.orders", "router.child.orders"], "files": ["router.*.fix"],
-         "levels": [{"level": "OR_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+        {"system": "OR", "topics": ["SOW/OR/ORDERS"], "files": ["SOW.OR.*.fix"],
+         "levels": [{"level": "OR_CHILD", "when": {"tag": "26009"}, "link_tag": "26009"},
                     {"level": "OR_PARENT", "link_tag": "11"}]},
     ]
 }
@@ -425,6 +429,8 @@ def read_fix_messages(path: str) -> List[str]:
 
 
 def _topic_of(path: str) -> str:
+    """A file's topic label: its name without the extension (``SOW.ALGO.ORDERS.fix`` ->
+    ``SOW.ALGO.ORDERS``; a file name can't hold the ``/`` of ``SOW/ALGO/ORDERS``)."""
     name = os.path.basename(path)
     return name.rsplit(".", 1)[0] if "." in name else name
 

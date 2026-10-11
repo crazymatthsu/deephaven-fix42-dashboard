@@ -8,7 +8,8 @@ each level comes out with ``config.CANONICAL_COLUMNS``. Nothing downstream chang
 The adapter rules that matter:
 
 * **role split** -- the algo server and the router keep parents and children in one table;
-  a row with no parent id is a parent. Use whatever flag your system really has.
+  a row with no parent id (empty *or null*: a JSON feed omits the field) is a parent. Use
+  whatever flag your system really has.
 * **LinkId** -- the id this order carries *for its parent*: the external order id for a
   cross-system hop (algo parent -> Raptor, router parent -> algo child or Raptor), the
   parent order id inside one system (algo child -> algo parent, venue order -> router
@@ -78,8 +79,10 @@ def native_tables(data: MockData) -> Dict[str, Table]:
 
 def adapters(raptor: Table, algo: Table, router: Table) -> Dict[str, Table]:
     """Map the native tables onto one canonical table per default-topology level."""
-    algo_parent = "ParentAlgoOrderId == ``"
-    router_parent = "ParentRouterOrderId == ``"
+    # A null parent id is a parent too: `== ``` alone is false on null, which would file
+    # the order as a child with no link (NO_LINK) and orphan its whole subtree.
+    algo_parent = "isNull(ParentAlgoOrderId) || ParentAlgoOrderId == ``"
+    router_parent = "isNull(ParentRouterOrderId) || ParentRouterOrderId == ``"
     algo_common: List[str] = [
         "OrderId = AlgoOrderId",
         "AltId = ``",

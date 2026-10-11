@@ -8,6 +8,7 @@ Deephaven-free.
 
 from __future__ import annotations
 
+import faulthandler
 import os
 
 import pytest
@@ -19,6 +20,12 @@ deephaven_server = pytest.importorskip("deephaven_server")
 
 @pytest.fixture(scope="module")
 def server():
+    # The JVM traps SIGSEGV itself (safepoint polls, implicit null checks). pytest enabled
+    # faulthandler before the JVM existed, and its faulthandler.disable() at session end
+    # would restore those pre-JVM default handlers under Deephaven's atexit shutdown (Jetty
+    # stop), killing the process with 139 after every test passed. Off before the JVM starts,
+    # that disable() is a no-op (conftest.py's pytest_unconfigure covers a re-enable).
+    faulthandler.disable()
     srv = deephaven_server.Server(port=0, jvm_args=["-Xmx1g"])
     srv.start()
     yield srv

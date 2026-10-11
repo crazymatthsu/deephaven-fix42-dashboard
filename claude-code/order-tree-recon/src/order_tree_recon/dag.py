@@ -473,7 +473,7 @@ def build_order_tree(
         "otr_level_ladder": _ladder(recon, exposure),
         "otr_exposure": exposure,
         "otr_breaks": recon.where(red).sort(["RootMoniker", "RootSymbol", "RootSide", "TreePath"]),
-        "otr_break_summary": recon.where(f"BreakKind != `NONE`").count_by("Count", by=["Level", "BreakKind"]),
+        "otr_break_summary": recon.where("BreakKind != `NONE`").count_by("Count", by=["Level", "BreakKind"]),
         "otr_moniker_list": recon.where("RootMoniker != ``").select_distinct(["RootMoniker"]).sort(["RootMoniker"]),
         "otr_symbol_list": recon.select_distinct(["RootSymbol"]).sort(["RootSymbol"]),
         "otr_side_list": recon.select_distinct(["RootSide"]).sort(["RootSide"]),

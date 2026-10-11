@@ -17,14 +17,23 @@ between, so ``OR_PARENT`` lists ``ALGO`` first and ``RAPTOR`` second.
 Environment (all optional, read once at app start; a malformed value is a startup
 error, never a silent fallback -- the same rule every app in this repo follows):
 
-========================  ========  =================================================
-Variable                  Default   Meaning
-========================  ========  =================================================
-``OTR_QTY_TOL``           ``1e-6``  absolute tolerance for every quantity comparison
-``OTR_SEED``              ``42``    mock data seed
-``OTR_MOCK_FAMILIES``     ``24``    random clean/working/DMA families on top of the
-                                    fixed scenario catalog
-========================  ========  =================================================
+=========================  ==============================  ===================================
+Variable                   Default                         Meaning
+=========================  ==============================  ===================================
+``OTR_QTY_TOL``            ``1e-6``                        absolute tolerance for every
+                                                           quantity comparison
+``OTR_SEED``               ``42``                          mock data seed
+``OTR_MOCK_FAMILIES``      ``24``                          random clean/working/DMA families
+                                                           on top of the scenario catalog
+``OTR_SOURCE``             ``mock``                        ``mock`` tables, or ``amps`` SOW
+                                                           topics (doc 14 section 13)
+``OTR_AMPS_URI``           ``tcp://amps:9007/amps/json``   broker URI(s), comma separated for
+                                                           an HA pair; JSON message type
+``OTR_AMPS_TOPIC_PREFIX``  ``otr.``                        topic = prefix + native table name
+``OTR_AMPS_CLIENT_NAME``   ``otr-deephaven``               AMPS client name (unique per
+                                                           server: a duplicate logon displaces
+                                                           the older connection)
+=========================  ==============================  ===================================
 """
 
 from __future__ import annotations
@@ -58,16 +67,38 @@ __all__ = [
     "qty_tolerance",
     "seed",
     "mock_families",
+    "SOURCE_ENV",
+    "AMPS_URI_ENV",
+    "AMPS_TOPIC_PREFIX_ENV",
+    "AMPS_CLIENT_NAME_ENV",
+    "SOURCES",
+    "DEFAULT_AMPS_URI",
+    "DEFAULT_AMPS_TOPIC_PREFIX",
+    "DEFAULT_AMPS_CLIENT_NAME",
+    "AmpsSettings",
+    "source",
+    "amps_settings",
 ]
 
 QTY_TOL_ENV = "OTR_QTY_TOL"
 SEED_ENV = "OTR_SEED"
 MOCK_FAMILIES_ENV = "OTR_MOCK_FAMILIES"
+SOURCE_ENV = "OTR_SOURCE"
+AMPS_URI_ENV = "OTR_AMPS_URI"
+AMPS_TOPIC_PREFIX_ENV = "OTR_AMPS_TOPIC_PREFIX"
+AMPS_CLIENT_NAME_ENV = "OTR_AMPS_CLIENT_NAME"
 
 #: Shares are integral, so anything below one share is "equal"; 1e-6 matches doc 09.
 DEFAULT_QTY_TOL = 1e-6
 DEFAULT_SEED = 42
 DEFAULT_MOCK_FAMILIES = 24
+
+#: Where the three native order tables come from: built-in mock tables, or AMPS SOW topics.
+SOURCES: Tuple[str, ...] = ("mock", "amps")
+#: In-network address of the compose ``amps`` service; ``/amps/json`` picks the message type.
+DEFAULT_AMPS_URI = "tcp://amps:9007/amps/json"
+DEFAULT_AMPS_TOPIC_PREFIX = "otr."
+DEFAULT_AMPS_CLIENT_NAME = "otr-deephaven"
 
 #: Raptor -> algo (parent, children) -> order router (parent, children on venues).
 #: ``street`` marks the level whose orders are live on an exchange: its open quantity
@@ -270,6 +301,8 @@ def parse_topology(levels: Iterable[Mapping[str, Any]], max_depth: Optional[int]
         parents = item.get("parents", [])
         if isinstance(parents, str) or not isinstance(parents, (list, tuple)):
             raise ValueError(f"topology[{name}]: 'parents' must be a list of system names")
+        if not all(isinstance(parent, str) for parent in parents):
+            raise ValueError(f"topology[{name}]: 'parents' must be a list of system names, got {parents!r}")
         if len(set(parents)) != len(parents):
             raise ValueError(f"topology[{name}]: 'parents' lists a system twice")
         street = item.get("street", False)
@@ -283,7 +316,7 @@ def parse_topology(levels: Iterable[Mapping[str, Any]], max_depth: Optional[int]
     systems = {spec.system for spec in specs}
     for spec in specs:
         for parent in spec.parents:
-            if not isinstance(parent, str) or parent not in systems:
+            if parent not in systems:
                 raise ValueError(
                     f"topology[{spec.name}]: parent system {parent!r} is not declared by any level "
                     f"(known: {sorted(systems)})"
@@ -339,3 +372,55 @@ def seed(environ: Optional[Mapping[str, str]] = None) -> int:
 def mock_families(environ: Optional[Mapping[str, str]] = None) -> int:
     """``OTR_MOCK_FAMILIES`` -- random families added on top of the scenario catalog."""
     return _int_env(MOCK_FAMILIES_ENV, DEFAULT_MOCK_FAMILIES, 0, environ)
+
+
+def source(environ: Optional[Mapping[str, str]] = None) -> str:
+    """``OTR_SOURCE`` -- ``mock`` (the default) or ``amps``."""
+    raw = _env(environ).get(SOURCE_ENV, "").strip().lower()
+    if not raw:
+        return SOURCES[0]
+    if raw not in SOURCES:
+        raise ValueError(f"{SOURCE_ENV}={raw!r}: expected one of {list(SOURCES)}")
+    return raw
+
+
+#: ``tcp://host:port/amps/json`` (or ``tcps://``): the codec speaks JSON only.
+_AMPS_URI_RE = re.compile(r"^tcps?://[^\s/]+:\d+/amps/json$")
+#: Topic prefixes and client names travel in AMPS commands: keep them plain.
+_AMPS_NAME_RE = re.compile(r"^[A-Za-z0-9_.:/-]*$")
+
+
+@dataclass(frozen=True)
+class AmpsSettings:
+    """Where the AMPS source connects, and under which name (doc 14 section 13).
+
+    Attributes:
+        uris: Broker URIs; more than one is an HA list the client fails over across.
+        topic_prefix: Topic = prefix + native table name (``otr.router_orders``).
+        client_name: The client name AMPS sees.
+    """
+
+    uris: Tuple[str, ...]
+    topic_prefix: str
+    client_name: str
+
+    def describe(self) -> str:
+        return f"{','.join(self.uris)} topics={self.topic_prefix}<table> client={self.client_name}"
+
+
+def amps_settings(environ: Optional[Mapping[str, str]] = None) -> AmpsSettings:
+    """``OTR_AMPS_URI`` / ``OTR_AMPS_TOPIC_PREFIX`` / ``OTR_AMPS_CLIENT_NAME``, validated."""
+    env = _env(environ)
+    raw_uris = env.get(AMPS_URI_ENV, "").strip()
+    uris = tuple(part for part in raw_uris.replace(",", " ").split() if part) or (DEFAULT_AMPS_URI,)
+    for uri in uris:
+        if not _AMPS_URI_RE.match(uri):
+            raise ValueError(f"{AMPS_URI_ENV}={raw_uris!r}: expected tcp://host:port/amps/json, got {uri!r}")
+    prefix = env.get(AMPS_TOPIC_PREFIX_ENV)
+    prefix = DEFAULT_AMPS_TOPIC_PREFIX if prefix is None else prefix.strip()
+    if not _AMPS_NAME_RE.match(prefix):
+        raise ValueError(f"{AMPS_TOPIC_PREFIX_ENV}={prefix!r}: letters, digits and _ . : / - only")
+    client_name = env.get(AMPS_CLIENT_NAME_ENV, "").strip() or DEFAULT_AMPS_CLIENT_NAME
+    if not _AMPS_NAME_RE.match(client_name):
+        raise ValueError(f"{AMPS_CLIENT_NAME_ENV}={client_name!r}: letters, digits and _ . : / - only")
+    return AmpsSettings(uris, prefix, client_name)

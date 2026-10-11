@@ -1,11 +1,14 @@
-"""Entry point: mock native tables -> adapters -> order-tree DAG -> query API -> dashboard.
+"""Entry point: native tables -> adapters -> order-tree DAG -> query API -> dashboard.
 
 Works in **Application Mode** (``docker/apps/order-tree-recon/`` points at this file
 through the shared loader) and when exec'd in a Deephaven console. Everything it builds
 is published as a module-level global, so it shows up in the IDE's Panels menu and is
 reachable from ``pydeephaven``.
 
-To run it over real tables, replace the three ``native`` tables below with your own and
+``OTR_SOURCE`` picks where the three native tables come from: ``mock`` builds them from
+:mod:`order_tree_recon.mockdata`; ``amps`` reads each system's AMPS SOW topic
+(:mod:`order_tree_recon.amps_source`, doc 14 section 13) and also exports
+``otr_amps_status``. To run it over other tables, replace the ``native`` tables below and
 edit :func:`order_tree_recon.sources.adapters` -- the DAG, the API and the dashboard are
 unchanged (doc 14 section 3).
 
@@ -28,7 +31,7 @@ for _candidate in (_SRC_DIR, "/otr-scripts"):
         sys.path.insert(0, _candidate)
 
 import traceback  # noqa: E402
-from typing import Any, Dict, Mapping, MutableMapping, Optional  # noqa: E402
+from typing import Any, Dict, Mapping, MutableMapping, Optional, Tuple  # noqa: E402
 
 import order_tree_recon  # noqa: E402
 from order_tree_recon import config, dag, mockdata, query_api, sources  # noqa: E402
@@ -39,18 +42,33 @@ DASHBOARD_NAME = "order_tree_dashboard"
 _RUNTIME_ATTR = "_ORDER_TREE_GLOBALS"
 
 
+def _native(environ: Optional[Mapping[str, str]]) -> Tuple[Dict[str, Any], Dict[str, Any], str]:
+    """``(native tables, extra globals, banner line)`` for the configured ``OTR_SOURCE``."""
+    if config.source(environ) == "amps":
+        from order_tree_recon import amps_source
+
+        settings = config.amps_settings(environ)
+        feed = amps_source.start(settings)
+        return dict(feed.tables), {"otr_amps_status": feed.status_table}, f"source: amps {settings.describe()}"
+    data = mockdata.generate(config.seed(environ), config.mock_families(environ))
+    banner = (
+        f"source: mock seed={config.seed(environ)} families={config.mock_families(environ)} -> "
+        f"{len(data.raptor)} raptor / {len(data.algo)} algo / {len(data.router)} router orders"
+    )
+    return sources.native_tables(data), {}, banner
+
+
 def build(environ: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """Build every global: native tables, ``otr_*`` tables, the API, the dashboard."""
     topology = config.default_topology()
     tol = config.qty_tolerance(environ)
-    data = mockdata.generate(config.seed(environ), config.mock_families(environ))
 
-    native = sources.native_tables(data)
+    native, extra, source_banner = _native(environ)
     level_tables = sources.adapters(native["raptor_orders"], native["algo_orders"], native["router_orders"])
     tables = dag.build_order_tree(topology, level_tables, tol)
     api = query_api.make_query_api(tables)
 
-    built: Dict[str, Any] = {**native, **tables, **api}
+    built: Dict[str, Any] = {**native, **extra, **tables, **api}
     try:
         from order_tree_recon.dashboard import build_dashboard
 
@@ -64,12 +82,7 @@ def build(environ: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     print("[order-tree] topology:", flush=True)
     for line in topology.describe():
         print(f"[order-tree]   {line}", flush=True)
-    print(
-        f"[order-tree] mock: seed={config.seed(environ)} families={config.mock_families(environ)} -> "
-        f"{len(data.raptor)} raptor / {len(data.algo)} algo / {len(data.router)} router orders; "
-        f"qty tolerance {tol}",
-        flush=True,
-    )
+    print(f"[order-tree] {source_banner}; qty tolerance {tol}", flush=True)
     print(f"[order-tree] tree panel: {'otr_tree' if 'otr_tree' in tables else 'UNAVAILABLE'}; "
           f"dashboard: {DASHBOARD_NAME if DASHBOARD_NAME in built else 'UNAVAILABLE'}", flush=True)
     return built

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 
 import pytest
 
@@ -41,6 +40,8 @@ def test_describe_lists_every_level():
         ([{"name": "A", "system": "S", "parents": "S"}], "'parents' must be a list"),
         ([{"name": "A", "system": "S"}, {"name": "B", "system": "T", "parents": ["S", "S"]}], "lists a system twice"),
         ([{"name": "A", "system": "S"}, {"name": "B", "system": "T", "parents": ["X"]}], "not declared by any level"),
+        # an unhashable entry used to escape as a TypeError from set(parents)
+        ([{"name": "A", "system": "S"}, {"name": "B", "system": "T", "parents": [["S"]]}], "list of system names"),
         ([{"name": "A", "system": "S", "parents": ["S"]}], "at least one root level"),
         ([{"name": "A", "system": "S", "street": True}], "root level cannot be a street level"),
         ([{"name": "A", "system": "S"}, {"name": "B", "system": "T", "parents": ["S"], "street": "yes"}], "true/false"),

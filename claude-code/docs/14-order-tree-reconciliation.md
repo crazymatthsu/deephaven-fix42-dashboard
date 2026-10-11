@@ -95,17 +95,22 @@ table, with different column names:
 "CLIENT":      raptor.update_view([RAPTOR_SIDE]).view([
                    "OrderId", "AltId = ClOrdID", "LinkId = ``", "Moniker", "Symbol", "Side",
                    "OrderQty", "CumQty", "LeavesQty", "AvgPx", "Status = OrdStatus", "Destination = ``"]),
-"ALGO_PARENT": algo.where("ParentAlgoOrderId == ``").view(["LinkId = RaptorOrderId", *algo_common]),
-"ALGO_CHILD":  algo.where("!(ParentAlgoOrderId == ``)").view(["LinkId = ParentAlgoOrderId", *algo_common]),
-"OR_PARENT":   router.where("ParentRouterOrderId == ``").view(["LinkId = UpstreamOrderId", *router_common]),
-"OR_CHILD":    router.where("!(ParentRouterOrderId == ``)").view(["LinkId = ParentRouterOrderId", *router_common]),
+"ALGO_PARENT": algo.where(algo_parent).view(["LinkId = RaptorOrderId", *algo_common]),
+"ALGO_CHILD":  algo.where(f"!({algo_parent})").view(["LinkId = ParentAlgoOrderId", *algo_common]),
+"OR_PARENT":   router.where(router_parent).view(["LinkId = UpstreamOrderId", *router_common]),
+"OR_CHILD":    router.where(f"!({router_parent})").view(["LinkId = ParentRouterOrderId", *router_common]),
+# algo_parent   = "isNull(ParentAlgoOrderId) || ParentAlgoOrderId == ``"
+# router_parent = "isNull(ParentRouterOrderId) || ParentRouterOrderId == ``"
 ```
 
 Rules that matter in a real deployment:
 
 - **Role split.** Use whatever parent/child flag your algo server and router really
   have. If an order matches two role filters, `last_by(NodeKey)` keeps the DAG alive,
-  but the order shows up at only one level.
+  but the order shows up at only one level. A blank parent id must test **null as well
+  as `""`**: a JSON feed omits the field, and `P == ``` alone is false on null, which
+  files the parent as a child with no link (`NO_LINK`) and orphans its whole subtree.
+  The AMPS integration test (section 13) publishes its parents with null parent ids.
 - **Which id a downstream system stores.** In the mock, the algo server stores Raptor's
   `OrderId` while DMA flow stamps Raptor's outbound `ClOrdID`. Index both (`AltId`), or
   the DMA router parents come out `ORPHAN`. If a system re-uses amend `ClOrdID`s (a
@@ -332,7 +337,9 @@ once per level (five times over). Ladder and exposure are flat aggregations inst
 - **One filter, four tables.** Moniker and symbol are type-in combo boxes fed by
   `otr_moniker_list`/`otr_symbol_list` with a case-insensitive **prefix** match, so
   typing `du` already shows DUNE. Side is a picker. All three match the **root's**
-  attributes, and pressing an exposure row pins its exact bucket.
+  attributes. Pressing an exposure row pins its bucket **exactly** (typing returns to
+  prefix matching): under a prefix match a pinned symbol `C` would also show `CAT`,
+  `CSCO` and every other symbol starting with C.
 - **include unlinked** (default on) adds trees whose root isn't a client order (orphans)
   to a moniker search, as long as they match the symbol and side. An orphan router order
   can't inherit a moniker, and it is exactly the order a moniker search must not hide.
@@ -375,6 +382,10 @@ All values go through `sanitize_id` (doc 09's rules) before reaching a query str
 | `OTR_QTY_TOL` | `1e-6` | absolute tolerance for every quantity comparison |
 | `OTR_SEED` | `42` | mock data seed |
 | `OTR_MOCK_FAMILIES` | `24` | random healthy families on top of the scenario catalog |
+| `OTR_SOURCE` | `mock` | `mock` tables, or `amps` SOW topics (section 13) |
+| `OTR_AMPS_URI` | `tcp://amps:9007/amps/json` | broker URI(s), comma separated for an HA list; JSON message type |
+| `OTR_AMPS_TOPIC_PREFIX` | `otr.` | topic = prefix + native table name |
+| `OTR_AMPS_CLIENT_NAME` | `otr-deephaven` | AMPS client name, unique per server (a duplicate logon displaces the older connection) |
 
 A malformed value is a startup error. The topology is code (`config.DEFAULT_LEVELS`),
 not an environment variable, because it is coupled to the adapters.
@@ -384,6 +395,10 @@ not an environment variable, because it is coupled to the adapters.
 - `docker/docker-compose.order-tree.yml`: one Deephaven service on the stock
   `ghcr.io/deephaven/server:42.4` image, no broker. `order-tree-recon/scripts/run_demo.sh
   [up|down|status|logs]` wraps it.
+- `docker/docker-compose.order-tree-amps.yml`: the AMPS-fed stack of section 13 (its own
+  compose project, containers and ports, so it runs beside the mock demo).
+  `OTR_SOURCE=amps order-tree-recon/scripts/run_demo.sh [up|down|status|logs|publish]`
+  wraps it.
 - Gradle: `include(":order-tree-recon")`. The module wraps its pytest suite like
   `:basket-oms-demo` (`base` plugin, `pytest` Exec task wired into `check`).
 
@@ -391,10 +406,12 @@ not an environment variable, because it is coupled to the adapters.
 
 - **Reference oracle.** [`reference.py`](../order-tree-recon/src/order_tree_recon/reference.py)
   computes every `otr_recon` column, the ladder and the exposure table with dicts and
-  loops. 81 host tests pin it down: every scenario's expected breaks, the edge taxonomy
+  loops. The host suite pins it down: every scenario's expected breaks, the edge taxonomy
   case by case, signed gaps, DMA via `AltId`, candidate order, nested algo, `TOO_DEEP`
   and cycles, depth-first `TreePath`, both identities on every complete bucket, the
-  filter builders and the mock book's invariants.
+  filter builders and the mock book's invariants. It also covers the AMPS source's pure
+  parts: settings, the JSON codec, and every message rule of `TopicFeed` (snapshot,
+  live, OOF, resync, backpressure).
 - **Embedded engine** (`OTR_DH_TEST=1`, `deephaven-server==42.4`). The DAG matches the
   reference **row for row**: 340 nodes × 54 columns, 132 ladder rows, 29 exposure rows,
   zero differences. Also covered: tree, query API and app entrypoint. A **live-fill**
@@ -405,6 +422,9 @@ not an environment variable, because it is coupled to the adapters.
   and driven in headless Chromium: typing a prefix, pinning a bucket by row press,
   expanding a tree to the venue level, searching by a venue order id. The
   controlled-input bug in section 7 was found and fixed this way.
+- **AMPS integration** (section 13.5): a real broker from the local AMPS image, the app in
+  Application Mode with `OTR_SOURCE=amps`, and a host test that publishes, mutates,
+  restarts and disconnects, with the engine equal to the reference after every step.
 
 The scenario catalog ([`mockdata.py`](../order-tree-recon/src/order_tree_recon/mockdata.py)):
 
@@ -451,15 +471,161 @@ The scenario catalog ([`mockdata.py`](../order-tree-recon/src/order_tree_recon/m
 order-tree-recon/
 ├── README.md                    # runbook
 ├── build.gradle.kts / pyproject.toml / run_tests.sh
-├── scripts/run_demo.sh          # podman compose up | down | status | logs
+├── scripts/run_demo.sh          # podman compose up | down | status | logs [| publish]
+├── amps/amps-config.xml         # the broker of section 13: three JSON SOW topics
 ├── src/order_tree_recon/
 │   ├── config.py                # pure: levels, topology validation, taxonomy, OTR_* env
 │   ├── reference.py             # pure: the oracle of every DAG formula
 │   ├── mockdata.py              # pure: native Raptor / algo / router tables + scenarios
+│   ├── native.py                # pure: the native tables' names, keys, columns, types
+│   ├── amps_codec.py            # pure: JSON <-> native rows, topic names
+│   ├── amps_publish.py          # the publisher (test, demo, CLI); AMPS imported lazily
+│   ├── amps_source.py           # section 13: SOW topics -> native tables, otr_amps_status
 │   ├── query_api.py             # pure filter builders + the console API
 │   ├── sources.py               # native tables + per-level adapters  <- rewrite for real data
 │   ├── dag.py                   # section 4
 │   ├── dashboard.py             # section 7
-│   └── app.py                   # Application-Mode entrypoint
-└── tests/                       # host suite + the opt-in embedded-engine suite
+│   └── app.py                   # Application-Mode entrypoint (OTR_SOURCE picks the source)
+├── tests/                       # host suite + the opt-in embedded-engine suite
+└── e2e/                         # the AMPS integration test: run_e2e.sh + pytest
 ```
+
+## 13. Feeding it from AMPS, and the integration test
+
+`OTR_SOURCE=amps` reads the three native tables from AMPS instead of building mock ones.
+The adapters, the DAG, the API and the dashboard don't change, which is the section 3
+promise, now held to through a real broker.
+
+### 13.1 Topics: one SOW per system
+
+Each system publishes the **current state** of each order as one JSON message in its
+native shape ([`native.py`](../order-tree-recon/src/order_tree_recon/native.py)) to its own
+SOW topic, keyed by its own order id. AMPS keeps the latest message per key, which is a
+current-state order table. The SOW is persisted (`./sow` on the broker's volume).
+
+| Topic (`OTR_AMPS_TOPIC_PREFIX` + table) | SOW key | Native table |
+|---|---|---|
+| `otr.raptor_orders` | `/OrderId` | `raptor_orders` |
+| `otr.algo_orders` | `/AlgoOrderId` | `algo_orders` |
+| `otr.router_orders` | `/RouterOrderId` | `router_orders` |
+
+The broker config is [`order-tree-recon/amps/amps-config.xml`](../order-tree-recon/amps/amps-config.xml)
+(checked with `ampServer --verify-config` on 5.3.5.135). There is no transaction log:
+order tables are state, not a tape.
+
+### 13.2 The source ([`amps_source.py`](../order-tree-recon/src/order_tree_recon/amps_source.py))
+
+```
+AMPS receive thread                       TopicFeed               update-graph thread
+sow_and_subscribe(oof) --sow/publish-->   decode -> (row, False) --> on_flush -> publisher.add
+                       --oof---------->   (key,  True)                 |
+                                  <table>_amps (blink) --last_by(key)--> where !Deleted --> <table>
+```
+
+- **One `HAClient`** (`OTR_AMPS_URI`; a comma list is an HA list it fails over across),
+  **one `sow_and_subscribe` with OOF per topic**, and one `TablePublisher` blink table per
+  topic with the native columns plus `Deleted`.
+- **Message rules** (`TopicFeed`, unit-tested without a server). `sow` and `publish` are
+  upserts. `oof` means the record was `sow_delete`d, and becomes a delete row; the order id
+  comes from the SOW key seen earlier, else from the key field of the OOF's data.
+  `group_begin`/`group_end` bracket a snapshot. Current state is
+  `blink.last_by(key).where("!Deleted")`.
+- **Resync.** After a disconnect the HA client logs on again and re-issues the
+  `sow_and_subscribe`, which delivers a fresh snapshot (verified: `Snapshots` goes up on
+  every reconnect). An order the table holds that the new snapshot lacks was deleted while
+  the connection was down, and its OOF is never coming, so it is deleted at `group_end`
+  (`Resynced`). Without this, a delete during a failover leaves a stale order in the book
+  for good.
+- **Heartbeat** every 5 s (`HEARTBEAT_SECONDS`). Without it a half-open connection (a
+  dropped firewall session, a frozen peer) stalls the feed silently while the status
+  still says connected. With it, both sides drop the connection within a couple of
+  intervals and the resync above repairs the book.
+- **Decoding** is lenient about shape and strict about meaning. A missing or `null` field
+  is a null, and a number sent as a string is accepted. A message that is not an object,
+  has no order id, or holds a value of the wrong type is **rejected**: counted, kept in
+  `LastError`, and the subscription goes on.
+- **Backpressure.** Up to 100 000 rows wait between two update cycles; past that the
+  receive thread blocks (TCP backpressure). A dropped message would leave a wrong order in
+  the book with nothing to detect it.
+- **One client per name.** `amps_source.start()` is idempotent per settings and stops a
+  running source with the same client name. Two HA clients under one name displace each
+  other's logon and reconnect forever.
+
+`otr_amps_status` has one row per topic: `Table`, `Topic`, `Connected`, `State`,
+`Snapshots`, `Received`, `Upserts`, `Deletes`, `Resynced`, `Rejected`, `Published`,
+`FailedBatches`, `Pending`, `Live`, `LastError`. It is written at the start of each update
+cycle, before that cycle drains the feeds, so `Pending` can read non-zero for one cycle.
+
+### 13.3 What the AMPS feed taught the DAG
+
+- **Null parent ids.** A JSON feed omits empty fields, so a parent's
+  `ParentAlgoOrderId`/`ParentRouterOrderId` arrives null. The role split now treats null
+  like `""` (section 3). Before that, such a parent was filed as a child, came out
+  `NO_LINK`, and orphaned its whole subtree.
+- **Child-first arrival.** The topics are independent and nothing orders them, so a
+  router order can land before the algo child it names. It is `ORPHAN`, unattributed and
+  counted in `UnlinkedTrees`, until the parent lands; then it links with no action,
+  because the DAG is incremental. In production this is section 11's transient gap again.
+
+### 13.4 Running it
+
+`docker/docker-compose.order-tree-amps.yml`, compose project `order-tree-amps`:
+
+| Container | Image | Host ports |
+|---|---|---|
+| `otr-amps` | `${AMPS_IMAGE:-localhost/amps-demo:5.3.5.135}`: AMPS has no public image, so bring your own | 39007 tcp, 39008 websocket, 38085 admin |
+| `otr-amps-deephaven` | `localhost/fix42-deephaven-amps:42.4` (`docker/deephaven-amps.Dockerfile`: the stock 42.4 server plus `amps-python-client`) | 10020 |
+
+```bash
+OTR_SOURCE=amps bash order-tree-recon/scripts/run_demo.sh            # up, then publish the mock book
+OTR_SOURCE=amps OTR_MOCK_FAMILIES=200 bash order-tree-recon/scripts/run_demo.sh publish
+python -m order_tree_recon.amps_publish --uri tcp://localhost:39007/amps/json --seed 7
+bash order-tree-recon/e2e/run_e2e.sh                                  # the integration test
+```
+
+`run_demo.sh publish` runs the publisher inside the Deephaven container (its image has
+the AMPS client), so the host needs nothing. `-Xmx1g` plus an emulated AMPS fits beside
+the 2g mock demo, but not beside the 4g fix42 stack on a 6 GB podman machine.
+
+### 13.5 The integration test ([`order-tree-recon/e2e/`](../order-tree-recon/e2e/))
+
+`run_e2e.sh` starts from `down -v` (a stale SOW would be the first snapshot), builds the
+image, starts the stack, waits for the app's `exported:` banner, and runs
+`test_order_tree_amps_e2e.py` from a host venv (`pydeephaven==42.4`,
+`amps-python-client==5.3.5.7`). The test plays Raptor, the algo server and the router: it
+publishes and `sow_delete`s native rows and keeps its own copy of what the SOW holds. The
+oracle is the shipped reference over that copy, and after **every** step the engine's
+`otr_recon` must equal it row for row, column for column. Every step changes the book, so
+the previous state can't satisfy the check.
+
+| # | Test | Proves |
+|---|---|---|
+| 1 | `the_app_is_subscribed_to_the_three_topics` | three status rows, connected, a snapshot each |
+| 2 | `an_empty_sow_is_an_empty_book` | starts clean, even on a stack someone left running |
+| 3 | `the_mock_book_matches_the_reference_row_for_row` | 340 orders over AMPS, zero differences |
+| 4 | `ladder_and_exposure_match_the_reference` | every ladder and exposure row |
+| 5 | `the_query_api_works_over_the_amps_book` | `order_tree`, `find_tree` from a venue id |
+| 6 | `a_fill_climbs_the_chain_one_hop_at_a_time` | each hop's edge is `UNBOOKED_FILL` until the next system books; `NetUnbookedQty` 100 until the client does |
+| 7 | `orders_arriving_child_first_link_up_when_their_parents_land` | router first is `ORPHAN` and unattributed, algo second still roots at an orphan algo parent, Raptor last links all 6 under the moniker; parents carry null parent ids |
+| 8 | `sow_delete_removes_an_order_and_reopens_its_edge` | the router parent is `PHANTOM_FILL` until the venue order is republished |
+| 9 | `a_malformed_message_is_counted_and_the_feed_lives_on` | `Rejected` + `LastError`; the next good message flows; the bad record's OOF still resolves |
+| 10 | `a_restarted_deephaven_rebuilds_the_book_from_the_sow` | identical book; one snapshot, no other upserts |
+| 11 | `a_dropped_connection_resyncs_the_deletes_it_missed` | Deephaven paused past the heartbeat: AMPS drops it, a delete and a fill happen meanwhile, the re-snapshot deletes the order (`Resynced`) and lands the fill |
+| 12 | `a_restarted_amps_is_resubscribed` | the SOW survives on its volume, the HA client re-snapshots, a new fill flows |
+| 13 | `no_batch_failed_and_nothing_is_pending` | `FailedBatches` 0, drained, connected |
+
+Measured 2026-10-11: AMPS 5.3.5.135 (amd64, emulated on an arm64 podman machine) and
+Deephaven 42.4 at `-Xmx1g`. All 13 pass in about 50 s of pytest, most of it the pause and
+the two restarts.
+
+### 13.6 Limits
+
+- **A reconnect costs a full snapshot.** Every row of the book comes back as an upsert.
+  `last_by` absorbs it, but the DAG still recomputes the touched rows. That is fine for
+  this book; at millions of orders, measure the failover time.
+- **An OOF says "gone", not why.** With a content filter (none is set here) it would
+  also mean "no longer matches"; a filtered source keeps the same delete semantics.
+- **Ordering.** AMPS keeps publish order within a topic; nothing orders across topics
+  (13.3).
+- **The local AMPS image is emulated** on this host: it is fine for correctness, but
+  never benchmark against it.

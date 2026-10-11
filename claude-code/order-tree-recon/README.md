@@ -62,6 +62,32 @@ Every table is also a global: `otr_recon`, `otr_tree`, `otr_tree_flat`,
 
 ---
 
+## Feeding it from AMPS
+
+The same app reads the three systems from AMPS when `OTR_SOURCE=amps` (doc 14 section 13).
+Each system publishes the current state of each order as JSON, in its native shape, to one
+SOW topic keyed by its order id: `otr.raptor_orders`, `otr.algo_orders`, `otr.router_orders`.
+
+```bash
+OTR_SOURCE=amps bash order-tree-recon/scripts/run_demo.sh           # AMPS + Deephaven, then publish the mock book
+open http://localhost:10020/iframe/widget/?name=order_tree_dashboard
+OTR_SOURCE=amps OTR_SEED=7 bash order-tree-recon/scripts/run_demo.sh publish   # replace the book
+OTR_SOURCE=amps bash order-tree-recon/scripts/run_demo.sh down
+```
+
+It needs your AMPS image (`AMPS_IMAGE`, default `localhost/amps-demo:5.3.5.135`). The stack is
+`docker/docker-compose.order-tree-amps.yml`: `otr-amps` on 39007 (tcp) / 39008 (websocket) /
+38085 (admin) and `otr-amps-deephaven` on 10020, beside the mock demo, not instead of it.
+`otr_amps_status` shows each topic's connection, snapshots, upserts, deletes, resyncs and
+rejects. Publish from the host with `pip install -e ".[amps]"` and
+`python -m order_tree_recon.amps_publish --uri tcp://localhost:39007/amps/json`.
+
+To feed your own systems, publish their order states to the three topics, or point
+`OTR_AMPS_URI` / `OTR_AMPS_TOPIC_PREFIX` at the topics they already have and edit
+`native.py` (columns) and `sources.py` (adapters) to their shapes.
+
+---
+
 ## Using your own tables
 
 Only [`src/order_tree_recon/sources.py`](src/order_tree_recon/sources.py) changes:
@@ -111,6 +137,10 @@ malformed value is a startup error.
 | `OTR_QTY_TOL` | `1e-6` | absolute tolerance for quantity comparisons |
 | `OTR_SEED` | `42` | mock data seed |
 | `OTR_MOCK_FAMILIES` | `24` | random healthy families on top of the 11 catalog scenarios |
+| `OTR_SOURCE` | `mock` | `amps` reads the three SOW topics instead of building mock tables |
+| `OTR_AMPS_URI` | `tcp://amps:9007/amps/json` | broker URI(s); a comma list is an HA list |
+| `OTR_AMPS_TOPIC_PREFIX` | `otr.` | topic = prefix + `raptor_orders` / `algo_orders` / `router_orders` |
+| `OTR_AMPS_CLIENT_NAME` | `otr-deephaven` | unique per server |
 
 `DH_PORT` (10000), `DH_XMX` (2g) and `DH_CONTAINER` (`otr-deephaven`) move the port, the
 heap and the container name.
@@ -125,16 +155,29 @@ bash run_tests.sh                                   # host suite: pure python, n
 
 pip install deephaven-server==42.4                  # ~600 MB, needs JDK 17+
 OTR_DH_TEST=1 PYTHONPATH=src python -m pytest tests # + the embedded-engine suite
+
+bash e2e/run_e2e.sh                                 # the AMPS integration test (podman, your AMPS image)
+KEEP_STACK=1 bash e2e/run_e2e.sh                    # ... and leave the stack up afterwards
 ```
 
-The host suite (81 tests) checks the python reference: every scenario's breaks, the edge
+The host suite (114 tests) checks the python reference: every scenario's breaks, the edge
 taxonomy, signed gaps, DMA linking via `AltId`, nested algo depth, `TOO_DEEP` and
 cycles, depth-first `TreePath`, both identities on every complete bucket, the filter
-builders and the mock book. The embedded suite asserts the Deephaven DAG matches the
+builders and the mock book. It also checks the AMPS source's pure parts: settings, the
+JSON codec, and every message rule (snapshot, live, OOF, resync, backpressure). The embedded suite asserts the Deephaven DAG matches the
 reference **row for row** (every `otr_recon` column, every ladder and exposure row). It
 also builds the tree, the API, the app and the dashboard, and turns the router table into
 a keyed input table to show that one new venue fill re-derives `UNBOOKED_FILL` and the
 bucket's `NetUnbookedQty` incrementally.
+
+The **AMPS integration test** (`e2e/`, 13 tests, about a minute) runs the real thing: AMPS
+from your local image, the app in Application Mode with `OTR_SOURCE=amps`, and a host test
+that publishes the mock book and then changes it. After every step the engine must equal
+the python reference row for row. The steps are a fill climbing the chain hop by hop, a
+family arriving child-first, a `sow_delete`, a malformed message, a Deephaven restart, a
+connection dropped by heartbeat (the re-snapshot must repair a delete it missed), and an
+AMPS restart. It always starts from `down -v`, and tears down only the containers it
+started.
 
 ---
 
@@ -150,6 +193,12 @@ vs `ClOrdID`), and put the other one in the upstream level's `AltId`.
 **A moniker search misses router orders.** It can't, as long as they are linked: the
 search matches the root's moniker. Unlinked ones appear when *include unlinked* is on
 (the default) and they match the symbol and side.
+
+**AMPS: the book is empty or stale.** Look at `otr_amps_status`. `Connected` false means
+check `OTR_AMPS_URI` (inside compose it is `tcp://amps:9007/amps/json`; `/amps/json` picks the
+message type). `Rejected` > 0 means `LastError` names the field a publisher got wrong. A
+growing `Snapshots` means the connection is flapping; two servers sharing one
+`OTR_AMPS_CLIENT_NAME` displace each other's logon.
 
 **No `otr_tree` panel.** The banner (`podman logs otr-deephaven | grep order-tree`)
 says `tree panel: UNAVAILABLE` if the server rejected `Table.tree`. `otr_tree_flat`

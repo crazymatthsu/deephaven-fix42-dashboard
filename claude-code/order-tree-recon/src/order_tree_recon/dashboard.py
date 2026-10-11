@@ -179,8 +179,8 @@ def _paint_nodes(table: Any) -> Any:
         return table.format_columns(
             [
                 f"BreakKind = ({red}) ? RED : ({amber}) ? ORANGE : OnBrokenEdge ? PINK : NO_FORMATTING",
-                f"FillGap = abs(FillGap) > 0 ? RED : NO_FORMATTING",
-                f"RouteGap = RouteGap < 0 ? RED : RouteGap > 0 ? ORANGE : NO_FORMATTING",
+                "FillGap = abs(FillGap) > 0 ? RED : NO_FORMATTING",
+                "RouteGap = RouteGap < 0 ? RED : RouteGap > 0 ? ORANGE : NO_FORMATTING",
             ]
         )
 
@@ -245,6 +245,9 @@ def build_dashboard(tables: Mapping[str, Any]) -> Optional[Any]:
         # overwritten by the stale render. Bumping `epoch` remounts them when a row
         # press or Clear has to set their text.
         epoch, set_epoch = ui.use_state(0)
+        # A pressed exposure row pins its bucket EXACTLY; typing goes back to prefix
+        # matching. Under a prefix match a pinned symbol `C` would also show CAT, CSCO, ...
+        pinned, set_pinned = ui.use_state(False)
 
         key = (
             sanitize_id(moniker).upper(),
@@ -253,9 +256,22 @@ def build_dashboard(tables: Mapping[str, Any]) -> Optional[Any]:
             bool(include_unlinked),
             bool(breaks_only),
             sanitize_id(search),
+            bool(pinned),
         )
         args = dict(moniker=moniker, symbol=symbol, side=side,
-                    include_unlinked=include_unlinked, prefix=True)
+                    include_unlinked=include_unlinked, prefix=not pinned)
+
+        def typed(current: str, setter: Callable[[str], None]) -> Callable[[str], None]:
+            def on_input(value: str) -> None:
+                # A remount after a row press may echo the pinned text back: not typing.
+                if value != current:
+                    setter(value)
+                    set_pinned(False)
+
+            return on_input
+
+        on_moniker = typed(moniker, set_moniker)
+        on_symbol = typed(symbol, set_symbol)
 
         def nodes_in_view() -> Any:
             subset = _where(recon, node_filters(breaks_only=breaks_only, **args))
@@ -320,6 +336,7 @@ def build_dashboard(tables: Mapping[str, Any]) -> Optional[Any]:
                 set_moniker(bucket[0])
                 set_symbol(bucket[1])
                 set_side(bucket[2] or None)
+                set_pinned(True)
                 set_epoch(epoch + 1)
 
         def clear() -> None:
@@ -329,25 +346,26 @@ def build_dashboard(tables: Mapping[str, Any]) -> Optional[Any]:
             set_search("")
             set_breaks_only(False)
             set_include_unlinked(True)
+            set_pinned(False)
             set_epoch(epoch + 1)
 
         controls = [
             _first(
                 lambda: ui.combo_box(
                     moniker_list, label="Moniker", allows_custom_value=True, menu_trigger="focus",
-                    default_input_value=moniker, on_input_change=set_moniker, width="size-2400",
+                    default_input_value=moniker, on_input_change=on_moniker, width="size-2400",
                     key=f"moniker-{epoch}",
                 ),
-                lambda: ui.text_field(label="Moniker", default_value=moniker, on_change=set_moniker,
+                lambda: ui.text_field(label="Moniker", default_value=moniker, on_change=on_moniker,
                                       key=f"moniker-{epoch}"),
             ),
             _first(
                 lambda: ui.combo_box(
                     symbol_list, label="Symbol", allows_custom_value=True, menu_trigger="focus",
-                    default_input_value=symbol, on_input_change=set_symbol, width="size-2000",
+                    default_input_value=symbol, on_input_change=on_symbol, width="size-2000",
                     key=f"symbol-{epoch}",
                 ),
-                lambda: ui.text_field(label="Symbol", default_value=symbol, on_change=set_symbol,
+                lambda: ui.text_field(label="Symbol", default_value=symbol, on_change=on_symbol,
                                       key=f"symbol-{epoch}"),
             ),
             _first(
@@ -365,7 +383,8 @@ def build_dashboard(tables: Mapping[str, Any]) -> Optional[Any]:
             _safe(lambda: ui.button("Clear", on_press=clear)),
         ]
         hint = ui.text(
-            "Type a prefix (moniker / symbol) or press an exposure row to pin its bucket. "
+            ("Pinned: exact bucket. " if pinned else "")
+            + "Type a prefix (moniker / symbol) or press an exposure row to pin its bucket. "
             "Gaps are per edge: FillGap = own CumQty - children's, RouteGap = own LeavesQty - children's."
         )
 

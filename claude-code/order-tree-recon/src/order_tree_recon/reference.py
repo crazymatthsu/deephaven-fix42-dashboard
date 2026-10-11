@@ -117,10 +117,12 @@ def reconcile(
         nodes[node["NodeKey"]] = node  # last_by: the last writer wins
 
     # (System, Id) -> NodeKey over OrderId, then AltId (AltId wins a collision, as the
-    # DAG's merge([order ids, alt ids]).last_by does).
+    # DAG's merge([order ids, alt ids]).last_by does). Blank ids are never indexed, in
+    # either column: a blank OrderId would otherwise become every NO_LINK node's parent.
     index: Dict[Tuple[str, str], str] = {}
     for node in nodes.values():
-        index[(node["System"], node["OrderId"])] = node["NodeKey"]
+        if node["OrderId"]:
+            index[(node["System"], node["OrderId"])] = node["NodeKey"]
     for node in nodes.values():
         if node["AltId"]:
             index[(node["System"], node["AltId"])] = node["NodeKey"]

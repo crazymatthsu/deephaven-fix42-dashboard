@@ -168,6 +168,7 @@ def test_incremental_fill_on_a_live_router_table(server, book):
     """One venue fill that never reaches its router parent -> UNBOOKED_FILL, live."""
     from deephaven import input_table
     from order_tree_recon import dag, sources
+    from order_tree_recon.native import ROUTER
 
     native = sources.native_tables(book)
     router = input_table(init_table=native["router_orders"], key_cols="RouterOrderId")
@@ -187,7 +188,7 @@ def test_incremental_fill_on_a_live_router_table(server, book):
     assert kind_of(parent_key) == "NONE"
     native_row = next(r for r in book.router if r["RouterOrderId"] == venue["OrderId"])
     filled = dict(native_row, CumQty=native_row["CumQty"] + 100, LeavesQty=native_row["LeavesQty"] - 100)
-    router.add(sources._table([filled], sources._ROUTER_COLUMNS))
+    router.add(sources._table([filled], ROUTER))
 
     assert _wait_for(lambda: kind_of(parent_key) == "UNBOOKED_FILL")
     bucket = _rows(tables["otr_exposure"].where(["RootMoniker == `ACME`", "RootSymbol == `MSFT`", "RootSide == `BUY`"]))

@@ -9,13 +9,16 @@ description = "Raptor -> algo -> order router order tree in Deephaven: link thre
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "deephaven-fix42-dashboard" }]
-# No runtime dependency: the reference, the mock book and the filters are pure python,
-# and the Deephaven layer runs inside the server, where `deephaven` and `deephaven.ui`
-# are bundled.
+# No runtime dependency: the reference, the mock book, the codec and the filters are pure
+# python, and the Deephaven layer runs inside the server, where `deephaven` and
+# `deephaven.ui` are bundled (and, for OTR_SOURCE=amps, the AMPS client is installed).
 dependencies = []
 
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
+# The host-side publisher (python -m order_tree_recon.amps_publish); the Deephaven image
+# for OTR_SOURCE=amps has its own copy (docker/deephaven-amps.Dockerfile).
+amps = ["amps-python-client==5.3.5.7"]
 
 [tool.setuptools]
 package-dir = { "" = "src" }

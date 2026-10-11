@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AMPS broker for the order-tree AMPS source and its integration test
+  (docs/14-order-tree-reconciliation.md section 13).
+
+  Started by docker/docker-compose.order-tree-amps.yml as service `amps` (container
+  otr-amps), which publishes 9007/9008/8085 on 39007/39008/38085 so it never collides with
+  another AMPS on the default ports. Check edits with:
+
+    podman run [dash][dash]rm [dash][dash]entrypoint /opt/amps/bin/ampServer \
+      -v "$PWD/order-tree-recon/amps:/cfg:ro" localhost/amps-demo:5.3.5.135 \
+      [dash][dash]verify-config /cfg/amps-config.xml
+
+  What this file decides:
+
+  1. ONE SOW TOPIC PER SYSTEM, KEYED BY THAT SYSTEM'S ORDER ID. Raptor, the algo server and
+     the order router each publish the CURRENT STATE of an order as one JSON message, in
+     their own native shape (order_tree_recon/native.py). AMPS keeps the latest message per
+     key, which is exactly a current-state order table. Deephaven reads each topic with
+     sow_and_subscribe: the SOW query is the snapshot, then live publishes, then an
+     out-of-focus (OOF) message when a record is sow_deleted.
+  2. THE SOW IS PERSISTED under ./sow (the working directory is /amps/data, a named volume),
+     so a restarted Deephaven rebuilds the same book from the snapshot, and a restarted
+     broker comes back with it. `down -v` wipes it, which the integration test does first.
+  3. THE CLIENT URI PICKS THE MESSAGE TYPE. The amps transport accepts every registered
+     type, so tcp://amps:9007/amps/json talks JSON. Each SOW topic's MessageType must agree.
+
+  No transaction log: an order table is state, not a tape. The SOW is the state.
+-->
+<AMPSConfig>
+
+  <Name>otr-amps</Name>
+
+  <!-- Admin / monitoring: http://localhost:38085/amps from the host. -->
+  <Admin>
+    <InetAddr>8085</InetAddr>
+    <FileName>./stats/stats.db</FileName>
+    <Interval>10s</Interval>
+  </Admin>
+
+  <Transports>
+    <!-- Native AMPS protocol: the python client of the Deephaven source and the publisher. -->
+    <Transport>
+      <Name>amps-tcp</Name>
+      <Type>tcp</Type>
+      <InetAddr>9007</InetAddr>
+      <Protocol>amps</Protocol>
+      <ReuseAddr>true</ReuseAddr>
+    </Transport>
+
+    <!-- Websocket transport, for browser tools such as AMPS' own web monitor. -->
+    <Transport>
+      <Name>amps-websocket</Name>
+      <Type>tcp</Type>
+      <InetAddr>9008</InetAddr>
+      <Protocol>websocket</Protocol>
+    </Transport>
+  </Transports>
+
+  <!-- Log to stdout so `podman logs otr-amps` is the whole story. -->
+  <Logging>
+    <Target>
+      <Protocol>stdout</Protocol>
+      <Level>info</Level>
+    </Target>
+  </Logging>
+
+  <!--
+    Topic names are OTR_AMPS_TOPIC_PREFIX (default "otr.") + the native table name, and the
+    key is that table's id column. Adding a system means one more topic here and one more
+    entry in order_tree_recon/native.py.
+  -->
+  <SOW>
+    <Topic>
+      <Name>otr.raptor_orders</Name>
+      <FileName>./sow/%n.sow</FileName>
+      <MessageType>json</MessageType>
+      <Key>/OrderId</Key>
+    </Topic>
+    <Topic>
+      <Name>otr.algo_orders</Name>
+      <FileName>./sow/%n.sow</FileName>
+      <MessageType>json</MessageType>
+      <Key>/AlgoOrderId</Key>
+    </Topic>
+    <Topic>
+      <Name>otr.router_orders</Name>
+      <FileName>./sow/%n.sow</FileName>
+      <MessageType>json</MessageType>
+      <Key>/RouterOrderId</Key>
+    </Topic>
+  </SOW>
+
+</AMPSConfig>

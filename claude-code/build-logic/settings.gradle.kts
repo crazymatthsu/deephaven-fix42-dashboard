@@ -4,11 +4,9 @@
 // other project. It exists so that a connector application's build file stays a
 // few lines however many applications there are.
 
-dependencyResolutionManagement {
-    repositories {
-        gradlePluginPortal()
-        mavenCentral()
-    }
+pluginManagement {
+    // The same repositories as the root build, from repos.env (docs/15).
+    apply(from = "../gradle/repos.settings.gradle.kts")
 }
 
 rootProject.name = "build-logic"

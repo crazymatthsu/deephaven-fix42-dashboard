@@ -11,7 +11,10 @@
 # (both run `podman build --format docker <module>/build/docker` under the hood;
 # --format docker keeps the HEALTHCHECK, which the OCI image format drops).
 
-ARG BASE_IMAGE=eclipse-temurin:21-jre-jammy
+# The base image and the apt mirror come from claude-code/repos.env (JRE_BASE_IMAGE,
+# APT_MIRROR; docs/15) -- dockerBuildLocal passes them as --build-arg. The defaults are the
+# public ones, so a plain `podman build` still works.
+ARG BASE_IMAGE=docker.io/library/eclipse-temurin:21-jre-jammy
 
 FROM ${BASE_IMAGE} AS extract
 WORKDIR /workspace
@@ -21,8 +24,23 @@ COPY application.jar .
 RUN java -Djarmode=tools -jar application.jar extract --layers --launcher --destination extracted
 
 FROM ${BASE_IMAGE}
+# Empty = Ubuntu's own archives. APT_MIRROR replaces archive/security.ubuntu.com/ubuntu
+# (amd64 images); APT_PORTS_MIRROR replaces ports.ubuntu.com/ubuntu-ports (arm64 images, e.g.
+# podman on Apple silicon) -- they are different archives, so they need separate mirrors.
+# Both the classic and the deb822 sources file are rewritten, whichever the base image has.
+ARG APT_MIRROR=
+ARG APT_PORTS_MIRROR=
 # wget for the healthcheck; temurin's jammy JRE image ships without it.
-RUN apt-get update \
+RUN for f in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do \
+      [ -f "$f" ] || continue; \
+      if [ -n "$APT_MIRROR" ]; then \
+        sed -i -E "s#https?://(archive|security)\.ubuntu\.com/ubuntu/?#${APT_MIRROR%/}/#g" "$f"; \
+      fi; \
+      if [ -n "$APT_PORTS_MIRROR" ]; then \
+        sed -i -E "s#https?://ports\.ubuntu\.com/ubuntu-ports/?#${APT_PORTS_MIRROR%/}/#g" "$f"; \
+      fi; \
+    done \
+ && apt-get update \
  && apt-get install -y --no-install-recommends wget \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app

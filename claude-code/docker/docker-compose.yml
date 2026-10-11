@@ -11,6 +11,10 @@
 #   apache/kafka:3.9.1          (official Apache Kafka image, KRaft mode)
 #   ghcr.io/deephaven/server:42.4  (== :latest at time of writing; python 3.12, JDK 21)
 #   kafbat/kafka-ui:v1.5.0      (native arm64; the maintained successor to provectuslabs/kafka-ui)
+# Each comes from a variable in claude-code/repos.env (KAFKA_IMAGE, DEEPHAVEN_IMAGE,
+# KAFKA_UI_IMAGE); the defaults below are the public images. To pull from a company
+# registry (JFrog), set your registry in an override file and run compose through the loader:
+#   scripts/repos.sh run podman compose -f docker/docker-compose.yml up -d     (docs/15)
 #
 # Both deephaven.ui (deephaven-plugin-ui 0.40.2) and deephaven.plot.express
 # (deephaven-plugin-plotly-express 0.20.0) are already bundled in the server image,
@@ -29,7 +33,7 @@ services:
   # CONTROLLER:9093 is the internal KRaft quorum listener (never published).
   # ---------------------------------------------------------------------------
   kafka:
-    image: apache/kafka:3.9.1
+    image: ${KAFKA_IMAGE:-docker.io/apache/kafka:3.9.1}
     container_name: fix42-kafka
     hostname: kafka
     ports:
@@ -105,7 +109,7 @@ services:
   # rather than replacing it -- see docker/apps/README.md.
   # ---------------------------------------------------------------------------
   deephaven:
-    image: ghcr.io/deephaven/server:42.4
+    image: ${DEEPHAVEN_IMAGE:-ghcr.io/deephaven/server:42.4}
     container_name: "${DH_CONTAINER:-fix42-deephaven}"
     ports:
       - "${DH_PORT:-10000}:10000"
@@ -203,7 +207,7 @@ services:
   # container stays stateless and reproducible from this file alone.
   # ---------------------------------------------------------------------------
   kafka-ui:
-    image: kafbat/kafka-ui:v1.5.0
+    image: ${KAFKA_UI_IMAGE:-docker.io/kafbat/kafka-ui:v1.5.0}
     container_name: fix42-kafka-ui
     ports:
       - "8080:8080"

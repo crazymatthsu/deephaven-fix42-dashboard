@@ -14,6 +14,9 @@
 # DH_PORT, COMPOSE (podman compose | podman-compose | docker compose), plus every MD_*
 # variable the compose file forwards.
 set -euo pipefail
+# Artifact sources -- container registries, pip index, ... -- from claude-code/repos.env and
+# your override file (docs/15). Loaded before anything pulls an image or installs a package.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/repos.sh"
 
 MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT_DIR="$(cd "$MODULE_DIR/.." && pwd)"          # claude-code/

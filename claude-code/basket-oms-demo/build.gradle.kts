@@ -18,7 +18,8 @@ val pytest = tasks.register<Exec>("pytest") {
     description =
         "Creates .venv (python3 -m venv), installs basket_oms_demo in editable mode and runs the pytest suite."
     workingDir(moduleDir)
-    commandLine("bash", testRunner.absolutePath)
+    // Forward slashes even on Windows: Git Bash's dirname cannot split C:\a\b paths.
+    commandLine("bash", testRunner.invariantSeparatorsPath)
     outputs.upToDateWhen { false }
 }
 

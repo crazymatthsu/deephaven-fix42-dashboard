@@ -59,12 +59,29 @@ Rationale in [docs/00-overview.md](docs/00-overview.md#2-the-state-machine-scena
 | Tool | Notes |
 |---|---|
 | **podman** (or Docker) | podman 5.x with `podman-compose`, or `docker` with `compose`. On macOS the podman VM must be running: `podman machine start`. |
-| **JDK** | Not required up front — the Gradle toolchain auto-provisions **Java 21** via foojay. |
-| **python3** | 3.10+ on the host, for the `deephaven-scripts` unit tests and the integration-test client venv. |
+| **JDK** | Not required up front — the Gradle toolchain auto-provisions **Java 21** via foojay (on a network that blocks `api.foojay.io`, install JDK 21 and set `GRADLE_JDK_AUTO_DOWNLOAD=false`, see below). |
+| **python3** | 3.10+ on the host, for the `deephaven-scripts` unit tests and the integration-test client venv (on Windows `python` or `py -3` is found automatically; `PYTHON=/path/to/python` picks one). |
 | **RAM** | The Deephaven container is configured with `-Xmx4g`; give the podman machine ≥6 GB. The multi-server stack (`docker-compose.remote-uri.yml`) runs three servers at `-Xmx1g/1g/1536m` for that same 6 GB — do not run both stacks at once; `DH_XMX_LEAF` / `DH_XMX_COLLECTOR` raise the heaps on a bigger machine. |
 
 Nothing else is installed globally: the Gradle wrapper is committed, and the integration
 test builds its own throwaway virtualenv.
+
+**Windows:** run every script and `./gradlew` from **Git Bash**; macOS is supported with its stock
+bash 3.2. Details: [docs/15 §10](docs/15-corporate-artifact-repositories.md#10-windows-git-bash-and-macos).
+
+**Behind a company artifact proxy (JFrog Artifactory)?** Every image, Maven / Gradle
+repository, the Gradle distribution, the pip index and the apt mirror come from
+[`repos.env`](repos.env). Put your JFrog URLs in one override file and nothing else changes:
+
+```bash
+cp repos.local.env.example repos.local.env     # or: export REPOS_ENV=~/.config/jfrog/repos.env  (all projects)
+podman login mycompany.jfrog.io
+scripts/repos.sh check                         # effective values, probes every URL, syncs the Gradle wrapper
+```
+
+Every run script loads it; prefix a bare command with `scripts/repos.sh run` (e.g.
+`scripts/repos.sh run podman compose -f docker/docker-compose.yml up -d`). Details, the key
+table and the convention new modules follow: [docs/15](docs/15-corporate-artifact-repositories.md).
 
 ---
 
@@ -792,7 +809,11 @@ Design and contract: [docs/07-dh-connectors.md](docs/07-dh-connectors.md).
 ```
 claude-code/
 ├── docs/                          # analysis & design — the binding contracts
-│   ├── 00-overview.md … 14-order-tree-reconciliation.md
+│   ├── 00-overview.md … 15-corporate-artifact-repositories.md
+├── repos.env                      # EVERY external artifact source (images, maven, gradle, pip, apt) — docs/15
+├── repos.local.env.example        # template for your company override (copy to repos.local.env, git-ignored)
+├── scripts/repos.sh               # loads repos.env + override; `show` / `check` / `pull` / `run CMD`
+├── gradle/repos.settings.gradle.kts  # the same file for Gradle: plugin + dependency repos, credentials
 ├── settings.gradle.kts            # gradle multi-module root (Java 21 toolchain)
 ├── build.gradle.kts
 ├── fix-mock-generator/            # Java 21: FIX builder + scenario engine + Kafka CLI
@@ -877,3 +898,4 @@ claude-code/
 | [12 — Market data SQL: as-of and window joins](docs/12-market-data-sql-as-of-join.md) | learning note: what the experimental SQL adapter accepts for "the market around this order", three runnable recipes, and the native `aj` / window-join equivalents |
 | [13 — Basket OMS demo](docs/13-basket-oms-demo.md) | **the contract** for the basket OMS app: order core, input tables, context-menu blotter, mock venue, console API, deployment |
 | [14 — Order tree reconciliation](docs/14-order-tree-reconciliation.md) | **the contract** for the Raptor → algo → router order tree: the adapter contract, linking with ordered candidate systems (DMA), the bounded root walk, root-attribute inheritance, signed per-edge gaps and the break taxonomy, the exposure identities, the level ladder, the tree UI and its verification |
+| [15 — Company artifact proxy (JFrog): `repos.env`](docs/15-corporate-artifact-repositories.md) | **the contract** for external artifact sources: one `repos.env` + an override file for container registries, Maven / Gradle plugin repos, the Gradle distribution, JDK auto-download, pip and apt; precedence, who reads it, credentials and certificates, verification, and the checklist every new module follows |

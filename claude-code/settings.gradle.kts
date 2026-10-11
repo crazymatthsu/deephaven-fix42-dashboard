@@ -1,14 +1,21 @@
 pluginManagement {
     // Convention plugins for the connector applications (dh.connector-app).
     includeBuild("build-logic")
-    repositories {
-        gradlePluginPortal()
-        mavenCentral()
-    }
+    // Every repository -- plugins and dependencies, for this build and for build-logic --
+    // comes from repos.env (docs/15). Modules declare no repositories of their own.
+    apply(from = "gradle/repos.settings.gradle.kts")
 }
 
 plugins {
-    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+    // JDK 21 auto-download from api.foojay.io; applied below unless repos.env sets
+    // GRADLE_JDK_AUTO_DOWNLOAD=false (corporate networks block it; install JDK 21 instead).
+    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0" apply false
+}
+
+@Suppress("UNCHECKED_CAST")
+val repos = gradle.extra["repos"] as Map<String, String>
+if (!repos["GRADLE_JDK_AUTO_DOWNLOAD"].equals("false", ignoreCase = true)) {
+    apply(plugin = "org.gradle.toolchains.foojay-resolver-convention")
 }
 
 rootProject.name = "deephaven-fix42-dashboard"

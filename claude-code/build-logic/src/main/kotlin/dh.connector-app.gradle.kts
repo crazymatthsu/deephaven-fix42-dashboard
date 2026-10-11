@@ -19,10 +19,6 @@ plugins {
 group = "com.fix42.dashboard"
 version = "0.1.0"
 
-repositories {
-    mavenCentral()
-}
-
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
@@ -118,12 +114,23 @@ val stageDockerContext by tasks.registering(Sync::class) {
     }
 }
 
+// The base image and the apt mirrors come from repos.env (docs/15), which the root settings
+// publish as gradle.extra["repos"]; the Dockerfile's own defaults apply when a key is empty.
+@Suppress("UNCHECKED_CAST")
+val repos: Map<String, String> =
+    if (gradle.extra.has("repos")) gradle.extra["repos"] as Map<String, String> else emptyMap()
+val imageBuildArgs: List<String> = listOf(
+    "BASE_IMAGE" to repos["JRE_BASE_IMAGE"],
+    "APT_MIRROR" to repos["APT_MIRROR"],
+    "APT_PORTS_MIRROR" to repos["APT_PORTS_MIRROR"],
+).filter { !it.second.isNullOrBlank() }.flatMap { listOf("--build-arg", "${it.first}=${it.second}") }
+
 tasks.register<Exec>("dockerBuildLocal") {
     group = "docker"
     description = "Builds this app's image into podman as localhost/dh-<app>:local."
     dependsOn(stageDockerContext)
     workingDir = layout.buildDirectory.dir("docker").get().asFile
     // --format docker keeps the Dockerfile HEALTHCHECK; the default OCI format drops it.
-    commandLine("podman", "build", "--format", "docker",
-            "-t", "localhost/dh-${project.name}:local", ".")
+    commandLine(listOf("podman", "build", "--format", "docker") + imageBuildArgs +
+            listOf("-t", "localhost/dh-${project.name}:local", "."))
 }

@@ -17,10 +17,6 @@ group = "com.fix42.dashboard"
 version = "0.1.0"
 description = "FIX 4.2 order-state Deephaven app in Java: fixcache state machine + engine-API DAG"
 
-repositories {
-    mavenCentral()
-}
-
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)

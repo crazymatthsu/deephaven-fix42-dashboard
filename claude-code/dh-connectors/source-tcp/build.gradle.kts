@@ -13,10 +13,6 @@ group = "com.fix42.dashboard"
 version = "0.1.0"
 description = "TCP RecordSource for dh-connectors: framed socket stream -> SourceRecord"
 
-repositories {
-    mavenCentral()
-}
-
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)

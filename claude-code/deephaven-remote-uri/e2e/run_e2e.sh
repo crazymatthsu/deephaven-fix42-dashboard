@@ -34,6 +34,9 @@
 # seed would still be in it, replayed into this run's leaves from the EPOCH bookmark,
 # and every count-based assertion below would fail on families nobody generated.
 set -euo pipefail
+# Artifact sources -- container registries, pip index, ... -- from claude-code/repos.env and
+# your override file (docs/15). Loaded before anything pulls an image or installs a package.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/repos.sh"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODULE_DIR="$(cd "$HERE/.." && pwd)"
@@ -248,12 +251,16 @@ wait_for_banner "$COLLECTOR_CONTAINER" "Remote-URI collector -- ready"
 # ---------------------------------------------------------------------------
 # 3. Python client venv
 # ---------------------------------------------------------------------------
-if [[ ! -x "$VENV/bin/python" ]]; then
+# bin/python on macOS/Linux, Scripts/python.exe on Windows; find_python3 tries python3,
+# python and `py -3` (both helpers are in scripts/repos.sh, sourced above).
+if ! VENV_PY="$(venv_python "$VENV")"; then
   log "creating client venv at $VENV"
-  python3 -m venv "$VENV" || die "python3 -m venv failed -- is python3 installed?"
+  HOST_PY="$(find_python3 3.9)" || die "no Python 3.9+ found -- install one or set PYTHON=/path/to/python"
+  "$HOST_PY" -m venv "$VENV" || die "python -m venv failed ($HOST_PY)"
+  VENV_PY="$(venv_python "$VENV")" || die "the venv at $VENV has no python"
 fi
 log "installing client requirements (pydeephaven 42.4 + pytest)"
-"$VENV/bin/pip" install --quiet --disable-pip-version-check -r "$HERE/requirements.txt" \
+"$VENV_PY" -m pip install --quiet --disable-pip-version-check -r "$HERE/requirements.txt" \
   || die "pip install failed"
 
 # ---------------------------------------------------------------------------
@@ -279,6 +286,6 @@ RXE2E_COLLECTOR_PORT="$(url_port "$COLLECTOR_URL" 10010)" \
 RXE2E_LEAF_PORTS="DH1:$(url_port "$DH1_URL" 10011),DH2:$(url_port "$DH2_URL" 10012)" \
 RXE2E_CONTAINERS="$DH1_CONTAINER,$DH2_CONTAINER,$COLLECTOR_CONTAINER" \
 CONTAINER_CLI="$CONTAINER_CLI" \
-  "$VENV/bin/python" -m pytest test_remote_uri_e2e.py -v ${PYTEST_ARGS:+$PYTEST_ARGS}
+  "$VENV_PY" -m pytest test_remote_uri_e2e.py -v ${PYTEST_ARGS:+$PYTEST_ARGS}
 
 log "remote-URI e2e passed"

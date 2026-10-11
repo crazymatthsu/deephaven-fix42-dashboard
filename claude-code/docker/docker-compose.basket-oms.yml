@@ -26,7 +26,7 @@ services:
   # PYTHONPATH=/oms-scripts because app-mode scripts run with __file__ UNSET (verified on
   # 42.4), so the entrypoint cannot bootstrap sys.path from its own location.
   deephaven:
-    image: ghcr.io/deephaven/server:42.4
+    image: ${DEEPHAVEN_IMAGE:-ghcr.io/deephaven/server:42.4}  # repos.env (docs/15)
     container_name: "${DH_CONTAINER:-oms-deephaven}"
     hostname: deephaven
     ports:

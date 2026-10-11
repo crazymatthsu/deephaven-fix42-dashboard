@@ -76,3 +76,18 @@ def test_split_qty():
     assert mockdata.split_qty(250, 2) == [150.0, 100.0]
     assert sum(mockdata.split_qty(3700, 4)) == 3700
     assert mockdata.split_qty(100, 5) == [100.0]
+
+
+def test_canonical_rows_treat_a_missing_parent_id_as_a_parent():
+    # A JSON feed omits the field rather than sending "": same role split as the adapter.
+    data = mockdata.MockData(
+        raptor=[],
+        algo=[{"AlgoOrderId": "A-1", "RaptorOrderId": "R-1", "Symbol": "AAPL", "Side": "BUY", "Qty": 100}],
+        router=[{"RouterOrderId": "OR-1", "ParentRouterOrderId": None, "UpstreamOrderId": "A-1-01"}],
+        scenario_roots={},
+        roots=[],
+    )
+    rows = {r["OrderId"]: r for r in mockdata.canonical_rows(data)}
+    assert (rows["A-1"]["Level"], rows["A-1"]["LinkId"]) == ("ALGO_PARENT", "R-1")
+    assert (rows["OR-1"]["Level"], rows["OR-1"]["LinkId"]) == ("OR_PARENT", "A-1-01")
+    assert rows["A-1"]["CumQty"] is None  # missing quantity -> null -> 0.0 once canonicalized

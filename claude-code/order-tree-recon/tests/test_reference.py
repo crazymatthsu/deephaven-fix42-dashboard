@@ -275,3 +275,16 @@ def test_ladder_level_totals(nodes):
     assert by_level["OR_CHILD"]["CumVsClient"] == 100.0  # the street is 100 ahead of the client
     assert by_level["OR_PARENT"]["UnbookedQty"] == 100.0  # ...and this is the edge that lost it
     assert all(by_level[lvl]["CumVsClient"] == 0.0 for lvl in ("ALGO_PARENT", "ALGO_CHILD", "OR_PARENT"))
+
+
+def test_a_blank_order_id_is_never_a_parent(topology):
+    # The DAG's id index skips blank ids; the reference must too, or a blank-id order
+    # would become the "parent" of every NO_LINK order in its system.
+    nodes = reference.reconcile(topology, [
+        row("CLIENT", "R-1", Moniker="ACME"),
+        row("ALGO_PARENT", "", link_id="R-1"),
+        row("ALGO_CHILD", "C-1", link_id=""),
+    ])
+    child = nodes["ALGO|C-1"]
+    assert child["LinkState"] == "NO_LINK" and child["ParentKey"] is None
+    assert child["BreakKind"] == "NO_LINK"

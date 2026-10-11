@@ -70,6 +70,7 @@ services:
       OTR_AMPS_CLIENT_NAME: "${OTR_AMPS_CLIENT_NAME:-dh-order-tree}"
       OTR_AMPS_BATCH_SIZE: "${OTR_AMPS_BATCH_SIZE:-1000}"
       OTR_AMPS_TIMEOUT_MS: "${OTR_AMPS_TIMEOUT_MS:-10000}"
+      OTR_AMPS_HEARTBEAT: "${OTR_AMPS_HEARTBEAT:-5}"   # seconds, 0 = off (doc 14 section 12.7)
     healthcheck:
       test: ["CMD", "/opt/grpc_health_probe/grpc_health_probe", "-addr=localhost:10000"]
       interval: 10s

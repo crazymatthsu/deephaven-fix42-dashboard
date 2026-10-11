@@ -1,22 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   A local AMPS broker for the order tree demo (docs/14-order-tree-reconciliation.md §12.6):
-  the five SOW topics of order_tree_recon.fixstate.DEFAULT_FIX_CONFIG, each holding the latest
-  FIX order state per OrderID.
+  the three SOW topics of order_tree_recon.fixstate.DEFAULT_FIX_CONFIG (SOW/RAPTOR/ORDERS,
+  SOW/ALGO/ORDERS, SOW/OR/ORDERS), each holding the latest FIX order state per OrderID.
 
   Only needed to try OTR_SOURCE=amps without your firm's AMPS. Started by
   docker/docker-compose.order-tree-amps.yml under the `broker` profile, with the same
   locally built image docker/docker-compose.remote-uri.yml uses (AMPS_IMAGE; there is no public
   AMPS image). Load it with the sample messages:
 
-    podman exec otr-deephaven python -m order_tree_recon.fixstate_mock --publish tcp://amps:9007/amps/fix
+    podman exec otr-deephaven python -m order_tree_recon.fixstate_mock [dash][dash]publish tcp://amps:9007/amps/fix
 
-  NOT verified in this repository's CI (no AMPS broker there). Before relying on it run
-  `ampServer [dash][dash]verify-config /amps/config/amps-config.xml` inside the AMPS container;
-  the Admin, Transports and Logging sections are the ones deephaven-remote-uri/amps verified
-  against AMPS 5.3.5.
+  Verified with `ampServer [dash][dash]verify-config` on AMPS 5.3.5.135 and exercised end to end
+  by the integration test (order-tree-recon/e2e/run_e2e.sh, doc 14 section 12.7). XML comments
+  must not contain two hyphens in a row, which is why the flags above are spelled [dash][dash]:
+  AMPS refuses the whole file otherwise.
 
-  * SOW topics keep one record per key -- here the FIX OrderID (/37) -- so a new state of an
+  * SOW topics keep one record per key (here the FIX OrderID, /37), so a new state of an
     order replaces the old one, and sow_and_subscribe gives a subscriber the current records
     followed by every change. A record deleted with sow_delete (or expired) reaches a
     subscriber that asked for `oof` as an oof message.
@@ -51,36 +51,30 @@
     </Target>
   </Logging>
 
+  <!--
+    One SOW topic per system, keyed on the FIX OrderID (/37). Algo and router parents share
+    their topic with their children: a child carries its parent's OrderID in tag 26009, a
+    parent leaves 26009 null. Explicit FileNames: %n would put the slashes of the topic
+    name into the path.
+  -->
   <SOW>
     <Topic>
-      <Name>raptor.orders</Name>
+      <Name>SOW/RAPTOR/ORDERS</Name>
       <MessageType>fix</MessageType>
       <Key>/37</Key>
-      <FileName>./sow/%n.sow</FileName>
+      <FileName>./sow/SOW.RAPTOR.ORDERS.sow</FileName>
     </Topic>
     <Topic>
-      <Name>algo.parent.orders</Name>
+      <Name>SOW/ALGO/ORDERS</Name>
       <MessageType>fix</MessageType>
       <Key>/37</Key>
-      <FileName>./sow/%n.sow</FileName>
+      <FileName>./sow/SOW.ALGO.ORDERS.sow</FileName>
     </Topic>
     <Topic>
-      <Name>algo.child.orders</Name>
+      <Name>SOW/OR/ORDERS</Name>
       <MessageType>fix</MessageType>
       <Key>/37</Key>
-      <FileName>./sow/%n.sow</FileName>
-    </Topic>
-    <Topic>
-      <Name>router.parent.orders</Name>
-      <MessageType>fix</MessageType>
-      <Key>/37</Key>
-      <FileName>./sow/%n.sow</FileName>
-    </Topic>
-    <Topic>
-      <Name>router.child.orders</Name>
-      <MessageType>fix</MessageType>
-      <Key>/37</Key>
-      <FileName>./sow/%n.sow</FileName>
+      <FileName>./sow/SOW.OR.ORDERS.sow</FileName>
     </Topic>
   </SOW>
 

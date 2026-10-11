@@ -1,16 +1,16 @@
 {"systems": [
-  {"system": "RAPTOR", "topics": ["raptor.orders"], "files": ["raptor.*.fix"],
+  {"system": "RAPTOR", "topics": ["SOW/RAPTOR/ORDERS"], "files": ["SOW.RAPTOR.*.fix"],
    "levels": [
      {"level": "CLIENT"}
   ]},
-  {"system": "ALGO", "topics": ["algo.parent.orders", "algo.child.orders"], "files": ["algo.*.fix"], "tags": {"Destination": "847"},
+  {"system": "ALGO", "topics": ["SOW/ALGO/ORDERS"], "files": ["SOW.ALGO.*.fix"], "tags": {"Destination": "847"},
    "levels": [
-     {"level": "ALGO_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+     {"level": "ALGO_CHILD", "when": {"tag": "26009"}, "link_tag": "26009"},
      {"level": "ALGO_PARENT", "link_tag": "11"}
   ]},
-  {"system": "OR", "topics": ["router.parent.orders", "router.child.orders"], "files": ["router.*.fix"],
+  {"system": "OR", "topics": ["SOW/OR/ORDERS"], "files": ["SOW.OR.*.fix"],
    "levels": [
-     {"level": "OR_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+     {"level": "OR_CHILD", "when": {"tag": "26009"}, "link_tag": "26009"},
      {"level": "OR_PARENT", "link_tag": "11"}
   ]}
 ]}

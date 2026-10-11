@@ -239,9 +239,9 @@ def fix_book(server, book):
     events = fixstate_mock.events(book)
     # Noise on both sides: an event with no key, garbage, a malformed number.
     events["RAPTOR"] = events["RAPTOR"] + [
-        fixstate.event("raptor.orders", "", 10_000),
-        fixstate.event("raptor.orders", "not fix at all", 10_001),
-        fixstate.event("raptor.orders", "35=8|37=ZZ-NOISE|11=Z|55=X|54=Q|38=1,000|14=abc|151= 5 |6=inf|39=0|", 10_002),
+        fixstate.event("SOW/RAPTOR/ORDERS", "", 10_000),
+        fixstate.event("SOW/RAPTOR/ORDERS", "not fix at all", 10_001),
+        fixstate.event("SOW/RAPTOR/ORDERS", "35=8|37=ZZ-NOISE|11=Z|55=X|54=Q|38=1,000|14=abc|151= 5 |6=inf|39=0|", 10_002),
     ]
     levels, ids, current = fixstate_dag.fix_level_tables(
         topology, cfg, {system: fixstate_dag.event_table(rows) for system, rows in events.items()})
@@ -343,7 +343,7 @@ def test_amps_source_ticks_the_tree_live(server):
     client = "35=8|37=R1|11=C1|1=ACME|55=AAPL|54=1|38=100|14=0|151=100|6=0|39=0|"
     other = "35=8|37=R2|11=C2|1=ACME|55=MSFT|54=1|38=100|14=0|151=100|6=0|39=0|"
     parent = "35=8|37=P1|11=C1|55=AAPL|54=1|38=100|14=0|151=100|6=0|39=0|100=SOR|"
-    raptor, router = handlers["raptor.orders"], handlers["router.parent.orders"]
+    raptor, router = handlers["SOW/RAPTOR/ORDERS"], handlers["SOW/OR/ORDERS"]
     for handler, msgs in ((raptor, [("sow", client, "r1"), ("sow", other, "r2")]), (router, [("sow", parent, "p1")])):
         handler(_amps_message("group_begin"))
         for command, data, key in msgs:
@@ -362,7 +362,7 @@ def test_amps_source_ticks_the_tree_live(server):
     router(_amps_message("group_end"))
     assert _wait_for(lambda: nodes() == [("RAPTOR|R1", 40.0, "ROOT")]), nodes()
     status = {r["Topic"]: r for r in source.status()}
-    assert (status["router.parent.orders"]["Epoch"], status["raptor.orders"]["DELETE"]) == (2, 1)
+    assert (status["SOW/OR/ORDERS"]["Epoch"], status["SOW/RAPTOR/ORDERS"]["DELETE"]) == (2, 1)
     source.stop()
 
 
@@ -385,7 +385,7 @@ def test_app_entrypoint_amps_comes_up_while_amps_is_unreachable(server):
         for name in ("amps_source", "fix_raptor_sow", "otr_recon", app.DASHBOARD_NAME):
             assert name in built, name
         assert built["otr_nodes"].size == 0
-        assert [s[1] for s in built["amps_source"].subscriptions()][:1] == ["raptor.orders"]
+        assert [s[1] for s in built["amps_source"].subscriptions()][:1] == ["SOW/RAPTOR/ORDERS"]
     finally:
         built["amps_source"].stop()
 
@@ -395,7 +395,7 @@ def test_fix_files_with_a_system_missing(server, tmp_path):
 
     from order_tree_recon import app
 
-    shutil.copy(os.path.join(SAMPLES_DIR, "raptor.orders.fix"), tmp_path / "raptor.orders.fix")
+    shutil.copy(os.path.join(SAMPLES_DIR, "SOW.RAPTOR.ORDERS.fix"), tmp_path / "SOW.RAPTOR.ORDERS.fix")
     built = app.build({"OTR_SOURCE": "fix-files", "OTR_FIX_DIR": str(tmp_path)})
     nodes = _rows(built["otr_recon"].view(["Level", "LinkState"]))
     assert nodes and {(n["Level"], n["LinkState"]) for n in nodes} == {("CLIENT", "ROOT")}

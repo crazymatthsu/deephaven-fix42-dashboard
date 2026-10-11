@@ -1,27 +1,19 @@
-"""Order-state messages -> the per-level canonical tables, in Deephaven (doc 14 section 12).
+"""Latest order state -> the per-level canonical tables, in Deephaven (doc 14 section 12).
 
-The input is **one table per system with one row per order-state message**, whatever it
-came from:
-
-* :func:`state_file_tables` -- CSV / JSON Lines files read at startup (the demo; every
-  column text);
-* a Kafka topic consumed with ``deephaven.stream.kafka.consumer`` and ``json_spec`` (typed
-  columns -- numeric quantities, a numeric or timestamp sequence -- work as they are);
-* an append-only input table, a table publisher, a JDBC poll, ...
-
-Each system's columns are mapped by a :class:`order_tree_recon.states.StateConfig`. Every
-step is a Deephaven operation, so a ticking message table gives a ticking order tree. The
-python twin is :func:`order_tree_recon.states.fold_system`; the embedded-engine test
-asserts both produce the same rows.
+The generic half of the order-state path: a table with one row per order-state message and
+one column per mapped field (text or typed) goes in, one canonical table per level comes out.
+:mod:`order_tree_recon.fixstate_dag` puts FIX tags into such columns (``T<tag>``) and the
+AMPS SOW mirror in front of it. The python twin is :func:`order_tree_recon.states.fold_system`;
+the embedded-engine test asserts both produce the same rows.
 
 ::
 
-    messages (one table per system)
+    messages
       |-> OtrKey = the order id;  drop rows without one
-      |-> latest state per order:  last_by(OtrKey)  or  sorted_last by the sequence field
+      |-> latest state per order:  sorted_last by (sequence, arrival)  or  last_by
       |     '-> level from the ``when`` rules, canonical columns (text / numbers / codes)
       |           '-> one view per level  ------------------------------------------------.
-      '-> id history: (System, Id, OrderId) for every id field of every message  --------+
+      '-> ids: (System, Id, OrderId) for every id field of every message  ----------------+
                                                     dag.build_order_tree(..., extra_ids=...)
 """
 
@@ -39,15 +31,13 @@ from order_tree_recon.config import Topology
 from order_tree_recon.states import StateConfig, StateSystem
 
 __all__ = [
-    "SOURCE_COLUMN",
     "state_table",
-    "state_file_tables",
+    "check_columns",
+    "system_levels",
+    "system_ids",
     "state_level_tables",
     "build_from_states",
 ]
-
-#: The column :func:`state_file_tables` adds: the file each message came from.
-SOURCE_COLUMN = "OtrSourceFile"
 
 _NUMERIC = (dtypes.int8, dtypes.int16, dtypes.int32, dtypes.int64, dtypes.float32, dtypes.float64)
 #: Compiled once and referenced by name in the formulas below (Deephaven resolves it from
@@ -55,47 +45,26 @@ _NUMERIC = (dtypes.int8, dtypes.int16, dtypes.int32, dtypes.int64, dtypes.float3
 OTR_NUMBER_PATTERN = jpy.get_type("java.util.regex.Pattern").compile(states.NUMBER_PATTERN)
 
 
-def state_table(rows: Sequence[Mapping[str, str]], columns: Sequence[str]) -> Table:
-    """A static, all-text message table with ``columns`` (``""`` where a row lacks one)."""
+def state_table(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> Table:
+    """A static, all-text table with ``columns`` (``""`` where a row lacks one)."""
     return new_table([string_col(name, [str(row.get(name, "")) for row in rows]) for name in columns])
 
 
-def state_file_tables(
-    config: StateConfig, base_dir: str
-) -> Tuple[Dict[str, Table], Dict[str, List[str]], Dict[str, int]]:
-    """Read each system's ``files`` globs under ``base_dir`` into a message table.
+def _types(table: Table) -> Dict[str, Any]:
+    return {column.name: column.data_type for column in table.columns}
 
-    Every column a file has is kept (as text), every field the mapping reads is
-    guaranteed to exist (empty when no file has it), and ``OtrSourceFile`` names the file.
 
-    Returns:
-        ``({system: table}, {system: [files read]}, {system: unusable lines})``.
+def check_columns(system: StateSystem, table: Table) -> Dict[str, Any]:
+    """The table's column types, after checking it has every field the mapping reads.
+
+    Raises:
+        ValueError: naming the missing columns.
     """
-    tables: Dict[str, Table] = {}
-    files_by_system: Dict[str, List[str]] = {}
-    bad_by_system: Dict[str, int] = {}
-    for system in config.systems:
-        rows: List[Dict[str, str]] = []
-        columns: List[str] = []
-        bad = 0
-        files = states.match_files(system.files, base_dir)
-        for path in files:
-            file_rows, file_bad = states.read_state_file(path)
-            bad += file_bad
-            name = path.replace("\\", "/").rsplit("/", 1)[-1]
-            for row in file_rows:
-                row[SOURCE_COLUMN] = name
-                for column in row:
-                    if column not in columns:
-                        columns.append(column)
-            rows.extend(file_rows)
-        columns += [f for f in system.field_names if f not in columns]
-        if SOURCE_COLUMN not in columns:
-            columns.append(SOURCE_COLUMN)
-        tables[system.system] = state_table(rows, columns)
-        files_by_system[system.system] = files
-        bad_by_system[system.system] = bad
-    return tables, files_by_system, bad_by_system
+    types = _types(table)
+    missing = [name for name in system.field_names if name not in types]
+    if missing:
+        raise ValueError(f"{system.system} messages have no column(s) {missing}; columns: {sorted(types)}")
+    return types
 
 
 def _text(name: str, types: Mapping[str, Any]) -> str:
@@ -113,7 +82,7 @@ def _number(name: str, types: Mapping[str, Any]) -> str:
                 f" ? Double.parseDouble({name}.trim()) : NULL_DOUBLE))")
     if dtype in _NUMERIC:
         return f"(isNull({name}) ? NULL_DOUBLE : (double) {name})"
-    raise ValueError(f"column {name} is {dtype}; a quantity or price must be text or numeric")
+    raise ValueError(f"column {name} is {dtype}; a quantity, price or sequence must be text or numeric")
 
 
 def _coded(column: str, codes: Sequence[Tuple[str, str]]) -> str:
@@ -132,25 +101,34 @@ def _when(rule: states.StateLevelRule, types: Mapping[str, Any]) -> str:
     return f"{value} == `{rule.when.equals}`"
 
 
-def _system_tables(system: StateSystem, messages: Table) -> Tuple[Dict[str, Table], Table]:
-    """Fold one system's messages into ``({level: canonical table}, ids)``."""
-    types = {column.name: column.data_type for column in messages.columns}
-    missing = [name for name in system.field_names if name not in types]
-    if missing:
-        raise ValueError(f"{system.system} messages have no column(s) {missing}; columns: {sorted(types)}")
+def _ordering(system: StateSystem, types: Mapping[str, Any]) -> Tuple[List[str], List[str]]:
+    """``(helper formulas, order_by columns)`` for ``sequence`` then ``arrival``.
 
-    keyed = [f"OtrKey = {_text(system.order_id, types)}"]
+    A text column orders numerically when it is a number and as text otherwise (states'
+    ``_order_key``: a null number sorts first); a numeric or timestamp column as is.
+    """
+    formulas: List[str] = []
     order_by: List[str] = []
-    if system.sequence is not None:
-        if types[system.sequence] == dtypes.string:
-            # Numbers numerically, anything else (ISO timestamps) as text -- states._sequence_key.
-            keyed += [f"OtrSeqNum = {_number(system.sequence, types)}", f"OtrSeqText = {_text(system.sequence, types)}"]
-            order_by = ["OtrSeqNum", "OtrSeqText"]
+    for i, name in enumerate(f for f in (system.sequence, system.arrival) if f):
+        if types[name] == dtypes.string:
+            formulas += [f"OtrOrd{i}Num = {_number(name, types)}"]
+            order_by += [f"OtrOrd{i}Num"]
+            if name == system.sequence:
+                formulas += [f"OtrOrd{i}Text = {_text(name, types)}"]
+                order_by += [f"OtrOrd{i}Text"]
         else:
-            order_by = [system.sequence]
-    updates = messages.update_view(keyed).where("OtrKey != ``")
+            order_by.append(name)
+    return formulas, order_by
+
+
+def system_levels(system: StateSystem, messages: Table) -> Dict[str, Table]:
+    """One system's messages -> ``{level: canonical table}`` (latest state per order)."""
+    types = check_columns(system, messages)
+    helpers, order_by = _ordering(system, types)
+    updates = messages.update_view([f"OtrKey = {_text(system.order_id, types)}"] + helpers).where("OtrKey != ``")
     if order_by:
-        columns = [c for c in updates.column_names if c not in ("OtrKey", "OtrSeqNum", "OtrSeqText")]
+        hidden = {"OtrKey"} | {c for c in order_by if c.startswith("OtrOrd")}
+        columns = [c for c in updates.column_names if c not in hidden]
         latest = updates.agg_by([agg.sorted_last(order_by=order_by, cols=columns)], by=["OtrKey"])
     else:
         latest = updates.last_by(["OtrKey"])
@@ -167,6 +145,9 @@ def _system_tables(system: StateSystem, messages: Table) -> Tuple[Dict[str, Tabl
         source = system.source(target)
         return _number(source, types) if source else "NULL_DOUBLE"
 
+    avg_px = number_of("AvgPx")
+    if system.avg_px_needs_fill:
+        avg_px = f"(!isNull(OtrCumQty) && OtrCumQty > 0) ? {avg_px} : NULL_DOUBLE"
     staged = latest.update([
         f"OtrLevel = {level}",
         f"OtrAltId = {_text(system.alt_id, types) if system.alt_id else '``'}",
@@ -178,7 +159,7 @@ def _system_tables(system: StateSystem, messages: Table) -> Tuple[Dict[str, Tabl
         f"OtrOrderQty = {number_of('OrderQty')}",
         f"OtrCumQty = {number_of('CumQty')}",
         f"OtrLeavesQty = {number_of('LeavesQty')}",
-        f"OtrAvgPx = {number_of('AvgPx')}",
+        f"OtrAvgPx = {avg_px}",
     ])
     common = [
         "OrderId = OtrKey",
@@ -197,12 +178,23 @@ def _system_tables(system: StateSystem, messages: Table) -> Tuple[Dict[str, Tabl
     for rule in system.levels:
         link = _text(rule.link, types) if rule.link else "``"
         levels[rule.level] = staged.where(f"OtrLevel == `{rule.level}`").view([f"LinkId = {link}"] + common)
+    return levels
 
-    ids = merge([
-        updates.view([f"System = `{system.system}`", f"Id = {_text(name, types)}", "OrderId = OtrKey"]).where("Id != ``")
+
+def system_ids(system: StateSystem, messages: Table) -> Table:
+    """``System, Id, OrderId`` for every id field of every message, distinct.
+
+    ``count_by`` rather than ``select_distinct``: an aggregation keeps its result when
+    ``messages`` is a blink table, so this also works straight on a live stream.
+    """
+    types = check_columns(system, messages)
+    key = _text(system.order_id, types)
+    parts = [
+        messages.view([f"System = `{system.system}`", f"Id = {_text(name, types)}", f"OrderId = {key}"])
+        .where(["Id != ``", "OrderId != ``"])
         for name in system.id_fields
-    ])
-    return levels, ids
+    ]
+    return merge(parts).count_by("OtrCount", by=["System", "Id", "OrderId"]).view(["System", "Id", "OrderId"])
 
 
 def state_level_tables(
@@ -210,20 +202,16 @@ def state_level_tables(
     config: StateConfig,
     messages: Mapping[str, Table],
 ) -> Tuple[Dict[str, Table], Table]:
-    """One canonical table per topology level, and the id-history table, from order states.
+    """One canonical table per topology level, and the id table, from order-state messages.
 
     Args:
         topology: The level topology the config was validated against.
-        config: From :func:`order_tree_recon.states.load_state_config`.
+        config: A validated :class:`~order_tree_recon.states.StateConfig`.
         messages: ``{system: message table}`` -- static or ticking, text or typed columns.
             A system missing here contributes empty levels.
 
     Returns:
         ``(level_tables, extra_ids)``: pass both to :func:`order_tree_recon.dag.build_order_tree`.
-
-    Raises:
-        ValueError: a table lacks a column the mapping reads, or a quantity column is
-            neither text nor numeric.
     """
     level_tables: Dict[str, Table] = {}
     id_tables: List[Table] = []
@@ -231,13 +219,12 @@ def state_level_tables(
         table = messages.get(system.system)
         if table is None:
             table = state_table([], system.field_names)
-        levels, ids = _system_tables(system, table)
-        level_tables.update(levels)
-        id_tables.append(ids)
+        level_tables.update(system_levels(system, table))
+        id_tables.append(system_ids(system, table))
     missing = [name for name in topology.names if name not in level_tables]
     if missing:
-        raise ValueError(f"state config maps no system to level(s) {missing}")
-    return level_tables, merge(id_tables).select_distinct(["System", "Id", "OrderId"])
+        raise ValueError(f"the mapping covers no system for level(s) {missing}")
+    return level_tables, merge(id_tables)
 
 
 def build_from_states(

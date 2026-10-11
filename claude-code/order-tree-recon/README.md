@@ -33,11 +33,12 @@ No broker: the app builds three mock tables (`raptor_orders`, `algo_orders`,
 adapter per level, and builds the DAG. The DAG is incremental, so the same code runs over
 ticking tables. The embedded test proves it with a live fill.
 
-The same book as order-state messages (`state-samples/`: CSV and JSON Lines), read through
-the field mapping:
+The same book as FIX order states, one file per AMPS SOW topic (`fix-samples/`), read through
+the SOW mirror and the FIX mapping:
 
 ```bash
-OTR_SOURCE=state-files bash order-tree-recon/scripts/run_demo.sh
+OTR_SOURCE=fix-files bash order-tree-recon/scripts/run_demo.sh
+OTR_SOURCE=amps OTR_AMPS_BROKER=local bash order-tree-recon/scripts/run_demo.sh   # a local AMPS (AMPS_IMAGE), loaded with them
 ```
 
 **Try:** type `du` in *Moniker*, press the `DUNE / MSFT / BUY` exposure row, and expand
@@ -84,39 +85,44 @@ Only [`src/order_tree_recon/sources.py`](src/order_tree_recon/sources.py) change
 
 ---
 
-## Using your own order-state messages
+## Using your AMPS SOW topics (FIX order states)
 
-When each system sends its orders' states (one message per change, each the order's
-complete state), map each system's field names in one JSON file. No code changes are
-needed. Doc 14 section 12 has the details.
+When each system publishes its orders' latest state as FIX messages into AMPS SOW topics,
+list the topics and tags in one JSON file. No code changes are needed. Doc 14 section 12
+has the details: deletes (`oof`), reconnects, the config reference.
 
-1. Put each system's messages in one folder, outside the repository: `.csv` with a
-   header row, `.jsonl` with one JSON object per line, or `.json` as an array.
-2. Copy [`state-samples/state_config.json`](state-samples/state_config.json) next to them
-   and edit it. For each system you set:
-   - its files;
-   - which field is the order id (`order_id`) and, optionally, a second id (`alt_id`);
-   - which of your fields fill `Symbol`, `Side`, `OrderQty`, `CumQty`, `LeavesQty`,
-     `AvgPx`, `Status`, ... (`fields`);
-   - how to tell parent from child (`when`) and which field holds the parent's id
-     (`link`);
-   - `sequence`, if messages can arrive out of order.
-3. Dry-run the mapping on the host. No Deephaven or container is needed:
+1. Copy [`fix-samples/fix_config.json`](fix-samples/fix_config.json) to a folder of your own
+   and edit it. Per system:
+   - `topics`: one or more SOW topics;
+   - the `when` rule that tells parent from child;
+   - the `link_tag` holding the parent's id: usually `11` across systems, a custom tag
+     inside one.
+
+   Standard FIX tags (37, 11, 55, 54, 38, 14, 151, 6, 39, ...) are the defaults.
+2. Dry-run the mapping against your AMPS. It runs a one-off `sow` query: no subscription,
+   no Deephaven, only `pip install amps-python-client`:
 
    ```bash
-   PYTHONPATH=src python -m order_tree_recon.states_check /path/to/files
+   PYTHONPATH=src python -m order_tree_recon.fixstate_check --amps tcp://amps-host:9007/amps/fix --config /path/to/fix_config.json
    ```
 
-   It shows the columns it found, any mapped field that no file has, orders per level,
-   how they linked, the breaks, and why the first unlinked orders did not link.
-4. Run the dashboard on them:
+   It shows each topic's record count, any mapped tag that no message carries, orders per
+   level, how they linked, the breaks, and why the first unlinked orders did not link.
+3. Run the dashboard on the live topics:
 
    ```bash
-   OTR_SOURCE=state-files OTR_STATE_HOST_DIR=/path/to/files bash order-tree-recon/scripts/run_demo.sh
+   OTR_SOURCE=amps OTR_AMPS_URI=tcp://amps-host:9007/amps/fix OTR_FIX_HOST_DIR=/path/to/folder \
+     bash order-tree-recon/scripts/run_demo.sh
    ```
 
-For a live feed (Kafka JSON, or any append-only table with one row per message), call
-`states_dag.build_from_states(...)` yourself. Doc 14 section 12.4 has a complete snippet.
+   This builds the server image with the AMPS client (`docker/deephaven-amps.Dockerfile`,
+   pip index from `repos.env`) and runs one `sow_and_subscribe` per topic. The server comes
+   up even while AMPS is unreachable. In the console, `amps_source.status()` shows each
+   topic's snapshot epoch and record counts, and `fix_<system>_sow` is the live SOW mirror.
+
+Without AMPS, the same messages from files (SOW dumps, one FIX message per line) go through
+the same mirror and fold: `OTR_SOURCE=fix-files OTR_FIX_HOST_DIR=/path/to/files`, and
+`fixstate_check --dir`.
 
 ---
 
@@ -170,9 +176,12 @@ malformed value is a startup error.
 | `OTR_QTY_TOL` | `1e-6` | absolute tolerance for quantity comparisons |
 | `OTR_SEED` | `42` | mock data seed |
 | `OTR_MOCK_FAMILIES` | `24` | random healthy families on top of the 11 catalog scenarios |
-| `OTR_SOURCE` | `mock` | `mock` or `state-files` (order-state message files) |
-| `OTR_STATE_HOST_DIR` | `order-tree-recon/state-samples` | the host folder with the files and `state_config.json`, mounted at `/otr-states` (`OTR_STATE_DIR`) |
-| `OTR_STATE_CONFIG` | `/otr-states/state_config.json` | another mapping file (relative to `/otr-states`); the built-in default if neither exists |
+| `OTR_SOURCE` | `mock` | `mock`, `amps` (FIX order states from AMPS SOW topics) or `fix-files` |
+| `OTR_FIX_HOST_DIR` | `order-tree-recon/fix-samples` | the host folder with `fix_config.json` (and, for `fix-files`, the message files), mounted at `/otr-fix` |
+| `OTR_FIX_CONFIG` | `/otr-fix/fix_config.json` | another mapping file (relative to `/otr-fix`); the built-in default if neither exists |
+| `OTR_AMPS_URI` | — | `amps`: the AMPS URI(s), comma separated for an HA pair |
+| `OTR_AMPS_CLIENT_NAME` | `dh-order-tree` | unique per server (a duplicate logon displaces the other) |
+| `OTR_AMPS_BROKER` | — | `local`: also start a local AMPS from `AMPS_IMAGE` and publish the samples into it |
 
 `DH_PORT` (10000), `DH_XMX` (2g) and `DH_CONTAINER` (`otr-deephaven`) move the port, the
 heap and the container name.
@@ -189,20 +198,26 @@ pip install deephaven-server==42.4                  # ~600 MB, needs JDK 17+
 OTR_DH_TEST=1 PYTHONPATH=src python -m pytest tests # + the embedded-engine suite
 ```
 
-The host suite (110 tests) checks the python reference: every scenario's breaks, the edge
+The host suite (132 tests) checks the python reference: every scenario's breaks, the edge
 taxonomy, signed gaps, DMA linking via `AltId`, nested algo depth, `TOO_DEEP` and
 cycles, depth-first `TreePath`, both identities on every complete bucket, the filter
-builders and the mock book. It also checks the order-state layer: config validation, the
-CSV / JSON readers, the fold (latest state, sequence order, id history), `states_check`,
-the committed `state-samples/`, and the mock book as state messages reconciling exactly
-like the table path, even when delivered out of order. The embedded suite asserts the Deephaven DAG matches the
+builders and the mock book. It also checks the FIX / AMPS layer: the parser, the tag
+mapping, the SOW mirror (`oof`, reconnect snapshots), the fold, the id history,
+`fixstate_check` (files and a stubbed AMPS `sow` query), the committed `fix-samples/`, the
+AMPS source's subscribe calls and message classification, and the mock book as FIX order
+states reconciling exactly like the table path. The embedded suite asserts the Deephaven DAG matches the
 reference **row for row** (every `otr_recon` column, every ladder and exposure row). It
 also builds the tree, the API, the app and the dashboard, and turns the router table into
 a keyed input table to show that one new venue fill re-derives `UNBOOKED_FILL` and the
-bucket's `NetUnbookedQty` incrementally. For the order-state path, it asserts the
-engine's fold equals the python fold row for row (shuffled feeds, typed columns) and the
-tree equals the reference. It also shows that an appended state message ticks through to
-a break, and builds the app with `OTR_SOURCE=state-files`.
+bucket's `NetUnbookedQty` incrementally. For the FIX / AMPS path, it asserts:
+- the engine's SOW mirror and fold equal the python twins;
+- the tree equals the reference;
+- real `AMPS.Message` objects fed through a stub client tick the tree live (a fill, an
+  `oof`, a reconnect snapshot);
+- the app builds with `OTR_SOURCE=fix-files` and with `OTR_SOURCE=amps` while AMPS is
+  unreachable.
+
+No real AMPS broker was available to test against.
 
 ---
 
@@ -212,16 +227,25 @@ a break, and builds the app with `OTR_SOURCE=state-files`.
 upstream system indexes under. Check which id the downstream system stores (order id
 vs `ClOrdID`), and put the other one in the upstream level's `AltId`.
 
-**Order states: a whole level is `ORPHAN` or `NO_LINK`.** Run `states_check` on the folder.
-`NO_LINK` means the level's `link` field is empty in the orders' latest state (often a
-misspelled field name; `states_check` flags mapped fields that no file has). `ORPHAN`
-means the field has a value that is not an id of the parent system (its `order_id`,
-`alt_id` or `id_fields`). The first unlinked orders are printed with the value they
-carried.
+**AMPS: a whole level is `ORPHAN` or `NO_LINK`.** Run `fixstate_check --amps URI`.
+- `NO_LINK` means the level's `link_tag` is not in the orders' latest state. The check
+  flags any mapped tag that no message carries.
+- `ORPHAN` means the tag has a value that is not an id the parent system reports (its
+  `id_tags`, 37 / 11 / 41).
 
-**Order states: a system shows 0 messages.** Its `files` globs matched nothing. The
-startup banner and `states_check` both list what each glob matched. Globs are relative to
-the folder.
+The first unlinked orders are printed with the value they carried.
+
+**AMPS: the tables stay empty.** Check the log with `run_demo.sh logs`:
+- `AMPS connect failed (...)` repeats every 5 s until AMPS answers;
+- each topic logs `snapshot N complete, M records` once its `sow_and_subscribe` snapshot is
+  in;
+- `amps_source.status()` shows per-topic counts.
+
+A topic not in `fix_config.json` is never subscribed.
+
+**AMPS: orders that were deleted are still shown.** They are not, once the topic has sent
+`oof` (the subscription asks for it) or a reconnect snapshot has completed. A record that
+is only *filtered out* by your `filter` arrives as `oof` too.
 
 **Every child is `MISMATCH`.** The systems code `Side` differently (FIX `1`/`2` vs
 `BUY`/`SELL`). Decode in the adapter, as `RAPTOR_SIDE` does.

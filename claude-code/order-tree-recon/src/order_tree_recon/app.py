@@ -10,10 +10,14 @@ Two sources (``OTR_SOURCE``):
 * ``mock`` (default) -- generated native Raptor / algo / router tables and the adapters
   in :mod:`order_tree_recon.sources`. To run over your own order *tables*, replace the
   native tables and edit the adapters (doc 14 section 3).
-* ``state-files`` -- order-state messages (CSV / JSON Lines) in ``OTR_STATE_DIR``, mapped
-  by a JSON field config (:mod:`order_tree_recon.states`,
-  :mod:`order_tree_recon.states_dag`; doc 14 section 12). The messages are published as
-  ``state_<system>_updates``.
+* ``amps`` -- every system's order states as FIX messages from its AMPS SOW topics
+  (``sow_and_subscribe``; :mod:`order_tree_recon.amps_sow`), mapped by a JSON tag config
+  (:mod:`order_tree_recon.fixstate`; doc 14 section 12).
+* ``fix-files`` -- the same FIX order-state messages from files in ``OTR_FIX_DIR`` (SOW
+  dumps or recorded subscriptions; the demo reads ``fix-samples/``).
+
+For both FIX sources each system's SOW mirror -- its current records, one row per order,
+with a ``T<tag>`` column per mapped tag -- is published as ``fix_<system>_sow``.
 
 Either way the DAG, the API and the dashboard are unchanged.
 
@@ -60,24 +64,50 @@ def _mock_source(topology: config.Topology, tol: float,
     return native, tables, banner
 
 
-def _state_files_source(topology: config.Topology, tol: float,
-                        environ: Optional[Mapping[str, str]]) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
-    from order_tree_recon import states, states_dag
+def _fix_tables(topology: config.Topology, tol: float, fix_config: Any,
+                events: Mapping[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    from order_tree_recon import fixstate_dag
 
-    directory = config.state_dir(environ)
-    config_path = config.state_config_path(environ)
-    state_config = states.load_state_config(config_path, topology)
-    messages, files, bad = states_dag.state_file_tables(state_config, directory)
-    tables = states_dag.build_from_states(topology, state_config, messages, tol)
-    published = {f"state_{system.lower()}_updates": table for system, table in messages.items()}
-    banner = [f"state-files: {directory}, mapping {config_path or '(built-in DEFAULT_STATE_CONFIG)'}"]
-    for system in state_config.systems:
+    level_tables, extra_ids, current = fixstate_dag.fix_level_tables(topology, fix_config, events)
+    tables = dag.build_order_tree(topology, level_tables, tol, extra_ids=extra_ids)
+    return {f"fix_{system.lower()}_sow": table for system, table in current.items()}, tables
+
+
+def _fix_files_source(topology: config.Topology, tol: float,
+                      environ: Optional[Mapping[str, str]]) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+    from order_tree_recon import fixstate, fixstate_dag
+
+    directory = config.fix_dir(environ)
+    config_path = config.fix_config_path(environ)
+    fix_config = fixstate.load_fix_config(config_path, topology)
+    events, files = fixstate_dag.file_event_tables(fix_config, directory)
+    published, tables = _fix_tables(topology, tol, fix_config, events)
+    banner = [f"fix-files: {directory}, mapping {config_path or '(built-in DEFAULT_FIX_CONFIG)'}"]
+    for system in fix_config.systems:
         names = ", ".join(os.path.basename(f) for f in files[system.system]) or "NO FILES MATCHED"
-        unusable = f", {bad[system.system]} unusable lines" if bad[system.system] else ""
-        banner.append(f"  {system.system:<7} {list(system.files)} -> {names}; "
-                      f"{messages[system.system].size} messages{unusable}")
+        banner.append(f"  {system.system:<7} {list(fix_config.files[system.system])} -> {names}; "
+                      f"{events[system.system].size} messages")
     if not any(files.values()):
         banner.append(f"WARNING: no file in {directory} matches any 'files' glob -- every table is empty")
+    return published, tables, banner
+
+
+def _amps_source(topology: config.Topology, tol: float,
+                 environ: Optional[Mapping[str, str]]) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+    from order_tree_recon import amps_sow, fixstate
+
+    config_path = config.fix_config_path(environ)
+    fix_config = fixstate.load_fix_config(config_path, topology)
+    settings = amps_sow.AmpsSettings.from_env(environ)
+    source = amps_sow.start_source(fix_config, settings)  # tables now; AMPS connects in the background
+    published, tables = _fix_tables(topology, tol, fix_config, source.tables)
+    published["amps_source"] = source
+    banner = [f"amps: {settings.describe()}; mapping {config_path or '(built-in DEFAULT_FIX_CONFIG: demo topic names)'}"]
+    for system in fix_config.systems:
+        topics = ", ".join(fix_config.topics[system.system]) or "NO TOPICS CONFIGURED"
+        filter_ = fix_config.filters.get(system.system)
+        banner.append(f"  {system.system:<7} sow_and_subscribe {topics}" + (f" filter {filter_}" if filter_ else ""))
+    banner.append("tables fill as each snapshot arrives; amps_source.status() shows epochs and counts")
     return published, tables, banner
 
 
@@ -85,8 +115,11 @@ def build(environ: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     """Build every global: the source tables, ``otr_*`` tables, the API, the dashboard."""
     topology = config.default_topology()
     tol = config.qty_tolerance(environ)
-    if config.source(environ) == "state-files":
-        published, tables, banner = _state_files_source(topology, tol, environ)
+    kind = config.source(environ)
+    if kind == "amps":
+        published, tables, banner = _amps_source(topology, tol, environ)
+    elif kind == "fix-files":
+        published, tables, banner = _fix_files_source(topology, tol, environ)
     else:
         published, tables, banner = _mock_source(topology, tol, environ)
     api = query_api.make_query_api(tables)

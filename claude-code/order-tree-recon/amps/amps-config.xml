@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  A local AMPS broker for the order tree demo (docs/14-order-tree-reconciliation.md §12.6):
+  the five SOW topics of order_tree_recon.fixstate.DEFAULT_FIX_CONFIG, each holding the latest
+  FIX order state per OrderID.
+
+  Only needed to try OTR_SOURCE=amps without your firm's AMPS. Started by
+  docker/docker-compose.order-tree-amps.yml under the `broker` profile, with the same
+  locally built image docker/docker-compose.remote-uri.yml uses (AMPS_IMAGE; there is no public
+  AMPS image). Load it with the sample messages:
+
+    podman exec otr-deephaven python -m order_tree_recon.fixstate_mock --publish tcp://amps:9007/amps/fix
+
+  NOT verified in this repository's CI (no AMPS broker there). Before relying on it run
+  `ampServer [dash][dash]verify-config /amps/config/amps-config.xml` inside the AMPS container;
+  the Admin, Transports and Logging sections are the ones deephaven-remote-uri/amps verified
+  against AMPS 5.3.5.
+
+  * SOW topics keep one record per key -- here the FIX OrderID (/37) -- so a new state of an
+    order replaces the old one, and sow_and_subscribe gives a subscriber the current records
+    followed by every change. A record deleted with sow_delete (or expired) reaches a
+    subscriber that asked for `oof` as an oof message.
+  * The message type comes from the client URI (tcp://amps:9007/amps/fix) and must agree with
+    each topic's MessageType: fix, SOH delimited, bodies without the 8/9/10 framing.
+  * Relative paths resolve under /amps/data, a named volume (`down -v` wipes the SOW files).
+-->
+<AMPSConfig>
+
+  <Name>order-tree-recon</Name>
+
+  <Admin>
+    <InetAddr>8085</InetAddr>
+    <FileName>./stats/stats.db</FileName>
+    <Interval>10s</Interval>
+  </Admin>
+
+  <Transports>
+    <Transport>
+      <Name>amps-tcp</Name>
+      <Type>tcp</Type>
+      <InetAddr>9007</InetAddr>
+      <Protocol>amps</Protocol>
+      <ReuseAddr>true</ReuseAddr>
+    </Transport>
+  </Transports>
+
+  <Logging>
+    <Target>
+      <Protocol>stdout</Protocol>
+      <Level>info</Level>
+    </Target>
+  </Logging>
+
+  <SOW>
+    <Topic>
+      <Name>raptor.orders</Name>
+      <MessageType>fix</MessageType>
+      <Key>/37</Key>
+      <FileName>./sow/%n.sow</FileName>
+    </Topic>
+    <Topic>
+      <Name>algo.parent.orders</Name>
+      <MessageType>fix</MessageType>
+      <Key>/37</Key>
+      <FileName>./sow/%n.sow</FileName>
+    </Topic>
+    <Topic>
+      <Name>algo.child.orders</Name>
+      <MessageType>fix</MessageType>
+      <Key>/37</Key>
+      <FileName>./sow/%n.sow</FileName>
+    </Topic>
+    <Topic>
+      <Name>router.parent.orders</Name>
+      <MessageType>fix</MessageType>
+      <Key>/37</Key>
+      <FileName>./sow/%n.sow</FileName>
+    </Topic>
+    <Topic>
+      <Name>router.child.orders</Name>
+      <MessageType>fix</MessageType>
+      <Key>/37</Key>
+      <FileName>./sow/%n.sow</FileName>
+    </Topic>
+  </SOW>
+
+</AMPSConfig>

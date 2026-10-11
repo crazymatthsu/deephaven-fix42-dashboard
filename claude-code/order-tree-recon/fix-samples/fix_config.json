@@ -1,0 +1,16 @@
+{"systems": [
+  {"system": "RAPTOR", "topics": ["raptor.orders"], "files": ["raptor.*.fix"],
+   "levels": [
+     {"level": "CLIENT"}
+  ]},
+  {"system": "ALGO", "topics": ["algo.parent.orders", "algo.child.orders"], "files": ["algo.*.fix"], "tags": {"Destination": "847"},
+   "levels": [
+     {"level": "ALGO_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+     {"level": "ALGO_PARENT", "link_tag": "11"}
+  ]},
+  {"system": "OR", "topics": ["router.parent.orders", "router.child.orders"], "files": ["router.*.fix"],
+   "levels": [
+     {"level": "OR_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+     {"level": "OR_PARENT", "link_tag": "11"}
+  ]}
+]}

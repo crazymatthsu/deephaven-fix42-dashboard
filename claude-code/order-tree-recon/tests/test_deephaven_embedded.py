@@ -11,10 +11,11 @@ deephaven-server==42.4`` -- ~600 MB with its JVM jars, needs JDK 17+) and
 * the DAG is incremental: one new fill on a venue order (a keyed input table here,
   your live order feed in production) re-derives the break and the bucket exposure
   without rebuilding anything;
-* the order-state path: the engine's fold of the message tables (delivered out of order,
-  text or typed columns) equals :func:`states.fold_all`, the tree it builds equals the
-  reference, an appended state message ticks through to a break, and
-  ``OTR_SOURCE=state-files`` builds the app from ``state-samples/``.
+* the FIX order-state path: the engine's SOW mirror and fold equal the python twins
+  (:func:`fixstate.sow_current`, :func:`fixstate.fold_events`) -- deletes and a reconnect
+  snapshot included -- and the tree equals the reference; the AMPS source, fed real
+  ``AMPS.Message`` objects through a stub client, ticks the tree live (a fill, an ``oof``,
+  a reconnect); ``OTR_SOURCE=fix-files`` / ``amps`` build the app.
 """
 
 from __future__ import annotations
@@ -208,10 +209,10 @@ def test_app_entrypoint_builds_everything(server):
 
 
 # --------------------------------------------------------------------------------------
-# The order-state path (states_dag)
+# FIX order states from AMPS SOW topics (fixstate_dag, amps_sow)
 # --------------------------------------------------------------------------------------
 
-SAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state-samples")
+SAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fix-samples")
 
 
 def _sorted(rows):
@@ -223,147 +224,172 @@ def _engine_levels(levels):
 
 
 @pytest.fixture(scope="module")
-def state_book(server):
-    import random
-
-    from order_tree_recon import states, states_dag
+def fix_book(server, book):
+    from order_tree_recon import fixstate, fixstate_dag, fixstate_mock
 
     topology = config.default_topology()
-    cfg = states.load_state_config("", topology)
-    messages = {s.system: states.read_state_files(s.files, SAMPLES_DIR) for s in cfg.systems}
-    # Noise on both sides: a message without an order id (skipped) and an order whose
-    # numbers are malformed (null, never an error) and whose side code is unknown.
-    inputs = {}
-    for system, (msgs, columns, _, _) in messages.items():
-        inputs[system] = list(msgs) + [{c: "" for c in columns}]
-    inputs["RAPTOR"].append(dict({c: "" for c in messages["RAPTOR"][1]}, OrderId="ZZ-NOISE", Side="Q",
-                                 OrderQty="1,000", CumQty="abc", LeavesQty=" 5 ", AvgPx="inf", OrdStatus="NEW"))
-    rows, py_ids = states.fold_all(cfg, inputs)
-    # The engine gets the sequenced systems shuffled: the sequence field restores the order.
-    rng = random.Random(11)
-    tables = {}
-    for system, msgs in inputs.items():
-        msgs = list(msgs)
-        if system in ("ALGO", "OR"):
-            rng.shuffle(msgs)
-        tables[system] = states_dag.state_table(msgs, messages[system][1])
-    levels, ids = states_dag.state_level_tables(topology, cfg, tables)
-    return {"cfg": cfg, "messages": messages, "tables": tables, "levels": levels, "ids": ids,
+    cfg = fixstate.load_fix_config("", topology)
+    events = fixstate_mock.events(book)
+    # Noise on both sides: an event with no key, garbage, a malformed number.
+    events["RAPTOR"] = events["RAPTOR"] + [
+        fixstate.event("raptor.orders", "", 10_000),
+        fixstate.event("raptor.orders", "not fix at all", 10_001),
+        fixstate.event("raptor.orders", "35=8|37=ZZ-NOISE|11=Z|55=X|54=Q|38=1,000|14=abc|151= 5 |6=inf|39=0|", 10_002),
+    ]
+    levels, ids, current = fixstate_dag.fix_level_tables(
+        topology, cfg, {system: fixstate_dag.event_table(rows) for system, rows in events.items()})
+    rows, py_ids = fixstate.fold_events(cfg, events)
+    return {"cfg": cfg, "events": events, "levels": levels, "ids": ids, "current": current,
             "rows": rows, "py_ids": py_ids}
 
 
-def test_state_fold_matches_python_fold(state_book):
-    assert _engine_levels(state_book["levels"]) == _sorted(state_book["rows"])
-    assert {(r["System"], r["Id"], r["OrderId"]) for r in _rows(state_book["ids"])} == set(state_book["py_ids"])
+def test_fix_fold_matches_python_twin(fix_book):
+    assert _engine_levels(fix_book["levels"]) == _sorted(fix_book["rows"])
+    assert {(r["System"], r["Id"], r["OrderId"]) for r in _rows(fix_book["ids"])} == set(fix_book["py_ids"])
+    raptor_sow = _rows(fix_book["current"]["RAPTOR"].view(["T37"]))
+    assert len(raptor_sow) == sum(1 for r in fix_book["rows"] if r["Level"] == "CLIENT")
 
 
-def test_state_fold_accepts_typed_columns(state_book):
-    """A Kafka json_spec table: numeric quantities, a numeric sequence, null prices."""
-    from deephaven import new_table
-    from deephaven.column import double_col, long_col, string_col
-    from deephaven.constants import NULL_DOUBLE
-
-    from order_tree_recon import states_dag
-
-    msgs, _, _, _ = state_book["messages"]["ALGO"]
-    text_columns = ("AlgoOrderId", "ParentAlgoOrderId", "RaptorOrderId", "Strategy", "Symbol", "Side", "State")
-    typed = new_table(
-        [string_col(c, [m[c] for m in msgs]) for c in text_columns]
-        + [long_col(c, [int(m[c]) for m in msgs]) for c in ("Version", "Qty", "Filled", "Open")]
-        + [double_col("AvgPrice", [float(m["AvgPrice"]) if m["AvgPrice"] else NULL_DOUBLE for m in msgs])]
-    )
-    topology = config.default_topology()
-    levels, _ = states_dag.state_level_tables(topology, state_book["cfg"], {"ALGO": typed})
-    algo = {k: v for k, v in levels.items() if k.startswith("ALGO")}
-    expected = [r for r in state_book["rows"] if r["Level"].startswith("ALGO")]
-    assert _engine_levels(algo) == _sorted(expected)
-
-
-def test_state_path_recon_matches_reference(state_book, book):
-    from order_tree_recon import dag, states_mock
+def test_fix_path_recon_matches_reference(fix_book, book):
+    from order_tree_recon import dag, fixstate_mock
     from order_tree_recon.query_api import make_query_api
 
     topology = config.default_topology()
-    tables = dag.build_order_tree(topology, state_book["levels"], 1e-6, extra_ids=state_book["ids"])
-    ref = reference.reconcile(topology, state_book["rows"], 1e-6, extra_ids=state_book["py_ids"])
+    tables = dag.build_order_tree(topology, fix_book["levels"], 1e-6, extra_ids=fix_book["ids"])
+    ref = reference.reconcile(topology, fix_book["rows"], 1e-6, extra_ids=fix_book["py_ids"])
     engine = {r["NodeKey"]: r for r in _rows(tables["otr_recon"])}
     assert set(engine) == set(ref)
-    diffs = [
-        (key, column, engine[key][column], ref[key][column])
-        for key in ref
-        for column in dag.RECON_COLUMNS
-        if not _same(engine[key][column], ref[key][column])
-    ]
+    diffs = [(key, column, engine[key][column], ref[key][column])
+             for key in ref for column in dag.RECON_COLUMNS if not _same(engine[key][column], ref[key][column])]
     assert diffs == []
-
-    # find_tree resolves the amended-away ClOrdID through the id history.
-    _, client_id = book.scenario_roots[states_mock.AMENDED_SCENARIO]
-    client = next(r for r in state_book["rows"] if r["OrderId"] == client_id)
-    tree = _rows(make_query_api(tables)["find_tree"](client["AltId"][: -len("-R1")]))
+    # find_tree resolves the amended-away ClOrdID (Raptor's OrigClOrdID / id history).
+    _, client_id = book.scenario_roots[fixstate_mock.AMENDED_SCENARIO]
+    tree = _rows(make_query_api(tables)["find_tree"]("BLUEFIN-00003"))
     assert {r["RootKey"] for r in tree} == {f"RAPTOR|{client_id}"}
     assert all(r["LinkState"] in ("ROOT", "LINKED") for r in tree)
 
 
-def test_state_messages_tick_through_to_a_break(state_book, book):
-    """An appended venue state the router parent never books -> UNBOOKED_FILL, live."""
-    from deephaven import input_table
+def test_sow_mirror_deletes_and_reconnect_match_twin(server):
+    from order_tree_recon import fixstate, fixstate_dag
 
-    from order_tree_recon import states_dag
+    cfg = fixstate.load_fix_config("", config.default_topology())
+    E = fixstate.event
+    a = "35=8|37=A|11=A|55=X|54=1|38=100|14=0|151=100|39=0|"
+    b = "35=8|37=B|11=B|55=X|54=1|38=100|14=0|151=100|39=0|"
+    c = "35=8|37=C|11=C|55=X|54=1|38=100|14=0|151=100|39=0|"
+    events = [E("t1", a, 1, sow_key="ka"), E("t1", b, 2, sow_key="kb"), E("t1", c, 3, sow_key="kc"),
+              E("t1", "", 4, action="SNAPSHOT_END"), E("t1", b.replace("14=0", "14=50"), 5, sow_key="kb"),
+              E("t1", "", 6, action="DELETE", sow_key="kc"), E("t2", c, 7)]
+    stages = [events, events + [E("t1", b, 8, epoch=2, sow_key="kb")],
+              events + [E("t1", b, 8, epoch=2, sow_key="kb"), E("t1", "", 9, action="SNAPSHOT_END", epoch=2)]]
+    for stage in stages:
+        mirror = fixstate_dag.sow_mirror(fixstate_dag.parsed_events(cfg, "RAPTOR", fixstate_dag.event_table(stage)))
+        engine = sorted((r["Topic"], r["T37"], r["T14"]) for r in _rows(mirror.view(["Topic", "T37", "T14"])))
+        twin = sorted((e["Topic"], *fixstate.fix_values(e["RawFix"], ["37", "14"])) for e in fixstate.sow_current(stage))
+        assert engine == twin
+    assert [t[1] for t in twin] == ["B", "C"]  # A was not re-sent by snapshot 2; C lives on in t2
+
+
+def _amps_message(command, data="", key=""):
+    """A real ``AMPS.Message`` when the client is installed, else a stand-in with the same getters."""
+    try:
+        import AMPS
+    except ImportError:  # pragma: no cover - the stand-in keeps the test runnable without the client
+        class Stub:
+            def get_command(self): return command
+            def get_data(self): return data
+            def get_sow_key(self): return key
+        return Stub()
+    message = AMPS.Message()
+    message.set_command(command)
+    message.set_data(data.replace("|", "\x01"))
+    message.set_sow_key(key)
+    return message
+
+
+def test_amps_source_ticks_the_tree_live(server):
+    """sow_and_subscribe through a stub client: snapshot, a fill, an oof, a reconnect snapshot."""
+    from order_tree_recon import amps_sow, dag, fixstate, fixstate_dag
 
     topology = config.default_topology()
-    router_msgs, router_columns, _, _ = state_book["messages"]["OR"]
-    router = input_table(init_table=states_dag.state_table(router_msgs, router_columns))  # append-only
-    messages = dict(state_book["tables"], OR=router)
-    tables = states_dag.build_from_states(topology, state_book["cfg"], messages, 1e-6)
+    cfg = fixstate.load_fix_config("", topology)
+    handlers = {}
 
-    _, order_id = book.scenario_roots["working"]
-    root = next(r for r in book.roots if r.order_id == order_id)
-    venue = next(o for o in root.walk() if o.level == "OR_CHILD" and o.leaves >= 100)
-    parent_key = f"OR|{venue.link_id}"
+    class Client:
+        def add_connection_state_listener(self, f): pass
+        def connect_and_logon(self): pass
+        def execute_async(self, command, handler):
+            handlers[command] = handler
+            return command
+        def unsubscribe(self, sub_id): pass
+        def close(self): pass
 
-    def kind_of(key):
-        rows = _rows(tables["otr_recon"].where(f"NodeKey == `{key}`").view(["BreakKind"]))
-        return rows[0]["BreakKind"] if rows else None
+    source = amps_sow.start_source(cfg, amps_sow.AmpsSettings(["tcp://stub:9007/amps/fix"]), background=False,
+                                   client_factory=lambda s: Client(), command_factory=lambda t, f, s: t)
+    levels, ids, current = fixstate_dag.fix_level_tables(topology, cfg, source.tables)
+    tables = dag.build_order_tree(topology, levels, 1e-6, extra_ids=ids)
 
-    assert kind_of(parent_key) == "NONE"
-    latest = [m for m in router_msgs if m["RouterOrderId"] == venue.order_id][-1]
-    filled = dict(latest, UpdateTime="2026-10-09T23:59:59.999", CumQty=str(int(venue.cum + 100)),
-                  LeavesQty=str(int(venue.leaves - 100)), Status="PARTIALLY_FILLED")
-    router.add(states_dag.state_table([filled], router_columns))
+    def nodes():
+        return sorted((r["NodeKey"], r["CumQty"], r["LinkState"]) for r in
+                      _rows(tables["otr_recon"].view(["NodeKey", "CumQty", "LinkState"])))
 
-    assert _wait_for(lambda: kind_of(parent_key) == "UNBOOKED_FILL")
-    bucket = _rows(tables["otr_exposure"].where(["RootMoniker == `ACME`", "RootSymbol == `MSFT`", "RootSide == `BUY`"]))
-    assert bucket[0]["NetUnbookedQty"] == 100.0
+    client = "35=8|37=R1|11=C1|1=ACME|55=AAPL|54=1|38=100|14=0|151=100|6=0|39=0|"
+    other = "35=8|37=R2|11=C2|1=ACME|55=MSFT|54=1|38=100|14=0|151=100|6=0|39=0|"
+    parent = "35=8|37=P1|11=C1|55=AAPL|54=1|38=100|14=0|151=100|6=0|39=0|100=SOR|"
+    raptor, router = handlers["raptor.orders"], handlers["router.parent.orders"]
+    for handler, msgs in ((raptor, [("sow", client, "r1"), ("sow", other, "r2")]), (router, [("sow", parent, "p1")])):
+        handler(_amps_message("group_begin"))
+        for command, data, key in msgs:
+            handler(_amps_message(command, data, key))
+        handler(_amps_message("group_end"))
+    expected = [("OR|P1", 0.0, "LINKED"), ("RAPTOR|R1", 0.0, "ROOT"), ("RAPTOR|R2", 0.0, "ROOT")]
+    assert _wait_for(lambda: nodes() == expected), nodes()
+
+    raptor(_amps_message("publish", client.replace("14=0", "14=40").replace("151=100", "151=60"), "r1"))
+    raptor(_amps_message("oof", other, "r2"))
+    expected = [("OR|P1", 0.0, "LINKED"), ("RAPTOR|R1", 40.0, "ROOT")]
+    assert _wait_for(lambda: nodes() == expected), nodes()
+
+    # Reconnect: the router's new snapshot no longer has P1 (deleted while disconnected).
+    router(_amps_message("group_begin"))
+    router(_amps_message("group_end"))
+    assert _wait_for(lambda: nodes() == [("RAPTOR|R1", 40.0, "ROOT")]), nodes()
+    status = {r["Topic"]: r for r in source.status()}
+    assert (status["router.parent.orders"]["Epoch"], status["raptor.orders"]["DELETE"]) == (2, 1)
+    source.stop()
 
 
-def test_app_entrypoint_state_files(server, book, ref):
+def test_app_entrypoint_fix_files(server, book, ref):
     from order_tree_recon import app
 
-    built = app.build({"OTR_SOURCE": "state-files", "OTR_STATE_DIR": SAMPLES_DIR})
-    for name in ("state_raptor_updates", "state_algo_updates", "state_or_updates", "otr_recon", "otr_tree",
-                 "order_tree", app.DASHBOARD_NAME):
+    built = app.build({"OTR_SOURCE": "fix-files", "OTR_FIX_DIR": SAMPLES_DIR})
+    for name in ("fix_raptor_sow", "fix_algo_sow", "fix_or_sow", "otr_recon", "otr_tree", "order_tree",
+                 app.DASHBOARD_NAME):
         assert name in built, name
     assert built["otr_nodes"].size == len(mockdata.canonical_rows(book))
     assert built["otr_breaks"].size == sum(n["Breaks"] for n in ref.values())
 
 
-def test_state_files_with_a_system_missing(server, tmp_path):
-    """Only Raptor's file present: the other levels are empty, everything still builds."""
+def test_app_entrypoint_amps_comes_up_while_amps_is_unreachable(server):
+    from order_tree_recon import app
+
+    built = app.build({"OTR_SOURCE": "amps", "OTR_AMPS_URI": "tcp://127.0.0.1:1/amps/fix", "OTR_FIX_DIR": SAMPLES_DIR})
+    try:
+        for name in ("amps_source", "fix_raptor_sow", "otr_recon", app.DASHBOARD_NAME):
+            assert name in built, name
+        assert built["otr_nodes"].size == 0
+        assert [s[1] for s in built["amps_source"].subscriptions()][:1] == ["raptor.orders"]
+    finally:
+        built["amps_source"].stop()
+
+
+def test_fix_files_with_a_system_missing(server, tmp_path):
     import shutil
 
     from order_tree_recon import app
 
-    shutil.copy(os.path.join(SAMPLES_DIR, "raptor.csv"), tmp_path / "raptor.csv")
-    built = app.build({"OTR_SOURCE": "state-files", "OTR_STATE_DIR": str(tmp_path)})
+    shutil.copy(os.path.join(SAMPLES_DIR, "raptor.orders.fix"), tmp_path / "raptor.orders.fix")
+    built = app.build({"OTR_SOURCE": "fix-files", "OTR_FIX_DIR": str(tmp_path)})
     nodes = _rows(built["otr_recon"].view(["Level", "LinkState"]))
     assert nodes and {(n["Level"], n["LinkState"]) for n in nodes} == {("CLIENT", "ROOT")}
-    assert built["state_algo_updates"].size == 0
     assert app.DASHBOARD_NAME in built
-
-
-def test_missing_column_is_a_clear_error(server, state_book):
-    from order_tree_recon import states_dag
-
-    table = state_book["tables"]["OR"].drop_columns(["UpstreamOrderId"])
-    with pytest.raises(ValueError, match="UpstreamOrderId"):
-        states_dag.state_level_tables(config.default_topology(), state_book["cfg"], {"OR": table})

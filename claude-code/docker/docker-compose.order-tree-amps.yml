@@ -1,0 +1,58 @@
+# Overlay: the order tree on FIX order states from AMPS SOW topics (docs/14 section 12).
+# Merge it onto the base file:
+#
+#   OTR_AMPS_URI=tcp://amps-host:9007/amps/fix OTR_FIX_HOST_DIR=/abs/path/with/fix_config.json \
+#     podman compose -f docker/docker-compose.order-tree.yml -f docker/docker-compose.order-tree-amps.yml up -d
+#
+# or `OTR_SOURCE=amps bash order-tree-recon/scripts/run_demo.sh`. What it changes:
+#
+#   * the deephaven service runs localhost/fix42-deephaven-amps:42.4 -- the stock server plus
+#     amps-python-client, built from docker/deephaven-amps.Dockerfile with the base image and
+#     the pip index taken from repos.env (docs/15), so a JFrog override applies to the build;
+#   * OTR_SOURCE=amps: one sow_and_subscribe per topic in fix_config.json (OTR_FIX_HOST_DIR).
+#     The server comes up even while AMPS is unreachable; the tables fill once it connects.
+#
+# Optional local broker, to try it without your firm's AMPS (profile `broker`; needs a locally
+# built AMPS image, AMPS_IMAGE, the same one docker-compose.remote-uri.yml uses):
+#
+#   OTR_AMPS_URI=tcp://amps:9007/amps/fix podman compose -f docker/docker-compose.order-tree.yml \
+#     -f docker/docker-compose.order-tree-amps.yml --profile broker up -d
+#   podman exec otr-deephaven python -m order_tree_recon.fixstate_mock --publish tcp://amps:9007/amps/fix
+# ---------------------------------------------------------------------------------------------
+
+services:
+
+  deephaven:
+    build:
+      context: .
+      dockerfile: deephaven-amps.Dockerfile
+      args:
+        # repos.env (docs/15): the base image and the pip index of the build.
+        DEEPHAVEN_IMAGE: ${DEEPHAVEN_IMAGE:-ghcr.io/deephaven/server:42.4}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
+    image: localhost/fix42-deephaven-amps:42.4
+    environment:
+      OTR_SOURCE: amps
+
+  # The local broker: the five SOW topics of order-tree-recon/amps/amps-config.xml.
+  amps:
+    profiles: ["broker"]
+    image: ${AMPS_IMAGE:-localhost/amps-demo:5.3.5.135}
+    container_name: otr-amps
+    hostname: amps
+    command: ["/amps/config/amps-config.xml"]
+    volumes:
+      - ../order-tree-recon/amps/amps-config.xml:/amps/config/amps-config.xml:ro,z
+      - otr-amps-data:/amps/data
+    ports:
+      - "${OTR_AMPS_PORT:-39007}:9007"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9007'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
+volumes:
+  otr-amps-data:

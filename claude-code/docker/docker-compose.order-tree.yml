@@ -1,5 +1,5 @@
-# Order tree reconciliation -- Raptor -> algo -> order router, on mock order tables or on
-# order-state message files (docs/14-order-tree-reconciliation.md, order-tree-recon/README.md).
+# Order tree reconciliation -- Raptor -> algo -> order router, on mock order tables or on FIX
+# order-state messages (docs/14-order-tree-reconciliation.md, order-tree-recon/README.md).
 #
 #   podman compose -f docker/docker-compose.order-tree.yml up -d
 #   open http://localhost:10000/ide            # Panels ▸ order_tree_dashboard
@@ -7,13 +7,17 @@
 #
 # or `bash order-tree-recon/scripts/run_demo.sh [up|down|status|logs]`.
 #
-# Your own order states (doc 14 section 12): put the CSV / JSON Lines files and a
-# state_config.json in one folder, then
+# FIX order states (doc 14 section 12):
 #
-#   OTR_SOURCE=state-files OTR_STATE_HOST_DIR=/abs/path/to/files podman compose -f ... up -d
+#   from AMPS SOW topics -- add the AMPS overlay (it builds the image with the AMPS client):
+#     OTR_AMPS_URI=tcp://amps-host:9007/amps/fix OTR_FIX_HOST_DIR=/abs/path/with/fix_config.json \
+#       podman compose -f docker/docker-compose.order-tree.yml -f docker/docker-compose.order-tree-amps.yml up -d
+#   from files (SOW dumps / recorded subscriptions, one FIX message per line):
+#     OTR_SOURCE=fix-files OTR_FIX_HOST_DIR=/abs/path/to/files podman compose -f ... up -d
 #
-# OTR_STATE_HOST_DIR must be absolute (a relative path is taken relative to THIS file); it
-# defaults to order-tree-recon/state-samples, the mock book as order-state messages.
+# OTR_FIX_HOST_DIR (mounted at /otr-fix) holds fix_config.json and, for fix-files, the files.
+# It must be absolute (a relative path is taken relative to THIS file); it defaults to
+# order-tree-recon/fix-samples, the mock book as FIX order-state messages.
 #
 # One service, the stock Deephaven image (deephaven.ui is bundled). No broker: the system
 # tables are static (mock tables or files read at startup), because the point of this demo
@@ -31,7 +35,7 @@ services:
   # /otr-scripts = order-tree-recon/src      (the order_tree_recon package)
   # /dh-app-lib  = apps/_lib                 (loader shared by every app)
   # /app.d       = apps/order-tree-recon     (this app's descriptor)
-  # /otr-states  = $OTR_STATE_HOST_DIR       (order-state files + state_config.json; OTR_SOURCE=state-files)
+  # /otr-fix     = $OTR_FIX_HOST_DIR         (fix_config.json + FIX message files)
   #
   # PYTHONPATH=/otr-scripts because app-mode scripts run with __file__ UNSET (verified on
   # 42.4), so the entrypoint cannot bootstrap sys.path from its own location.
@@ -45,7 +49,7 @@ services:
       - ../order-tree-recon/src:/otr-scripts:ro,z
       - ./apps/_lib:/dh-app-lib:ro,z
       - ./apps/order-tree-recon:/app.d:ro,z
-      - ${OTR_STATE_HOST_DIR:-../order-tree-recon/state-samples}:/otr-states:ro,z
+      - ${OTR_FIX_HOST_DIR:-../order-tree-recon/fix-samples}:/otr-fix:ro,z
     environment:
       DH_APP: order-tree-recon
       PYTHONPATH: "/otr-scripts"
@@ -58,9 +62,14 @@ services:
       OTR_SEED: "${OTR_SEED:-42}"
       OTR_MOCK_FAMILIES: "${OTR_MOCK_FAMILIES:-24}"
       OTR_QTY_TOL: "${OTR_QTY_TOL:-1e-6}"
-      OTR_SOURCE: "${OTR_SOURCE:-mock}"          # mock | state-files (section 12)
-      OTR_STATE_DIR: /otr-states
-      OTR_STATE_CONFIG: "${OTR_STATE_CONFIG:-}"  # default: /otr-states/state_config.json
+      OTR_SOURCE: "${OTR_SOURCE:-mock}"          # mock | fix-files | amps (section 12)
+      OTR_FIX_DIR: /otr-fix
+      OTR_FIX_CONFIG: "${OTR_FIX_CONFIG:-}"      # default: /otr-fix/fix_config.json
+      # --- OTR_SOURCE=amps (needs the AMPS client: docker-compose.order-tree-amps.yml) -------
+      OTR_AMPS_URI: "${OTR_AMPS_URI:-}"          # comma separated for an HA pair
+      OTR_AMPS_CLIENT_NAME: "${OTR_AMPS_CLIENT_NAME:-dh-order-tree}"
+      OTR_AMPS_BATCH_SIZE: "${OTR_AMPS_BATCH_SIZE:-1000}"
+      OTR_AMPS_TIMEOUT_MS: "${OTR_AMPS_TIMEOUT_MS:-10000}"
     healthcheck:
       test: ["CMD", "/opt/grpc_health_probe/grpc_health_probe", "-addr=localhost:10000"]
       interval: 10s

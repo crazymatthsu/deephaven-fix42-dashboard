@@ -6,17 +6,16 @@
 #   bash order-tree-recon/scripts/run_demo.sh down       # down -v
 #   bash order-tree-recon/scripts/run_demo.sh status     # container + health
 #   bash order-tree-recon/scripts/run_demo.sh logs       # the app's log lines
-#   OTR_SOURCE=amps bash order-tree-recon/scripts/run_demo.sh [up|down|status|logs|publish]
+#   bash order-tree-recon/scripts/run_demo.sh publish    # load the sample FIX order states into AMPS
 #
 # Knobs (all optional): DH_PORT (10000), DH_XMX (2g), DH_CONTAINER (otr-deephaven) and the
-# OTR_* variables of docs/14-order-tree-reconciliation.md section 9 -- e.g.
+# OTR_* variables of docs/14-order-tree-reconciliation.md sections 3 and 12 -- e.g.
 #   OTR_MOCK_FAMILIES=200 OTR_SEED=7 bash order-tree-recon/scripts/run_demo.sh
-#
-# OTR_SOURCE=amps runs the AMPS-fed stack instead (docker/docker-compose.order-tree-amps.yml:
-# AMPS from your local image + Deephaven on :10020, container otr-amps-deephaven, doc 14
-# section 13). `up` then publishes the mock book (OTR_SEED / OTR_MOCK_FAMILIES) into the SOW
-# topics from inside the Deephaven container; OTR_AMPS_PUBLISH=0 skips that, and
-# `publish` re-publishes it on a running stack.
+#   OTR_SOURCE=fix-files bash order-tree-recon/scripts/run_demo.sh      # the sample FIX order states
+#   OTR_SOURCE=amps OTR_AMPS_URI=tcp://amps-host:9007/amps/fix OTR_FIX_HOST_DIR=/path/with/fix_config.json \
+#     bash order-tree-recon/scripts/run_demo.sh                         # your AMPS SOW topics
+#   OTR_SOURCE=amps OTR_AMPS_BROKER=local bash order-tree-recon/scripts/run_demo.sh
+#                                   # + a local AMPS (AMPS_IMAGE) loaded with the samples
 set -euo pipefail
 # Artifact sources -- container registries, pip index, ... -- from claude-code/repos.env and
 # your override file (docs/15). Loaded before anything pulls an image or installs a package.
@@ -24,36 +23,31 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/repos.sh"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-SOURCE="${OTR_SOURCE:-mock}"
-case "$SOURCE" in
-  mock)
-    COMPOSE_FILE="$ROOT/docker/docker-compose.order-tree.yml"
-    CONTAINER="${DH_CONTAINER:-otr-deephaven}"
-    PORT="${DH_PORT:-10000}"
-    ;;
-  amps)
-    COMPOSE_FILE="$ROOT/docker/docker-compose.order-tree-amps.yml"
-    CONTAINER="${DH_CONTAINER:-otr-amps-deephaven}"
-    PORT="${DH_PORT:-10020}"
-    ;;
-  *)
-    echo "OTR_SOURCE=$SOURCE: expected mock or amps" >&2
-    exit 2
-    ;;
-esac
-export DH_CONTAINER="$CONTAINER" DH_PORT="$PORT"
+COMPOSE_FILE="$ROOT/docker/docker-compose.order-tree.yml"
+CONTAINER="${DH_CONTAINER:-otr-deephaven}"
+PORT="${DH_PORT:-10000}"
 COMPOSE=(podman compose -f "$COMPOSE_FILE")
+if [ "${OTR_SOURCE:-}" = "amps" ]; then
+  # The AMPS overlay: the image with the AMPS client, OTR_SOURCE=amps (and the local broker).
+  COMPOSE+=(-f "$ROOT/docker/docker-compose.order-tree-amps.yml")
+  if [ "${OTR_AMPS_BROKER:-}" = "local" ]; then
+    COMPOSE+=(--profile broker)
+    OTR_AMPS_URI="${OTR_AMPS_URI:-tcp://amps:9007/amps/fix}"
+  fi
+  [ -n "${OTR_AMPS_URI:-}" ] || { echo "[order-tree] OTR_SOURCE=amps needs OTR_AMPS_URI (or OTR_AMPS_BROKER=local)" >&2; exit 2; }
+  export OTR_AMPS_URI
+fi
+
+# A relative OTR_FIX_HOST_DIR would resolve against docker/, not the caller's directory.
+if [ -n "${OTR_FIX_HOST_DIR:-}" ]; then
+  [ -d "$OTR_FIX_HOST_DIR" ] || { echo "[order-tree] OTR_FIX_HOST_DIR=$OTR_FIX_HOST_DIR is not a directory" >&2; exit 2; }
+  OTR_FIX_HOST_DIR="$(cd "$OTR_FIX_HOST_DIR" && pwd)"
+  # Git Bash: /c/Users/... -> C:/Users/..., the form a Windows podman understands.
+  if command -v cygpath >/dev/null 2>&1; then OTR_FIX_HOST_DIR="$(cygpath -m "$OTR_FIX_HOST_DIR")"; fi
+  export OTR_FIX_HOST_DIR
+fi
 
 cmd="${1:-up}"
-
-# The mock book into the AMPS SOW topics, published from inside the Deephaven container
-# (its image has the AMPS client; the host needs nothing). --clear first: a re-publish
-# replaces the book instead of adding a second seed's families to it.
-publish_book() {
-  podman exec "$CONTAINER" python -m order_tree_recon.amps_publish \
-    --uri "tcp://amps:9007/amps/json" --prefix "${OTR_AMPS_TOPIC_PREFIX:-otr.}" \
-    --seed "${OTR_SEED:-42}" --families "${OTR_MOCK_FAMILIES:-24}" --clear
-}
 
 wait_healthy() {
   local deadline=$(( $(date +%s) + ${DH_WAIT_SECS:-240} ))
@@ -78,44 +72,47 @@ wait_healthy() {
 
 case "$cmd" in
   up)
-    echo "[order-tree] starting $CONTAINER on :$PORT (source: $SOURCE, $(basename "$COMPOSE_FILE"))"
+    echo "[order-tree] starting $CONTAINER on :$PORT (compose project order-tree-recon)"
     "${COMPOSE[@]}" up -d
     wait_healthy
-    if [ "$SOURCE" = amps ] && [ "${OTR_AMPS_PUBLISH:-1}" != 0 ]; then
-      publish_book
-    fi
     LOG="$(podman logs "$CONTAINER" 2>&1 || true)"
     if printf '%s\n' "$LOG" | grep -q 'entrypoint loaded OK'; then
       echo "[order-tree] app loaded"
     else
       echo "[order-tree] WARNING: the app has not reported 'entrypoint loaded OK' yet; check: $0 logs"
     fi
-    printf '%s\n' "$LOG" | grep '^\[order-tree\]' | tail -5 || true
+    printf '%s\n' "$LOG" | grep '^\[order-tree\]' | tail -9 || true
     echo
     echo "  IDE:        http://localhost:$PORT/ide                (Panels ▸ order_tree_dashboard)"
     echo "  Dashboard:  http://localhost:$PORT/iframe/widget/?name=order_tree_dashboard"
     echo "  Tables:     http://localhost:$PORT/iframe/table/?name=otr_exposure"
     echo
     echo "  console:    r = order_tree('DUNE', 'MSFT', 'BUY'); r['ladder']; find_tree('OR-00013.2')"
+    if [ "${OTR_SOURCE:-}" = "amps" ]; then
+      echo "  AMPS:       amps_source.status()   (epochs, records per topic)"
+      if [ "${OTR_AMPS_BROKER:-}" = "local" ]; then
+        echo
+        echo "[order-tree] loading the sample order states into the local AMPS"
+        bash "$0" publish
+      fi
+    fi
+    ;;
+  publish)
+    # The sample messages, in send order, to the SOW topics (needs the AMPS client: AMPS image).
+    MSYS_NO_PATHCONV=1 podman exec "$CONTAINER" python -m order_tree_recon.fixstate_mock \
+      --publish "${OTR_AMPS_URI:-tcp://amps:9007/amps/fix}" --delay-ms "${OTR_PUBLISH_DELAY_MS:-0}"
     ;;
   down)
     "${COMPOSE[@]}" down -v
     ;;
-  publish)
-    [ "$SOURCE" = amps ] || { echo "publish needs OTR_SOURCE=amps" >&2; exit 2; }
-    publish_book
-    ;;
   status)
     podman ps -a --filter "name=$CONTAINER" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
-    if [ "$SOURCE" = amps ]; then
-      podman ps -a --filter "name=^${OTR_AMPS_CONTAINER:-otr-amps}\$" --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}'
-    fi
     ;;
   logs)
     podman logs "$CONTAINER" 2>&1 | grep -E '^\[order-tree\]|Traceback|Error|error' | tail -60 || true
     ;;
   *)
-    echo "usage: [OTR_SOURCE=mock|amps] $0 [up|down|status|logs|publish]" >&2
+    echo "usage: $0 [up|down|status|logs|publish]" >&2
     exit 2
     ;;
 esac

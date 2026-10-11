@@ -1,4 +1,4 @@
-# Client-side dependencies of the order-tree AMPS integration test (doc 14 section 13).
+# Client-side dependencies of the order-tree AMPS integration test (doc 14 section 12.7).
 #
 # pydeephaven reads the server's tables; its version tracks the server image
 # (docker/deephaven-amps.Dockerfile -> ghcr.io/deephaven/server:42.4). Bump both together.

@@ -17,23 +17,24 @@ between, so ``OR_PARENT`` lists ``ALGO`` first and ``RAPTOR`` second.
 Environment (all optional, read once at app start; a malformed value is a startup
 error, never a silent fallback -- the same rule every app in this repo follows):
 
-=========================  ==============================  ===================================
-Variable                   Default                         Meaning
-=========================  ==============================  ===================================
-``OTR_QTY_TOL``            ``1e-6``                        absolute tolerance for every
-                                                           quantity comparison
-``OTR_SEED``               ``42``                          mock data seed
-``OTR_MOCK_FAMILIES``      ``24``                          random clean/working/DMA families
-                                                           on top of the scenario catalog
-``OTR_SOURCE``             ``mock``                        ``mock`` tables, or ``amps`` SOW
-                                                           topics (doc 14 section 13)
-``OTR_AMPS_URI``           ``tcp://amps:9007/amps/json``   broker URI(s), comma separated for
-                                                           an HA pair; JSON message type
-``OTR_AMPS_TOPIC_PREFIX``  ``otr.``                        topic = prefix + native table name
-``OTR_AMPS_CLIENT_NAME``   ``otr-deephaven``               AMPS client name (unique per
-                                                           server: a duplicate logon displaces
-                                                           the older connection)
-=========================  ==============================  ===================================
+========================  ========  =================================================
+Variable                  Default   Meaning
+========================  ========  =================================================
+``OTR_QTY_TOL``           ``1e-6``  absolute tolerance for every quantity comparison
+``OTR_SEED``              ``42``    mock data seed
+``OTR_MOCK_FAMILIES``     ``24``    random clean/working/DMA families on top of the
+                                    fixed scenario catalog
+``OTR_SOURCE``            ``mock``  ``mock`` (generated native tables), ``amps`` (FIX
+                                    order states from AMPS SOW topics) or ``fix-files``
+                                    (the same messages from files) -- doc 14 section 12
+``OTR_FIX_DIR``           see note  ``/otr-fix`` in the container (compose mounts
+                                    ``OTR_FIX_HOST_DIR``): the mapping, and the files
+                                    ``fix-files`` reads
+``OTR_FIX_CONFIG``        see note  the JSON tag mapping; default
+                                    ``<OTR_FIX_DIR>/fix_config.json`` if that exists,
+                                    else ``fixstate.DEFAULT_FIX_CONFIG``
+``OTR_AMPS_*``                      connection settings, see :mod:`amps_sow`
+========================  ========  =================================================
 """
 
 from __future__ import annotations
@@ -48,6 +49,11 @@ __all__ = [
     "QTY_TOL_ENV",
     "SEED_ENV",
     "MOCK_FAMILIES_ENV",
+    "SOURCE_ENV",
+    "FIX_DIR_ENV",
+    "FIX_CONFIG_ENV",
+    "SOURCES",
+    "DEFAULT_FIX_DIR",
     "DEFAULT_QTY_TOL",
     "DEFAULT_SEED",
     "DEFAULT_MOCK_FAMILIES",
@@ -67,38 +73,26 @@ __all__ = [
     "qty_tolerance",
     "seed",
     "mock_families",
-    "SOURCE_ENV",
-    "AMPS_URI_ENV",
-    "AMPS_TOPIC_PREFIX_ENV",
-    "AMPS_CLIENT_NAME_ENV",
-    "SOURCES",
-    "DEFAULT_AMPS_URI",
-    "DEFAULT_AMPS_TOPIC_PREFIX",
-    "DEFAULT_AMPS_CLIENT_NAME",
-    "AmpsSettings",
     "source",
-    "amps_settings",
+    "fix_dir",
+    "fix_config_path",
 ]
 
 QTY_TOL_ENV = "OTR_QTY_TOL"
 SEED_ENV = "OTR_SEED"
 MOCK_FAMILIES_ENV = "OTR_MOCK_FAMILIES"
 SOURCE_ENV = "OTR_SOURCE"
-AMPS_URI_ENV = "OTR_AMPS_URI"
-AMPS_TOPIC_PREFIX_ENV = "OTR_AMPS_TOPIC_PREFIX"
-AMPS_CLIENT_NAME_ENV = "OTR_AMPS_CLIENT_NAME"
+FIX_DIR_ENV = "OTR_FIX_DIR"
+FIX_CONFIG_ENV = "OTR_FIX_CONFIG"
+
+#: ``OTR_SOURCE`` values.
+SOURCES: Tuple[str, ...] = ("mock", "amps", "fix-files")
+DEFAULT_FIX_DIR = "/otr-fix"
 
 #: Shares are integral, so anything below one share is "equal"; 1e-6 matches doc 09.
 DEFAULT_QTY_TOL = 1e-6
 DEFAULT_SEED = 42
 DEFAULT_MOCK_FAMILIES = 24
-
-#: Where the three native order tables come from: built-in mock tables, or AMPS SOW topics.
-SOURCES: Tuple[str, ...] = ("mock", "amps")
-#: In-network address of the compose ``amps`` service; ``/amps/json`` picks the message type.
-DEFAULT_AMPS_URI = "tcp://amps:9007/amps/json"
-DEFAULT_AMPS_TOPIC_PREFIX = "otr."
-DEFAULT_AMPS_CLIENT_NAME = "otr-deephaven"
 
 #: Raptor -> algo (parent, children) -> order router (parent, children on venues).
 #: ``street`` marks the level whose orders are live on an exchange: its open quantity
@@ -375,7 +369,7 @@ def mock_families(environ: Optional[Mapping[str, str]] = None) -> int:
 
 
 def source(environ: Optional[Mapping[str, str]] = None) -> str:
-    """``OTR_SOURCE`` -- ``mock`` (the default) or ``amps``."""
+    """``OTR_SOURCE`` -- ``mock``, ``amps`` or ``fix-files``."""
     raw = _env(environ).get(SOURCE_ENV, "").strip().lower()
     if not raw:
         return SOURCES[0]
@@ -384,43 +378,28 @@ def source(environ: Optional[Mapping[str, str]] = None) -> str:
     return raw
 
 
-#: ``tcp://host:port/amps/json`` (or ``tcps://``): the codec speaks JSON only.
-_AMPS_URI_RE = re.compile(r"^tcps?://[^\s/]+:\d+/amps/json$")
-#: Topic prefixes and client names travel in AMPS commands: keep them plain.
-_AMPS_NAME_RE = re.compile(r"^[A-Za-z0-9_.:/-]*$")
+def fix_dir(environ: Optional[Mapping[str, str]] = None, required: bool = True) -> str:
+    """``OTR_FIX_DIR`` -- the mapping (and, for ``fix-files``, the message files) live here.
 
-
-@dataclass(frozen=True)
-class AmpsSettings:
-    """Where the AMPS source connects, and under which name (doc 14 section 13).
-
-    Attributes:
-        uris: Broker URIs; more than one is an HA list the client fails over across.
-        topic_prefix: Topic = prefix + native table name (``otr.router_orders``).
-        client_name: The client name AMPS sees.
+    With ``required`` a missing directory is an error; otherwise it is returned as is.
     """
-
-    uris: Tuple[str, ...]
-    topic_prefix: str
-    client_name: str
-
-    def describe(self) -> str:
-        return f"{','.join(self.uris)} topics={self.topic_prefix}<table> client={self.client_name}"
+    path = _env(environ).get(FIX_DIR_ENV, "").strip() or DEFAULT_FIX_DIR
+    if required and not os.path.isdir(path):
+        raise ValueError(f"{FIX_DIR_ENV}={path!r}: not a directory (mount your FIX files there)")
+    return path
 
 
-def amps_settings(environ: Optional[Mapping[str, str]] = None) -> AmpsSettings:
-    """``OTR_AMPS_URI`` / ``OTR_AMPS_TOPIC_PREFIX`` / ``OTR_AMPS_CLIENT_NAME``, validated."""
-    env = _env(environ)
-    raw_uris = env.get(AMPS_URI_ENV, "").strip()
-    uris = tuple(part for part in raw_uris.replace(",", " ").split() if part) or (DEFAULT_AMPS_URI,)
-    for uri in uris:
-        if not _AMPS_URI_RE.match(uri):
-            raise ValueError(f"{AMPS_URI_ENV}={raw_uris!r}: expected tcp://host:port/amps/json, got {uri!r}")
-    prefix = env.get(AMPS_TOPIC_PREFIX_ENV)
-    prefix = DEFAULT_AMPS_TOPIC_PREFIX if prefix is None else prefix.strip()
-    if not _AMPS_NAME_RE.match(prefix):
-        raise ValueError(f"{AMPS_TOPIC_PREFIX_ENV}={prefix!r}: letters, digits and _ . : / - only")
-    client_name = env.get(AMPS_CLIENT_NAME_ENV, "").strip() or DEFAULT_AMPS_CLIENT_NAME
-    if not _AMPS_NAME_RE.match(client_name):
-        raise ValueError(f"{AMPS_CLIENT_NAME_ENV}={client_name!r}: letters, digits and _ . : / - only")
-    return AmpsSettings(uris, prefix, client_name)
+def fix_config_path(environ: Optional[Mapping[str, str]] = None) -> str:
+    """``OTR_FIX_CONFIG``, else ``<fix dir>/fix_config.json`` if present, else ``""`` (built-in default).
+
+    A relative ``OTR_FIX_CONFIG`` is resolved against the FIX directory.
+    """
+    directory = fix_dir(environ, required=False)
+    raw = _env(environ).get(FIX_CONFIG_ENV, "").strip()
+    if raw:
+        path = raw if os.path.isabs(raw) else os.path.join(directory, raw)
+        if not os.path.isfile(path):
+            raise ValueError(f"{FIX_CONFIG_ENV}={raw!r}: no such file ({path})")
+        return path
+    candidate = os.path.join(directory, "fix_config.json")
+    return candidate if os.path.isfile(candidate) else ""

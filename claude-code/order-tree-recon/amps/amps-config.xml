@@ -1,37 +1,33 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  AMPS broker for the order-tree AMPS source and its integration test
-  (docs/14-order-tree-reconciliation.md section 13).
+  A local AMPS broker for the order tree demo (docs/14-order-tree-reconciliation.md §12.6):
+  the five SOW topics of order_tree_recon.fixstate.DEFAULT_FIX_CONFIG, each holding the latest
+  FIX order state per OrderID.
 
-  Started by docker/docker-compose.order-tree-amps.yml as service `amps` (container
-  otr-amps), which publishes 9007/9008/8085 on 39007/39008/38085 so it never collides with
-  another AMPS on the default ports. Check edits with:
+  Only needed to try OTR_SOURCE=amps without your firm's AMPS. Started by
+  docker/docker-compose.order-tree-amps.yml under the `broker` profile, with the same
+  locally built image docker/docker-compose.remote-uri.yml uses (AMPS_IMAGE; there is no public
+  AMPS image). Load it with the sample messages:
 
-    podman run [dash][dash]rm [dash][dash]entrypoint /opt/amps/bin/ampServer \
-      -v "$PWD/order-tree-recon/amps:/cfg:ro" localhost/amps-demo:5.3.5.135 \
-      [dash][dash]verify-config /cfg/amps-config.xml
+    podman exec otr-deephaven python -m order_tree_recon.fixstate_mock [dash][dash]publish tcp://amps:9007/amps/fix
 
-  What this file decides:
+  Verified with `ampServer [dash][dash]verify-config` on AMPS 5.3.5.135 and exercised end to end
+  by the integration test (order-tree-recon/e2e/run_e2e.sh, doc 14 section 12.7). XML comments
+  must not contain two hyphens in a row, which is why the flags above are spelled [dash][dash]:
+  AMPS refuses the whole file otherwise.
 
-  1. ONE SOW TOPIC PER SYSTEM, KEYED BY THAT SYSTEM'S ORDER ID. Raptor, the algo server and
-     the order router each publish the CURRENT STATE of an order as one JSON message, in
-     their own native shape (order_tree_recon/native.py). AMPS keeps the latest message per
-     key, which is exactly a current-state order table. Deephaven reads each topic with
-     sow_and_subscribe: the SOW query is the snapshot, then live publishes, then an
-     out-of-focus (OOF) message when a record is sow_deleted.
-  2. THE SOW IS PERSISTED under ./sow (the working directory is /amps/data, a named volume),
-     so a restarted Deephaven rebuilds the same book from the snapshot, and a restarted
-     broker comes back with it. `down -v` wipes it, which the integration test does first.
-  3. THE CLIENT URI PICKS THE MESSAGE TYPE. The amps transport accepts every registered
-     type, so tcp://amps:9007/amps/json talks JSON. Each SOW topic's MessageType must agree.
-
-  No transaction log: an order table is state, not a tape. The SOW is the state.
+  * SOW topics keep one record per key (here the FIX OrderID, /37), so a new state of an
+    order replaces the old one, and sow_and_subscribe gives a subscriber the current records
+    followed by every change. A record deleted with sow_delete (or expired) reaches a
+    subscriber that asked for `oof` as an oof message.
+  * The message type comes from the client URI (tcp://amps:9007/amps/fix) and must agree with
+    each topic's MessageType: fix, SOH delimited, bodies without the 8/9/10 framing.
+  * Relative paths resolve under /amps/data, a named volume (`down -v` wipes the SOW files).
 -->
 <AMPSConfig>
 
-  <Name>otr-amps</Name>
+  <Name>order-tree-recon</Name>
 
-  <!-- Admin / monitoring: http://localhost:38085/amps from the host. -->
   <Admin>
     <InetAddr>8085</InetAddr>
     <FileName>./stats/stats.db</FileName>
@@ -39,7 +35,6 @@
   </Admin>
 
   <Transports>
-    <!-- Native AMPS protocol: the python client of the Deephaven source and the publisher. -->
     <Transport>
       <Name>amps-tcp</Name>
       <Type>tcp</Type>
@@ -47,17 +42,8 @@
       <Protocol>amps</Protocol>
       <ReuseAddr>true</ReuseAddr>
     </Transport>
-
-    <!-- Websocket transport, for browser tools such as AMPS' own web monitor. -->
-    <Transport>
-      <Name>amps-websocket</Name>
-      <Type>tcp</Type>
-      <InetAddr>9008</InetAddr>
-      <Protocol>websocket</Protocol>
-    </Transport>
   </Transports>
 
-  <!-- Log to stdout so `podman logs otr-amps` is the whole story. -->
   <Logging>
     <Target>
       <Protocol>stdout</Protocol>
@@ -65,29 +51,36 @@
     </Target>
   </Logging>
 
-  <!--
-    Topic names are OTR_AMPS_TOPIC_PREFIX (default "otr.") + the native table name, and the
-    key is that table's id column. Adding a system means one more topic here and one more
-    entry in order_tree_recon/native.py.
-  -->
   <SOW>
     <Topic>
-      <Name>otr.raptor_orders</Name>
+      <Name>raptor.orders</Name>
+      <MessageType>fix</MessageType>
+      <Key>/37</Key>
       <FileName>./sow/%n.sow</FileName>
-      <MessageType>json</MessageType>
-      <Key>/OrderId</Key>
     </Topic>
     <Topic>
-      <Name>otr.algo_orders</Name>
+      <Name>algo.parent.orders</Name>
+      <MessageType>fix</MessageType>
+      <Key>/37</Key>
       <FileName>./sow/%n.sow</FileName>
-      <MessageType>json</MessageType>
-      <Key>/AlgoOrderId</Key>
     </Topic>
     <Topic>
-      <Name>otr.router_orders</Name>
+      <Name>algo.child.orders</Name>
+      <MessageType>fix</MessageType>
+      <Key>/37</Key>
       <FileName>./sow/%n.sow</FileName>
-      <MessageType>json</MessageType>
-      <Key>/RouterOrderId</Key>
+    </Topic>
+    <Topic>
+      <Name>router.parent.orders</Name>
+      <MessageType>fix</MessageType>
+      <Key>/37</Key>
+      <FileName>./sow/%n.sow</FileName>
+    </Topic>
+    <Topic>
+      <Name>router.child.orders</Name>
+      <MessageType>fix</MessageType>
+      <Key>/37</Key>
+      <FileName>./sow/%n.sow</FileName>
     </Topic>
   </SOW>
 

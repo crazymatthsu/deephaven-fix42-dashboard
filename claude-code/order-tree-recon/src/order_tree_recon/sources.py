@@ -28,11 +28,10 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 from deephaven import new_table
 from deephaven.column import double_col, long_col, string_col
-from deephaven.constants import NULL_DOUBLE, NULL_LONG
+from deephaven.constants import NULL_DOUBLE
 from deephaven.table import Table
 
 from order_tree_recon.mockdata import MockData
-from order_tree_recon.native import DOUBLE, LONG, NATIVE_SCHEMAS, NativeSchema
 
 __all__ = ["native_tables", "adapters", "RAPTOR_SIDE"]
 
@@ -41,24 +40,41 @@ RAPTOR_SIDE = (
     "Side = Side == `1` ? `BUY` : Side == `2` ? `SELL` : Side == `5` ? `SELL_SHORT` : Side"
 )
 
-def _table(rows: Sequence[Mapping[str, Any]], schema: NativeSchema) -> Table:
-    """Rows of one native table as a static table; ``None`` (or a missing key) is a null."""
+_RAPTOR_COLUMNS = (
+    "OrderId", "ClOrdID", "Moniker", "Symbol", "Side", "OrderQty", "CumQty", "LeavesQty", "AvgPx", "OrdStatus",
+)
+_ALGO_COLUMNS = (
+    "AlgoOrderId", "ParentAlgoOrderId", "RaptorOrderId", "Strategy", "Symbol", "Side",
+    "Qty", "Filled", "Open", "AvgPrice", "State",
+)
+_ROUTER_COLUMNS = (
+    "RouterOrderId", "ParentRouterOrderId", "UpstreamOrderId", "Venue", "Symbol", "Side",
+    "Qty", "CumQty", "LeavesQty", "AvgPx", "Status",
+)
+_LONG_COLUMNS = frozenset({"OrderQty", "CumQty", "LeavesQty", "Qty", "Filled", "Open"})
+_DOUBLE_COLUMNS = frozenset({"AvgPx", "AvgPrice"})
+
+
+def _table(rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> Table:
     cols = []
-    for name, kind in schema.columns:
-        values = [row.get(name) for row in rows]
-        if kind == LONG:
-            cols.append(long_col(name, [NULL_LONG if v is None else int(v) for v in values]))
-        elif kind == DOUBLE:
+    for name in columns:
+        values = [row[name] for row in rows]
+        if name in _LONG_COLUMNS:
+            cols.append(long_col(name, [int(v) for v in values]))
+        elif name in _DOUBLE_COLUMNS:
             cols.append(double_col(name, [NULL_DOUBLE if v is None else float(v) for v in values]))
         else:
-            cols.append(string_col(name, [None if v is None else str(v) for v in values]))
+            cols.append(string_col(name, [str(v) for v in values]))
     return new_table(cols)
 
 
 def native_tables(data: MockData) -> Dict[str, Table]:
     """The three mock system tables, in their native shapes."""
-    rows = {"raptor_orders": data.raptor, "algo_orders": data.algo, "router_orders": data.router}
-    return {name: _table(rows[name], schema) for name, schema in NATIVE_SCHEMAS.items()}
+    return {
+        "raptor_orders": _table(data.raptor, _RAPTOR_COLUMNS),
+        "algo_orders": _table(data.algo, _ALGO_COLUMNS),
+        "router_orders": _table(data.router, _ROUTER_COLUMNS),
+    }
 
 
 def adapters(raptor: Table, algo: Table, router: Table) -> Dict[str, Table]:

@@ -1,68 +1,27 @@
-# Order tree reconciliation fed from AMPS -- the order-tree app with OTR_SOURCE=amps
-# (docs/14-order-tree-reconciliation.md section 13, order-tree-recon/README.md).
+# Overlay: the order tree on FIX order states from AMPS SOW topics (docs/14 section 12).
+# Merge it onto the base file:
 #
-#   bash order-tree-recon/e2e/run_e2e.sh                       # the integration test
-#   OTR_SOURCE=amps bash order-tree-recon/scripts/run_demo.sh  # the same stack as a demo
-#   podman compose -f docker/docker-compose.order-tree-amps.yml down -v
+#   OTR_AMPS_URI=tcp://amps-host:9007/amps/fix OTR_FIX_HOST_DIR=/abs/path/with/fix_config.json \
+#     podman compose -f docker/docker-compose.order-tree.yml -f docker/docker-compose.order-tree-amps.yml up -d
 #
-# Raptor, the algo server and the order router publish the current state of each order to
-# one AMPS SOW topic per system (JSON, native shape, keyed by that system's order id). The
-# Deephaven app reads the three topics with sow_and_subscribe -- snapshot, then live -- and
-# runs the doc 14 DAG over them unchanged.
+# or `OTR_SOURCE=amps bash order-tree-recon/scripts/run_demo.sh`. What it changes:
 #
-#   host port   container            what
-#   ---------   ------------------   ---------------------------------------------------
-#   39007       otr-amps             AMPS tcp (publishers: the e2e, amps_publish)
-#   39008       otr-amps             AMPS websocket
-#   38085       otr-amps             AMPS admin / monitoring
-#   10020       otr-amps-deephaven   Deephaven IDE + order_tree_dashboard
+#   * the deephaven service runs localhost/fix42-deephaven-amps:42.4 -- the stock server plus
+#     amps-python-client, built from docker/deephaven-amps.Dockerfile with the base image and
+#     the pip index taken from repos.env (docs/15), so a JFrog override applies to the build;
+#   * OTR_SOURCE=amps: one sow_and_subscribe per topic in fix_config.json (OTR_FIX_HOST_DIR).
+#     The server comes up even while AMPS is unreachable; the tables fill once it connects.
 #
-# A SEPARATE compose project from docker-compose.order-tree.yml (the mock-table demo), with
-# its own container names and ports, so the two run side by side. Memory: -Xmx1g plus an
-# emulated AMPS is ~2 GB of the podman machine; fine next to the 2g mock demo, not next to
-# the 4g fix42-dashboard stack on a 6 GB machine.
+# Optional local broker, to try it without your firm's AMPS (profile `broker`; needs a locally
+# built AMPS image, AMPS_IMAGE, the same one docker-compose.remote-uri.yml uses):
 #
-# AMPS IMAGE. AMPS is commercial software with no public image, so this file expects a
-# locally built one (localhost/amps-demo:5.3.5.135, linux/amd64 -- emulated on an arm64 host,
-# fine at these rates). AMPS_IMAGE=<your image> overrides it, the same key
-# docker-compose.remote-uri.yml uses.
-
-name: order-tree-amps
+#   OTR_AMPS_URI=tcp://amps:9007/amps/fix podman compose -f docker/docker-compose.order-tree.yml \
+#     -f docker/docker-compose.order-tree-amps.yml --profile broker up -d
+#   podman exec otr-deephaven python -m order_tree_recon.fixstate_mock --publish tcp://amps:9007/amps/fix
+# ---------------------------------------------------------------------------------------------
 
 services:
 
-  # ---------------------------------------------------------------------------
-  # AMPS: three JSON SOW topics (order-tree-recon/amps/amps-config.xml). The SOW is
-  # persisted on a NAMED VOLUME, so a restart keeps the book and `down -v` wipes it.
-  # The image has bash but no nc, so /dev/tcp is the healthcheck probe.
-  # ---------------------------------------------------------------------------
-  amps:
-    image: ${AMPS_IMAGE:-localhost/amps-demo:5.3.5.135}
-    container_name: ${OTR_AMPS_CONTAINER:-otr-amps}
-    hostname: amps
-    command: ["/amps/config/amps-config.xml"]
-    volumes:
-      - ../order-tree-recon/amps/amps-config.xml:/amps/config/amps-config.xml:ro,z
-      - otr-amps-data:/amps/data
-    ports:
-      - "${OTR_AMPS_PORT:-39007}:9007"
-      - "${OTR_AMPS_WS_PORT:-39008}:9008"
-      - "${OTR_AMPS_ADMIN_PORT:-38085}:8085"
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9007'"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-      start_period: 20s
-
-  # ---------------------------------------------------------------------------
-  # Deephaven: the stock 42.4 server plus amps-python-client (docker/deephaven-amps.Dockerfile,
-  # the image the remote-URI stack already builds -- same tag, built once).
-  #
-  #   /otr-scripts = order-tree-recon/src  (the order_tree_recon package)
-  #   /dh-app-lib  = apps/_lib             (loader shared by every app)
-  #   /app.d       = apps/order-tree-recon (the same app as the mock demo; OTR_SOURCE picks)
-  # ---------------------------------------------------------------------------
   deephaven:
     build:
       context: .
@@ -73,39 +32,27 @@ services:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
         PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
     image: localhost/fix42-deephaven-amps:42.4
-    container_name: ${DH_CONTAINER:-otr-amps-deephaven}
-    hostname: deephaven
-    ports:
-      - "${DH_PORT:-10020}:10000"
-    volumes:
-      - ../order-tree-recon/src:/otr-scripts:ro,z
-      - ./apps/_lib:/dh-app-lib:ro,z
-      - ./apps/order-tree-recon:/app.d:ro,z
     environment:
-      DH_APP: order-tree-recon
-      PYTHONPATH: "/otr-scripts"
-      START_OPTS: >-
-        -Xmx${DH_XMX:-1g}
-        -Ddeephaven.console.type=python
-        -Ddeephaven.application.dir=/app.d
-        -DAuthHandlers=io.deephaven.auth.AnonymousAuthenticationHandler
-      # --- doc 14 sections 9 and 13 -------------------------------------------------------
       OTR_SOURCE: amps
-      # In-network address of the `amps` service; /amps/json picks the JSON message type.
-      OTR_AMPS_URI: "${OTR_AMPS_URI:-tcp://amps:9007/amps/json}"
-      OTR_AMPS_TOPIC_PREFIX: "${OTR_AMPS_TOPIC_PREFIX:-otr.}"
-      OTR_AMPS_CLIENT_NAME: "${OTR_AMPS_CLIENT_NAME:-otr-deephaven}"
-      OTR_QTY_TOL: "${OTR_QTY_TOL:-1e-6}"
+
+  # The local broker: the five SOW topics of order-tree-recon/amps/amps-config.xml.
+  amps:
+    profiles: ["broker"]
+    image: ${AMPS_IMAGE:-localhost/amps-demo:5.3.5.135}
+    container_name: ${OTR_AMPS_CONTAINER:-otr-amps}
+    hostname: amps
+    command: ["/amps/config/amps-config.xml"]
+    volumes:
+      - ../order-tree-recon/amps/amps-config.xml:/amps/config/amps-config.xml:ro,z
+      - otr-amps-data:/amps/data
+    ports:
+      - "${OTR_AMPS_PORT:-39007}:9007"
     healthcheck:
-      test: ["CMD", "/opt/grpc_health_probe/grpc_health_probe", "-addr=localhost:10000"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 30s
-    depends_on:
-      amps:
-        condition: service_healthy
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/9007'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
 
 volumes:
-  # The AMPS SOW files and stats database (the container's working directory, /amps/data).
-  otr-amps-data: {}
+  otr-amps-data:

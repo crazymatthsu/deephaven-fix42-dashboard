@@ -1,46 +1,47 @@
-"""Order tree over AMPS, end to end: publisher -> AMPS SOW topics -> Deephaven -> pydeephaven.
+"""Order tree over AMPS, end to end: FIX order states -> AMPS SOW topics -> Deephaven -> pydeephaven.
 
-Run it through ``run_e2e.sh``: it brings up ``docker/docker-compose.order-tree-amps.yml``
-(AMPS ``otr-amps`` + Deephaven ``otr-amps-deephaven`` with ``OTR_SOURCE=amps``) from
-``down -v`` and then runs this file. Running ``pytest`` directly works against a stack that
+Run it through ``run_e2e.sh``: it brings up the order-tree app with ``OTR_SOURCE=amps``
+(``docker/docker-compose.order-tree.yml`` + ``docker-compose.order-tree-amps.yml``, profile
+``broker``: a real AMPS from your local image, loaded with ``order-tree-recon/amps/amps-config.xml``)
+from ``down -v``, then runs this file. Running ``pytest`` directly works against a stack that
 is already up; without one every test skips, saying what is missing.
 
-The test plays the three upstream systems from the host: it publishes native order rows as
-JSON to ``otr.raptor_orders`` / ``otr.algo_orders`` / ``otr.router_orders`` and
-``sow_delete``s them, keeping its own copy of what the SOW holds (:class:`Book`). The
-oracle is the module's pure-python reference (``reference.reconcile`` over
-``mockdata.canonical_rows`` of that copy), so after every step the engine's ``otr_recon``
-must equal the reference **row for row, column for column** -- the same bar as the
-embedded test, but through a real broker, the app's AMPS source and Application Mode.
+The test plays Raptor, the algo server and the router. It publishes FIX order-state
+messages to the five SOW topics of ``fixstate.DEFAULT_FIX_CONFIG`` (the mapping the
+container mounts from ``fix-samples/``) and ``sow_delete``s records, and it keeps its own
+log of every event the subscriber should see (:class:`Book`). The oracle is the module's
+pure-python twin of the FIX path: ``fixstate.fold_events`` (SOW mirror + latest-state fold +
+id history) feeding ``reference.reconcile``. After every step the engine's ``otr_recon``
+must equal it row for row, column for column. Every step changes the book, so the state
+before a step can never satisfy the check for it.
 
-Every step changes the book, so "the engine matches the new expected state" can't pass
-on the state before it. In order:
-
-1. the stack is up and subscribed to the three topics; an empty SOW is an empty book;
-2. the whole mock book (seed 42, 24 families: 340 orders) matches the reference, and so
-   do the ladder and the exposure table; the query API works over it;
+1. the app subscribed to the five topics; an empty SOW is an empty book;
+2. the mock book's order states in send order (NEW, cancel/replace, partial and final
+   fills, cancels: ``fixstate_mock.send_order``) match the reference, and so do the ladder,
+   the exposure table and the query API;
 3. a venue fill climbs the chain one hop at a time: each hop's edge is ``UNBOOKED_FILL``
-   until the next system up books it, and ``NetUnbookedQty`` is 100 until the client does;
+   until the next system up publishes the fill, and ``NetUnbookedQty`` is 100 until the
+   client order does;
 4. a family published child-first (router, then algo, then Raptor) is ``ORPHAN`` and
-   unattributed until its parents land, then links under its moniker -- the topics are
-   independent and nothing orders them; its parents carry a *null* parent id;
-5. ``sow_delete`` of a venue order removes it, and its router parent shows the fill its
-   children no longer explain (``PHANTOM_FILL``) until it is republished;
-6. a malformed message is counted in ``otr_amps_status`` and the feed lives on;
-7. a restarted Deephaven rebuilds the identical book from the SOW snapshot;
-8. a connection dropped by heartbeat (Deephaven paused) misses an OOF; on reconnect the
-   re-snapshot **resyncs** -- the deleted order goes, the missed fill lands;
-9. a restarted AMPS (SOW on its volume) is re-subscribed and the feed resumes.
+   unattributed until its parents land, then links under its moniker;
+5. ``sow_delete`` of a venue order (an OOF to the subscriber) removes it, and its router
+   parent shows the fill its children no longer explain (``PHANTOM_FILL``) until it is
+   republished;
+6. a garbled quantity folds to the same null on both sides, and the feed lives on;
+7. a restarted Deephaven rebuilds the identical book from one snapshot per topic;
+8. Deephaven paused past the AMPS heartbeat: AMPS drops it, a delete and a fill happen
+   meanwhile, and the re-snapshot (a new epoch) drops the deleted record and lands the fill;
+9. a restarted AMPS (SOW files on its volume) is re-subscribed and the feed resumes.
 
 Environment (``run_e2e.sh`` sets them):
 
 ==========================  ======================================  ========================
 ``OTRE2E_DH_HOST/PORT``     Deephaven gRPC                          ``localhost`` / 10020
-``OTRE2E_AMPS_URI``         where the test publishes                ``tcp://localhost:39007/amps/json``
-``OTRE2E_PREFIX``           topic prefix                            ``otr.``
+``OTRE2E_AMPS_URI``         where the test publishes                ``tcp://localhost:39017/amps/fix``
+``OTRE2E_FIX_CONFIG``       the mapping the server runs with        ``fix-samples/fix_config.json``
 ``OTRE2E_SEED/FAMILIES``    the mock book                           42 / 24
-``OTRE2E_DH_CONTAINER``     restarted / paused by tests 7-8         ``otr-amps-deephaven``
-``OTRE2E_AMPS_CONTAINER``   restarted by test 9                     ``otr-amps``
+``OTRE2E_DH_CONTAINER``     restarted / paused by tests 7-8         ``otr-e2e-deephaven``
+``OTRE2E_AMPS_CONTAINER``   restarted by test 9                     ``otr-e2e-amps``
 ``OTRE2E_SETTLE_TIMEOUT``   seconds for the engine to converge      60
 ``OTRE2E_RESTART_TIMEOUT``  seconds for a restarted server          300
 ``CONTAINER_CLI``           ``podman`` or ``docker``                ``podman``
@@ -54,43 +55,58 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MODULE_SRC = os.path.join(os.path.dirname(HERE), "src")
+MODULE_DIR = os.path.dirname(HERE)
+MODULE_SRC = os.path.join(MODULE_DIR, "src")
 if MODULE_SRC not in sys.path:
     sys.path.insert(0, MODULE_SRC)
 
-# The oracle is the shipped pure-python reference, not a copy of the formulas.
-from order_tree_recon import amps_codec, amps_publish, config, mockdata, reference  # noqa: E402
-from order_tree_recon.amps_source import HEARTBEAT_SECONDS  # noqa: E402
-from order_tree_recon.native import NATIVE_SCHEMAS, ROUTER  # noqa: E402
+# The oracle is the shipped pure-python twin of the FIX path, not a copy of its formulas.
+from order_tree_recon import config, fixstate, fixstate_mock, mockdata, reference  # noqa: E402
+from order_tree_recon.amps_sow import DEFAULT_HEARTBEAT  # noqa: E402
 
 DH_HOST = os.environ.get("OTRE2E_DH_HOST", "localhost")
 DH_PORT = int(os.environ.get("OTRE2E_DH_PORT", "10020"))
-AMPS_URI = os.environ.get("OTRE2E_AMPS_URI", "tcp://localhost:39007/amps/json")
-PREFIX = os.environ.get("OTRE2E_PREFIX", config.DEFAULT_AMPS_TOPIC_PREFIX)
+AMPS_URI = os.environ.get("OTRE2E_AMPS_URI", "tcp://localhost:39017/amps/fix")
+FIX_CONFIG_PATH = os.environ.get("OTRE2E_FIX_CONFIG", os.path.join(MODULE_DIR, "fix-samples", "fix_config.json"))
 SEED = int(os.environ.get("OTRE2E_SEED", "42"))
 FAMILIES = int(os.environ.get("OTRE2E_FAMILIES", "24"))
-DH_CONTAINER = os.environ.get("OTRE2E_DH_CONTAINER", "otr-amps-deephaven")
-AMPS_CONTAINER = os.environ.get("OTRE2E_AMPS_CONTAINER", "otr-amps")
+DH_CONTAINER = os.environ.get("OTRE2E_DH_CONTAINER", "otr-e2e-deephaven")
+AMPS_CONTAINER = os.environ.get("OTRE2E_AMPS_CONTAINER", "otr-e2e-amps")
 CONTAINER_CLI = os.environ.get("CONTAINER_CLI", "podman")
 SETTLE_TIMEOUT = float(os.environ.get("OTRE2E_SETTLE_TIMEOUT", "60"))
 RESTART_TIMEOUT = float(os.environ.get("OTRE2E_RESTART_TIMEOUT", "300"))
 
 TOL = config.DEFAULT_QTY_TOL
 TOPOLOGY = config.default_topology()
-
-#: The native fields a fill moves, per level: (table, cum column, leaves column).
-FILL_FIELDS = {
-    "CLIENT": ("raptor_orders", "CumQty", "LeavesQty"),
-    "ALGO_PARENT": ("algo_orders", "Filled", "Open"),
-    "ALGO_CHILD": ("algo_orders", "Filled", "Open"),
-    "OR_PARENT": ("router_orders", "CumQty", "LeavesQty"),
-    "OR_CHILD": ("router_orders", "CumQty", "LeavesQty"),
+FIX_CONFIG = fixstate.load_fix_config(FIX_CONFIG_PATH, TOPOLOGY)
+#: topic -> system, from the mapping the server runs with.
+SYSTEM_OF_TOPIC: Dict[str, str] = {
+    topic: system.system for system in FIX_CONFIG.systems for topic in FIX_CONFIG.topics[system.system]
 }
+ALL_TOPICS: Tuple[str, ...] = tuple(SYSTEM_OF_TOPIC)
+#: The level a mock order is published from (fixstate_mock's topic layout).
+TOPIC_OF_LEVEL = fixstate_mock.TOPIC_OF_LEVEL
+
+#: Run server side to turn ``amps_source.status()`` into a table pydeephaven can read.
+STATUS_SCRIPT = """
+from deephaven import new_table as _e2e_nt
+from deephaven.column import long_col as _e2e_lc, string_col as _e2e_sc
+_e2e_rows = amps_source.status()
+_e2e_status = _e2e_nt([
+    _e2e_sc("Topic", [r["Topic"] for r in _e2e_rows]),
+    _e2e_sc("System", [r["System"] for r in _e2e_rows]),
+    _e2e_lc("Epoch", [int(r["Epoch"]) for r in _e2e_rows]),
+    _e2e_lc("Snapshots", [int(r["snapshots"]) for r in _e2e_rows]),
+    _e2e_lc("Upserts", [int(r["UPSERT"]) for r in _e2e_rows]),
+    _e2e_lc("Deletes", [int(r["DELETE"]) for r in _e2e_rows]),
+    _e2e_lc("Connected", [int(bool(amps_source.connected))] * len(_e2e_rows)),
+])
+"""
 
 
 # --------------------------------------------------------------------------------------
@@ -106,7 +122,7 @@ def _port_open(host: str, port: int) -> bool:
         return False
 
 
-def _amps_host_port() -> tuple:
+def _amps_host_port() -> Tuple[str, int]:
     hostport = AMPS_URI.split("://", 1)[1].split("/", 1)[0]
     host, port = hostport.rsplit(":", 1)
     return host, int(port)
@@ -154,6 +170,11 @@ class Dh:
     def script(self, code: str) -> None:
         self.session.run_script(code)
 
+    def status(self) -> Dict[str, Dict[str, Any]]:
+        """``amps_source.status()`` by topic (empty until the source has subscribed)."""
+        self.script(STATUS_SCRIPT)
+        return {row["Topic"]: row for row in self.rows("_e2e_status")}
+
 
 @pytest.fixture(scope="module")
 def dh(stack):
@@ -162,53 +183,72 @@ def dh(stack):
     handle.reset()
 
 
+def _connect_publisher() -> Any:
+    import AMPS
+
+    client = AMPS.Client("otr-e2e-publisher")
+    client.connect(AMPS_URI)
+    client.logon()
+    return client
+
+
 class Book:
-    """What the SOW topics hold, as this test published it: the oracle's input."""
+    """Every event the server's subscriptions should have seen, as this test caused them.
+
+    Messages are kept ``|`` delimited (the parser takes both) and published with SOH, the
+    way ``fixstate_mock.publish`` does. The oracle folds this log exactly as the server folds
+    its event tables: the latest record per (topic, OrderID), deletes removed, ids from
+    every message an order ever carried.
+    """
 
     def __init__(self, client: Any) -> None:
         self.client = client
-        self.rows: Dict[str, Dict[str, Dict[str, Any]]] = {name: {} for name in NATIVE_SCHEMAS}
+        self.log: Dict[str, List[Dict[str, Any]]] = {system.system: [] for system in FIX_CONFIG.systems}
 
-    def publish(self, table: str, *rows: Mapping[str, Any]) -> None:
-        schema = NATIVE_SCHEMAS[table]
-        amps_publish.publish_rows(self.client, schema, rows, PREFIX)
-        for row in rows:
-            self.rows[table][row[schema.key]] = dict(row)
+    def _record(self, topic: str, raw: str, action: str) -> None:
+        events = self.log[SYSTEM_OF_TOPIC[topic]]
+        events.append(fixstate.event(topic, raw, len(events) + 1, action))
 
-    def delete(self, table: str, *order_ids: str) -> int:
-        deleted = amps_publish.delete_orders(self.client, NATIVE_SCHEMAS[table], order_ids, PREFIX)
-        for order_id in order_ids:
-            self.rows[table].pop(order_id, None)
-        return deleted
+    def publish(self, *messages: Tuple[str, str]) -> None:
+        for topic, raw in messages:
+            self.client.publish(topic, raw.replace("|", fixstate.SOH))
+            self._record(topic, raw, fixstate.UPSERT)
+        self.client.publish_flush()
+
+    def latest(self, topic: str, order_id: str) -> Optional[str]:
+        """The current record of an order, or ``None`` once it is deleted."""
+        for event in reversed(self.log[SYSTEM_OF_TOPIC[topic]]):
+            if event["Topic"] == topic and fixstate.parse_fix(event["RawFix"]).get("37") == order_id:
+                return event["RawFix"] if event["Action"] == fixstate.UPSERT else None
+        return None
+
+    def delete(self, topic: str, order_id: str) -> None:
+        raw = self.latest(topic, order_id)
+        assert raw is not None, (topic, order_id)
+        self.client.sow_delete(topic, f"/37 = '{order_id}'")
+        self._record(topic, raw, fixstate.DELETE)  # the OOF carries the record's data
 
     def clear(self) -> None:
-        amps_publish.clear(self.client, PREFIX)
-        for rows in self.rows.values():
-            rows.clear()
+        for topic in ALL_TOPICS:
+            self.client.sow_delete(topic, "1=1")
+        for events in self.log.values():
+            events.clear()
 
-    def row(self, table: str, order_id: str) -> Dict[str, Any]:
-        return dict(self.rows[table][order_id])
+    def current(self) -> int:
+        """Records in the SOW right now."""
+        return sum(len(fixstate.sow_current(events)) for events in self.log.values())
 
     def expected(self) -> Dict[str, Dict[str, Any]]:
-        data = mockdata.MockData(
-            raptor=list(self.rows["raptor_orders"].values()),
-            algo=list(self.rows["algo_orders"].values()),
-            router=list(self.rows["router_orders"].values()),
-            scenario_roots={},
-            roots=[],
-        )
-        return reference.reconcile(TOPOLOGY, mockdata.canonical_rows(data), TOL)
-
-    def size(self) -> int:
-        return sum(len(rows) for rows in self.rows.values())
+        rows, ids = fixstate.fold_events(FIX_CONFIG, self.log)
+        return reference.reconcile(TOPOLOGY, rows, TOL, extra_ids=ids)
 
 
 @pytest.fixture(scope="module")
 def book(stack):
-    client = amps_publish.connect(AMPS_URI, "otr-e2e-publisher")
-    yield Book(client)
+    handle = Book(_connect_publisher())
+    yield handle
     try:
-        client.close()
+        handle.client.close()
     except Exception:  # noqa: BLE001
         pass
 
@@ -216,6 +256,34 @@ def book(stack):
 @pytest.fixture(scope="module")
 def mock_book():
     return mockdata.generate(SEED, FAMILIES)
+
+
+# --------------------------------------------------------------------------------------
+# FIX helpers
+# --------------------------------------------------------------------------------------
+
+
+def with_tags(raw: str, updates: Mapping[str, Any]) -> str:
+    """``raw`` with some tags replaced (in place) or appended; ``|`` delimited."""
+    fields = [field.split("=", 1) for field in raw.replace(fixstate.SOH, "|").split("|") if "=" in field]
+    seen = set()
+    out = []
+    for tag, value in fields:
+        if tag in updates:
+            value = str(updates[tag])
+            seen.add(tag)
+        out.append(f"{tag}={value}")
+    out += [f"{tag}={value}" for tag, value in updates.items() if tag not in seen]
+    return "|".join(out) + "|"
+
+
+def fill(book: Book, node: Mapping[str, Any], qty: int) -> None:
+    """Publish the order's next state: ``qty`` more filled, ``qty`` less open."""
+    topic = TOPIC_OF_LEVEL[node["Level"]]
+    raw = book.latest(topic, node["OrderId"])
+    assert raw is not None, node["NodeKey"]
+    tags = fixstate.parse_fix(raw)
+    book.publish((topic, with_tags(raw, {"14": int(float(tags["14"])) + qty, "151": int(float(tags["151"])) - qty})))
 
 
 # --------------------------------------------------------------------------------------
@@ -265,18 +333,13 @@ def settle(dh: Dh, book: Book, step: str) -> Dict[str, Dict[str, Any]]:
         if not diff:
             return expected
         time.sleep(1.0)
-    status = _safe_status(dh)
     pytest.fail(f"{step}: otr_recon did not converge in {SETTLE_TIMEOUT:.0f}s "
-                f"({len(diff)} differences):\n  " + "\n  ".join(diff[:20]) + f"\nstatus: {status}")
-
-
-def status(dh: Dh) -> Dict[str, Dict[str, Any]]:
-    return {row["Table"]: row for row in dh.rows("otr_amps_status")}
+                f"({len(diff)} differences):\n  " + "\n  ".join(diff[:20]) + f"\nstatus: {_safe_status(dh)}")
 
 
 def _safe_status(dh: Dh) -> Any:
     try:
-        return status(dh)
+        return dh.status()
     except Exception as exc:  # noqa: BLE001
         return f"unavailable ({exc})"
 
@@ -294,8 +357,16 @@ def wait_for(predicate, what: str, timeout: float = SETTLE_TIMEOUT) -> None:
     pytest.fail(f"timed out after {timeout:.0f}s waiting for {what} (last error: {last})")
 
 
-def node(expected: Mapping[str, Mapping[str, Any]], system: str, order_id: str) -> Mapping[str, Any]:
-    return expected[f"{system}|{order_id}"]
+def subscribed(dh: Dh, epoch: int = 1) -> bool:
+    """Every topic has completed a snapshot of at least ``epoch`` and the client is connected."""
+    rows = dh.status()
+    return (set(rows) == set(ALL_TOPICS)
+            and all(r["Snapshots"] >= epoch and r["Epoch"] >= epoch and r["Connected"] for r in rows.values()))
+
+
+def scenario_nodes(expected: Mapping[str, Mapping[str, Any]], mock_book: Any, scenario: str) -> List[Mapping[str, Any]]:
+    system, order_id = mock_book.scenario_roots[scenario]
+    return [n for n in expected.values() if n["RootKey"] == f"{system}|{order_id}"]
 
 
 def _cli(*args: str) -> str:
@@ -315,12 +386,9 @@ def _app_ready_count() -> int:
 # --------------------------------------------------------------------------------------
 
 
-def test_the_app_is_subscribed_to_the_three_topics(dh):
-    wait_for(lambda: len(status(dh)) == 3, "otr_amps_status")
-    rows = status(dh)
-    assert {name: row["Topic"] for name, row in rows.items()} == amps_codec.topics(PREFIX)
-    for row in rows.values():
-        assert row["Connected"] is True and row["Snapshots"] >= 1, row
+def test_the_app_is_subscribed_to_every_topic(dh):
+    wait_for(lambda: subscribed(dh), "a completed snapshot on every topic", RESTART_TIMEOUT)
+    assert set(dh.status()) == set(ALL_TOPICS) == set(TOPIC_OF_LEVEL.values())
 
 
 def test_an_empty_sow_is_an_empty_book(dh, book):
@@ -335,11 +403,13 @@ def test_an_empty_sow_is_an_empty_book(dh, book):
 
 
 def test_the_mock_book_matches_the_reference_row_for_row(dh, book, mock_book):
-    book.publish("raptor_orders", *mock_book.raptor)
-    book.publish("algo_orders", *mock_book.algo)
-    book.publish("router_orders", *mock_book.router)
+    book.publish(*fixstate_mock.send_order(mock_book))
     expected = settle(dh, book, "mock book")
     assert len(expected) == len(mock_book.raptor) + len(mock_book.algo) + len(mock_book.router)
+    # the FIX path and the table path agree on the same book (the amended DMA client
+    # order links through its OrigClOrdID)
+    tables = reference.reconcile(TOPOLOGY, mockdata.canonical_rows(mock_book), TOL)
+    assert {k: n["BreakKind"] for k, n in expected.items()} == {k: n["BreakKind"] for k, n in tables.items()}
 
 
 def test_ladder_and_exposure_match_the_reference(dh, book):
@@ -376,14 +446,12 @@ def test_the_query_api_works_over_the_amps_book(dh, book, mock_book):
     assert [r["BreakKind"] for r in dh.rows("_e2e_breaks")] == ["CHILD_STILL_OPEN"]
     assert [r["StreetOpenVsClient"] for r in dh.rows("_e2e_exposure")] == [100.0]
 
-    expected = book.expected()
-    system, order_id = mock_book.scenario_roots["cancel_not_propagated"]
-    root_key = f"{system}|{order_id}"
-    venue = next(n for n in expected.values() if n["RootKey"] == root_key and n["IsStreet"] and n["LeavesQty"] > 0)
+    tree = scenario_nodes(book.expected(), mock_book, "cancel_not_propagated")
+    venue = next(n for n in tree if n["IsStreet"] and n["LeavesQty"] > 0)
     dh.script(f'_e2e_found = find_tree("{venue["OrderId"]}")')
     found = dh.rows("_e2e_found")
-    assert {r["RootKey"] for r in found} == {root_key}
-    assert len(found) == sum(1 for n in expected.values() if n["RootKey"] == root_key)
+    assert {r["RootKey"] for r in found} == {venue["RootKey"]}
+    assert len(found) == len(tree)
 
 
 # --------------------------------------------------------------------------------------
@@ -391,20 +459,9 @@ def test_the_query_api_works_over_the_amps_book(dh, book, mock_book):
 # --------------------------------------------------------------------------------------
 
 
-def _fill(book: Book, level: str, order_id: str, qty: int) -> None:
-    table, cum, leaves = FILL_FIELDS[level]
-    row = book.row(table, order_id)
-    row[cum] += qty
-    row[leaves] -= qty
-    book.publish(table, row)
-
-
 def test_a_fill_climbs_the_chain_one_hop_at_a_time(dh, book, mock_book):
     expected = book.expected()
-    system, order_id = mock_book.scenario_roots["working"]
-    root_key = f"{system}|{order_id}"
-    venue = next(n for n in expected.values()
-                 if n["RootKey"] == root_key and n["IsStreet"] and n["LeavesQty"] >= 100)
+    venue = next(n for n in scenario_nodes(expected, mock_book, "working") if n["IsStreet"] and n["LeavesQty"] >= 100)
     chain = [venue]
     while chain[-1]["ParentKey"]:
         chain.append(expected[chain[-1]["ParentKey"]])
@@ -412,13 +469,13 @@ def test_a_fill_climbs_the_chain_one_hop_at_a_time(dh, book, mock_book):
     before = {n["NodeKey"]: n["BreakKind"] for n in chain}
 
     for hop, order in enumerate(chain):
-        _fill(book, order["Level"], order["OrderId"], 100)
-        now = settle(dh, book, f"fill booked by {order['Level']}")
+        fill(book, order, 100)
+        now = settle(dh, book, f"fill published by {order['Level']}")
         bucket = next(b for b in reference.exposure_summary(now)
                       if (b["RootMoniker"], b["RootSymbol"], b["RootSide"])
                       == (order["RootMoniker"], order["RootSymbol"], order["RootSide"]))
         if hop + 1 < len(chain):
-            # the next system up hasn't booked it yet: its edge is the one that is short
+            # the next system up hasn't published it yet: its edge is the one that is short
             parent = now[chain[hop + 1]["NodeKey"]]
             assert parent["BreakKind"] == "UNBOOKED_FILL" and parent["FillGap"] == -100.0, parent
             assert bucket["NetUnbookedQty"] == 100.0
@@ -431,45 +488,40 @@ def test_a_fill_climbs_the_chain_one_hop_at_a_time(dh, book, mock_book):
 # 4. Child-first arrival
 # --------------------------------------------------------------------------------------
 
-E2E_RAPTOR = {"OrderId": "E2E-RPT-1", "ClOrdID": "E2E-CL-1", "Moniker": "EAGLE", "Symbol": "AMZN", "Side": "2",
-              "OrderQty": 500, "CumQty": 200, "LeavesQty": 300, "AvgPx": 186.5, "OrdStatus": "PARTIALLY_FILLED"}
+_T = "60=20261011-14:00:00.000"
+E2E_RAPTOR = [("raptor.orders",
+               f"35=8|37=E2E-RPT-1|11=E2E-CL-1|1=EAGLE|55=AMZN|54=2|38=500|14=200|151=300|6=186.5|39=1|{_T}|")]
 E2E_ALGO = [
-    # A null parent id (a JSON feed that omits the field) must still be read as a parent.
-    {"AlgoOrderId": "E2E-ALG-1", "ParentAlgoOrderId": None, "RaptorOrderId": "E2E-RPT-1", "Strategy": "VWAP",
-     "Symbol": "AMZN", "Side": "SELL", "Qty": 500, "Filled": 200, "Open": 300, "AvgPrice": 186.5,
-     "State": "PARTIALLY_FILLED"},
-    {"AlgoOrderId": "E2E-ALG-1-01", "ParentAlgoOrderId": "E2E-ALG-1", "RaptorOrderId": None, "Strategy": "VWAP",
-     "Symbol": "AMZN", "Side": "SELL", "Qty": 500, "Filled": 200, "Open": 300, "AvgPrice": 186.5,
-     "State": "PARTIALLY_FILLED"},
+    ("algo.parent.orders",
+     f"35=8|37=E2E-ALG-1|11=E2E-RPT-1|55=AMZN|54=2|38=500|14=200|151=300|6=186.5|39=1|{_T}|847=VWAP|"),
+    ("algo.child.orders",
+     f"35=8|37=E2E-ALG-1-01|11=E2E-ALG-1-01|20001=E2E-ALG-1|55=AMZN|54=2|38=500|14=200|151=300|6=186.5|39=1|{_T}|847=VWAP|"),
 ]
 E2E_ROUTER = [
-    {"RouterOrderId": "E2E-OR-1", "ParentRouterOrderId": None, "UpstreamOrderId": "E2E-ALG-1-01", "Venue": "SOR",
-     "Symbol": "AMZN", "Side": "SELL", "Qty": 500, "CumQty": 200, "LeavesQty": 300, "AvgPx": 186.5,
-     "Status": "PARTIALLY_FILLED"},
-    {"RouterOrderId": "E2E-OR-1.1", "ParentRouterOrderId": "E2E-OR-1", "UpstreamOrderId": None, "Venue": "NYSE",
-     "Symbol": "AMZN", "Side": "SELL", "Qty": 300, "CumQty": 200, "LeavesQty": 100, "AvgPx": 186.5,
-     "Status": "PARTIALLY_FILLED"},
-    {"RouterOrderId": "E2E-OR-1.2", "ParentRouterOrderId": "E2E-OR-1", "UpstreamOrderId": None, "Venue": "IEX",
-     "Symbol": "AMZN", "Side": "SELL", "Qty": 200, "CumQty": 0, "LeavesQty": 200, "AvgPx": None,
-     "Status": "NEW"},
+    ("router.parent.orders",
+     f"35=8|37=E2E-OR-1|11=E2E-ALG-1-01|55=AMZN|54=2|38=500|14=200|151=300|6=186.5|39=1|{_T}|100=SOR|"),
+    ("router.child.orders",
+     f"35=8|37=E2E-OR-1.1|11=VE2E-1.1|20001=E2E-OR-1|55=AMZN|54=2|38=300|14=200|151=100|6=186.5|39=1|{_T}|100=NYSE|"),
+    ("router.child.orders",
+     f"35=8|37=E2E-OR-1.2|11=VE2E-1.2|20001=E2E-OR-1|55=AMZN|54=2|38=200|14=0|151=200|6=0|39=0|{_T}|100=IEX|"),
 ]
 
 
 def test_orders_arriving_child_first_link_up_when_their_parents_land(dh, book):
-    book.publish("router_orders", *E2E_ROUTER)
+    book.publish(*E2E_ROUTER)
     now = settle(dh, book, "router orders before their parents")
-    router_parent = node(now, "OR", "E2E-OR-1")
+    router_parent = now["OR|E2E-OR-1"]
     assert (router_parent["LinkState"], router_parent["BreakKind"], router_parent["Depth"]) == ("ORPHAN", "ORPHAN", 0)
     unattributed = [b for b in reference.exposure_summary(now) if (b["RootMoniker"], b["RootSymbol"]) == ("", "AMZN")]
     assert unattributed and unattributed[0]["StreetLeavesQty"] >= 300.0
 
-    book.publish("algo_orders", *E2E_ALGO)
+    book.publish(*E2E_ALGO)
     now = settle(dh, book, "algo orders before Raptor's")
-    assert node(now, "OR", "E2E-OR-1")["LinkState"] == "LINKED"
-    algo_parent = node(now, "ALGO", "E2E-ALG-1")
+    assert now["OR|E2E-OR-1"]["LinkState"] == "LINKED"
+    algo_parent = now["ALGO|E2E-ALG-1"]
     assert (algo_parent["Level"], algo_parent["LinkState"], algo_parent["Depth"]) == ("ALGO_PARENT", "ORPHAN", 0)
 
-    book.publish("raptor_orders", E2E_RAPTOR)
+    book.publish(*E2E_RAPTOR)
     now = settle(dh, book, "Raptor order lands")
     family = [n for n in now.values() if n["RootKey"] == "RAPTOR|E2E-RPT-1"]
     assert len(family) == 6
@@ -484,44 +536,38 @@ def test_orders_arriving_child_first_link_up_when_their_parents_land(dh, book):
 
 
 def test_sow_delete_removes_an_order_and_reopens_its_edge(dh, book, mock_book):
-    expected = book.expected()
-    system, order_id = mock_book.scenario_roots["clean_filled"]
-    venue = next(n for n in expected.values()
-                 if n["RootKey"] == f"{system}|{order_id}" and n["IsStreet"] and n["CumQty"] > 0)
-    saved = book.row("router_orders", venue["OrderId"])
+    venue = next(n for n in scenario_nodes(book.expected(), mock_book, "clean_filled") if n["IsStreet"] and n["CumQty"] > 0)
+    topic = TOPIC_OF_LEVEL["OR_CHILD"]
+    saved = book.latest(topic, venue["OrderId"])
 
-    assert book.delete("router_orders", venue["OrderId"]) == 1
+    book.delete(topic, venue["OrderId"])
     now = settle(dh, book, "venue order deleted")
     assert venue["NodeKey"] not in now
     assert now[venue["ParentKey"]]["BreakKind"] == "PHANTOM_FILL"
 
-    book.publish("router_orders", saved)
+    book.publish((topic, saved))
     now = settle(dh, book, "venue order republished")
     assert now[venue["ParentKey"]]["BreakKind"] == "NONE"
 
 
 # --------------------------------------------------------------------------------------
-# 6. A malformed message
+# 6. A garbled quantity
 # --------------------------------------------------------------------------------------
 
 
-def test_a_malformed_message_is_counted_and_the_feed_lives_on(dh, book):
-    rejected = status(dh)["router_orders"]["Rejected"]
-    deletes = status(dh)["router_orders"]["Deletes"]
-    book.client.publish(amps_codec.topic(ROUTER, PREFIX), '{"RouterOrderId":"E2E-BAD-1","Qty":"lots"}')
-    book.client.publish_flush()
-    wait_for(lambda: status(dh)["router_orders"]["Rejected"] == rejected + 1, "the reject to be counted")
-    assert "Qty" in status(dh)["router_orders"]["LastError"]
+def test_a_garbled_quantity_folds_to_null_on_both_sides(dh, book):
+    topic = "router.child.orders"
+    raw = book.latest(topic, "E2E-OR-1.2")
+    # LeavesQty was 200: garbled, it folds to null -> 0 on both sides, so the router parent
+    # now holds 200 its children don't show
+    book.publish((topic, with_tags(raw, {"151": "lots"})))
+    now = settle(dh, book, "a garbled LeavesQty")
+    assert now["OR|E2E-OR-1.2"]["LeavesQty"] == 0.0
+    assert now["OR|E2E-OR-1"]["BreakKind"] == "HELD"
 
-    _fill(book, "OR_CHILD", "E2E-OR-1.2", 100)  # the next good message still flows
-    settle(dh, book, "a good message after a bad one")
-
-    # the bad record is in the SOW (AMPS only needed its key); its OOF resolves the key
-    # alone and deletes an order the table never held -- harmless, and not a reject
-    amps_publish.delete_orders(book.client, ROUTER, ["E2E-BAD-1"], PREFIX)
-    wait_for(lambda: status(dh)["router_orders"]["Deletes"] == deletes + 1, "the OOF of the bad record")
-    assert status(dh)["router_orders"]["Rejected"] == rejected + 1
-    settle(dh, book, "after deleting the bad record")
+    book.publish((topic, with_tags(raw, {"14": "100", "151": "100", "6": "186.5", "39": "1"})))
+    now = settle(dh, book, "the next good message")
+    assert now["OR|E2E-OR-1"]["BreakKind"] == "UNBOOKED_FILL"  # the router parent hasn't booked it
 
 
 # --------------------------------------------------------------------------------------
@@ -534,63 +580,55 @@ def test_a_restarted_deephaven_rebuilds_the_book_from_the_sow(dh, book):
     dh.reset()
     _cli("restart", DH_CONTAINER)
     wait_for(lambda: _app_ready_count() > ready, "the restarted app to export its tables", RESTART_TIMEOUT)
+    wait_for(lambda: subscribed(dh), "the snapshots", RESTART_TIMEOUT)
     settle(dh, book, "after a Deephaven restart")
-    rows = status(dh)
-    assert all(row["Snapshots"] == 1 for row in rows.values()), rows
-    # a fresh process saw the snapshot and nothing else
-    assert sum(row["Upserts"] for row in rows.values()) == book.size()
+    rows = dh.status()
+    assert all(r["Epoch"] == 1 for r in rows.values()), rows
+    # a fresh process saw one snapshot and nothing else
+    assert sum(r["Upserts"] for r in rows.values()) == book.current()
 
 
 def test_a_dropped_connection_resyncs_the_deletes_it_missed(dh, book, mock_book):
-    expected = book.expected()
-    system, order_id = mock_book.scenario_roots["over_routed"]
-    venues = [n for n in expected.values() if n["RootKey"] == f"{system}|{order_id}" and n["IsStreet"]]
+    venues = [n for n in scenario_nodes(book.expected(), mock_book, "over_routed") if n["IsStreet"]]
     gone, filled = venues[0], venues[-1]
-    before = status(dh)["router_orders"]
+    epochs = {topic: r["Epoch"] for topic, r in dh.status().items()}
 
     dh.reset()
     _cli("pause", DH_CONTAINER)
     try:
-        # Past the heartbeat timeout AMPS drops the frozen client, so the OOF below is
-        # never sent to it -- only the re-snapshot after reconnecting can bring it back.
-        time.sleep(HEARTBEAT_SECONDS * 3 + 5)
-        book.delete("router_orders", gone["OrderId"])
-        _fill(book, "OR_CHILD", filled["OrderId"], 100)
+        # Past the heartbeat timeout AMPS drops the frozen client, so the OOF below is never
+        # sent to it: only the re-snapshot after reconnecting can remove the record.
+        time.sleep(DEFAULT_HEARTBEAT * 3 + 5)
+        book.delete(TOPIC_OF_LEVEL["OR_CHILD"], gone["OrderId"])
+        fill(book, filled, 100)
     finally:
         _cli("unpause", DH_CONTAINER)
 
-    settle(dh, book, "after the dropped connection")
-    after = status(dh)["router_orders"]
-    assert after["Snapshots"] > before["Snapshots"], (before, after)
-    assert after["Resynced"] >= before["Resynced"] + 1, (before, after)
-    assert after["Connected"] is True
+    wait_for(lambda: all(r["Epoch"] > epochs[t] for t, r in dh.status().items()), "a re-snapshot on every topic",
+             RESTART_TIMEOUT)
+    now = settle(dh, book, "after the dropped connection")
+    assert gone["NodeKey"] not in now
 
 
 def test_a_restarted_amps_is_resubscribed(dh, book, mock_book):
-    before = status(dh)["raptor_orders"]["Snapshots"]
+    epochs = {topic: r["Epoch"] for topic, r in dh.status().items()}
     _cli("restart", AMPS_CONTAINER)
     wait_for(lambda: _port_open(*_amps_host_port()), "AMPS to listen again", RESTART_TIMEOUT)
-    wait_for(lambda: status(dh)["raptor_orders"]["Snapshots"] > before, "the re-snapshot", RESTART_TIMEOUT)
+    wait_for(lambda: all(r["Epoch"] > epochs[t] and r["Connected"] for t, r in dh.status().items()),
+             "a re-snapshot on every topic", RESTART_TIMEOUT)
+    settle(dh, book, "after the AMPS restart (the SOW survived on its volume)")
 
     try:
         book.client.close()  # its connection died with the broker
     except Exception:  # noqa: BLE001
         pass
-    book.client = amps_publish.connect(AMPS_URI, "otr-e2e-publisher")
-    system, order_id = mock_book.scenario_roots["working"]
-    expected = book.expected()
-    venue = next(n for n in expected.values()
-                 if n["RootKey"] == f"{system}|{order_id}" and n["IsStreet"] and n["LeavesQty"] >= 100)
-    _fill(book, "OR_CHILD", venue["OrderId"], 100)
+    book.client = _connect_publisher()
+    venue = next(n for n in scenario_nodes(book.expected(), mock_book, "working") if n["IsStreet"] and n["LeavesQty"] >= 100)
+    fill(book, venue, 100)
     now = settle(dh, book, "a fill after the AMPS restart")
     assert now[venue["ParentKey"]]["BreakKind"] == "UNBOOKED_FILL"
 
 
-def test_no_batch_failed_and_nothing_is_pending(dh):
-    # The status row is written at the start of an update cycle, before that cycle drains
-    # the feeds, so Pending can read 1 for one cycle after the DAG already has the row.
-    wait_for(lambda: all(row["Pending"] == 0 for row in status(dh).values()), "the feeds to drain")
-    for row in status(dh).values():
-        assert row["FailedBatches"] == 0 and row["Connected"] is True, row
-        # counters restarted with Deephaven in test 7, after the bad record was deleted
-        assert row["Rejected"] == 0, row
+def test_every_snapshot_completed_and_the_client_is_connected(dh):
+    for topic, row in dh.status().items():
+        assert row["Connected"] and row["Snapshots"] == row["Epoch"], (topic, row)

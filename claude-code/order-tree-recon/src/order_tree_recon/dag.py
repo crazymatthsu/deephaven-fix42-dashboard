@@ -9,6 +9,7 @@ and incremental: when a fill ticks on a venue order, only that tree's rows recom
 
     level tables --canonicalize--> otr_nodes (last_by NodeKey)
                                      |-> otr_id_index   (System, Id) -> NodeKey over OrderId + AltId
+    extra_ids (optional) ------------+                  (+ every historical id, for FIX tapes)
     otr_levels (static) -------------+-> parent resolution: one natural_join per candidate system
                                      |-> root walk: max_depth natural_joins -> RootKey, Depth, TreePath
                                      |-> root attributes: RootMoniker / RootSymbol / RootSide on every node
@@ -200,16 +201,29 @@ def _levels_table(topology: Topology) -> Table:
     return new_table(columns)
 
 
-def _id_index(nodes: Table) -> Table:
-    """``(System, Id) -> NodeKey`` over ``OrderId`` and ``AltId``.
+def _id_index(nodes: Table, extra_ids: Optional[Table] = None) -> Table:
+    """``(System, Id) -> NodeKey`` over ``OrderId`` and ``AltId`` (and ``extra_ids``).
 
     A downstream system may reference either id (DMA flow stamps Raptor's outbound
     ``ClOrdID``, the algo server stores Raptor's ``OrderId``), so both are indexed in the
     owning system's namespace. On a collision the ``AltId`` row wins (merge order).
+
+    ``extra_ids`` (``System, Id, OrderId``) adds ids an order was known by *before* --
+    a FIX order's amended-away ClOrdIDs (:mod:`order_tree_recon.fix_dag`) -- so a child
+    that still names the original ClOrdID links. Rows for orders that are not nodes are
+    dropped, and a current id always beats a historical one.
     """
     by_order = nodes.where("OrderId != ``").view(["System", "Id = OrderId", "NodeKey"])
     by_alt = nodes.where("AltId != ``").view(["System", "Id = AltId", "NodeKey"])
-    return merge([by_order, by_alt]).last_by(["System", "Id"]).view(["System", "Id", "NodeKey"])
+    parts = [by_order, by_alt]
+    if extra_ids is not None:
+        extra = (
+            extra_ids.view(["System", "Id", "NodeKey = System + `|` + OrderId"])
+            .where("!isNull(Id) && Id != ``")
+            .where_in(nodes, cols=["NodeKey"])
+        )
+        parts.insert(0, extra)
+    return merge(parts).last_by(["System", "Id"]).view(["System", "Id", "NodeKey"])
 
 
 def _link(topology: Topology, nodes: Table, levels: Table, id_index: Table) -> Table:
@@ -427,6 +441,7 @@ def build_order_tree(
     topology: Topology,
     level_tables: Mapping[str, Table],
     qty_tol: Optional[float] = None,
+    extra_ids: Optional[Table] = None,
 ) -> Dict[str, Any]:
     """Build every doc 14 table from one adapter table per level.
 
@@ -436,6 +451,9 @@ def build_order_tree(
         level_tables: ``{level name: table}`` carrying ``config.CANONICAL_COLUMNS``;
             exactly one entry per topology level.
         qty_tol: Absolute quantity tolerance; defaults to ``config.qty_tolerance()``.
+        extra_ids: Optional ``System, Id, OrderId`` table of further ids each order is
+            known by (see ``_id_index``); :func:`order_tree_recon.fix_dag.fix_level_tables`
+            returns one.
 
     Returns:
         ``{name: table}`` keyed by :data:`TABLE_NAMES` (``otr_tree`` is omitted when
@@ -457,7 +475,7 @@ def build_order_tree(
         list(config.CANONICAL_COLUMNS) + ["Level", "LevelNo", "System", "IsStreet", "NodeKey"]
     )
     levels = _levels_table(topology)
-    id_index = _id_index(nodes)
+    id_index = _id_index(nodes, extra_ids)
     linked = _link(topology, nodes, levels, id_index)
     rooted = _with_roots(_walk(topology, linked))
     recon = _recon(rooted, _child_rollup(rooted), tol)

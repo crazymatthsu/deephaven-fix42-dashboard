@@ -33,6 +33,12 @@ No broker: the app builds three mock tables (`raptor_orders`, `algo_orders`,
 adapter per level, and builds the DAG. The DAG is incremental, so the same code runs over
 ticking tables. The embedded test proves it with a live fill.
 
+The same book as FIX 4.2 drop copies (`fix-samples/`), read through the FIX layer:
+
+```bash
+OTR_SOURCE=fix-files bash order-tree-recon/scripts/run_demo.sh
+```
+
 **Try:** type `du` in *Moniker*, press the `DUNE / MSFT / BUY` exposure row, and expand
 the tree. The client order is canceled, but one venue order still has 100 shares open,
 and the router parent above it is flagged red `CHILD_STILL_OPEN`. Or type `CEDAR`, pin
@@ -77,6 +83,52 @@ Only [`src/order_tree_recon/sources.py`](src/order_tree_recon/sources.py) change
 
 ---
 
+## Using your own FIX messages
+
+When the orders only exist as drop copies (ExecutionReports), map each system's tags in
+one JSON file. No code changes. Doc 14 section 12 has the details.
+
+1. Put each system's logs in one folder (any number of files; every line containing
+   `8=FIX` is a message, with SOH or `|` delimiters and any log prefix).
+2. Copy [`fix-samples/fix_config.json`](fix-samples/fix_config.json) next to them and edit
+   it: which files belong to which system, which tag marks a child level (`when`), and
+   which tag names the parent (`link_tag`, usually `11` across systems and a custom tag
+   inside one).
+3. Dry-run the mapping on the host. No Deephaven or container is needed:
+
+   ```bash
+   PYTHONPATH=src python -m order_tree_recon.fix_check /path/to/logs
+   ```
+
+   It shows the orders per level, how they linked, the breaks, and why the first
+   unlinked orders did not link.
+4. Run the dashboard on them:
+
+   ```bash
+   OTR_SOURCE=fix-files OTR_FIX_HOST_DIR=/path/to/logs bash order-tree-recon/scripts/run_demo.sh
+   ```
+
+For a live feed (Kafka, or any append-only table with a `RawFix` column), call
+`fix_dag.build_from_fix(...)` yourself. Doc 14 section 12.4 has a complete snippet.
+
+---
+
+## Copying the module into another project
+
+The package needs only `deephaven` and `deephaven.ui`. Export it together with its
+compose file, app folder, loader, `repos.env` / `scripts/repos.sh` and docs:
+
+```bash
+bash order-tree-recon/scripts/export_standalone.sh ~/work/order-tree
+cd ~/work/order-tree && bash order-tree-recon/run_tests.sh && bash order-tree-recon/scripts/run_demo.sh
+```
+
+To use it in an existing Deephaven server instead, put `src/` on its `PYTHONPATH` and run
+`from order_tree_recon import app; app.main(globals())`. Doc 14 section 13 has the
+details.
+
+---
+
 ## How to read the numbers
 
 Per edge (a node against its **direct** children):
@@ -111,6 +163,9 @@ malformed value is a startup error.
 | `OTR_QTY_TOL` | `1e-6` | absolute tolerance for quantity comparisons |
 | `OTR_SEED` | `42` | mock data seed |
 | `OTR_MOCK_FAMILIES` | `24` | random healthy families on top of the 11 catalog scenarios |
+| `OTR_SOURCE` | `mock` | `mock` or `fix-files` (FIX drop-copy logs) |
+| `OTR_FIX_HOST_DIR` | `order-tree-recon/fix-samples` | the host folder with the logs and `fix_config.json`, mounted at `/otr-fix` (`OTR_FIX_DIR`) |
+| `OTR_FIX_CONFIG` | `/otr-fix/fix_config.json` | another mapping file (relative to `/otr-fix`); the built-in default if neither exists |
 
 `DH_PORT` (10000), `DH_XMX` (2g) and `DH_CONTAINER` (`otr-deephaven`) move the port, the
 heap and the container name.
@@ -127,14 +182,19 @@ pip install deephaven-server==42.4                  # ~600 MB, needs JDK 17+
 OTR_DH_TEST=1 PYTHONPATH=src python -m pytest tests # + the embedded-engine suite
 ```
 
-The host suite (81 tests) checks the python reference: every scenario's breaks, the edge
+The host suite (114 tests) checks the python reference: every scenario's breaks, the edge
 taxonomy, signed gaps, DMA linking via `AltId`, nested algo depth, `TOO_DEEP` and
 cycles, depth-first `TreePath`, both identities on every complete bucket, the filter
-builders and the mock book. The embedded suite asserts the Deephaven DAG matches the
+builders and the mock book. It also checks the FIX layer: the parser, config validation,
+the fold, the id history, `fix_check`, the committed `fix-samples/`, and the mock book as
+FIX tapes reconciling exactly like the table path. The embedded suite asserts the Deephaven DAG matches the
 reference **row for row** (every `otr_recon` column, every ladder and exposure row). It
 also builds the tree, the API, the app and the dashboard, and turns the router table into
 a keyed input table to show that one new venue fill re-derives `UNBOOKED_FILL` and the
-bucket's `NetUnbookedQty` incrementally.
+bucket's `NetUnbookedQty` incrementally. For the FIX path, it asserts the engine's fold
+equals the python fold row for row and the tree equals the reference. It also shows that
+an appended ExecutionReport ticks through to a break, and builds the app with
+`OTR_SOURCE=fix-files`.
 
 ---
 
@@ -143,6 +203,14 @@ bucket's `NetUnbookedQty` incrementally.
 **Everything is `ORPHAN` at one level.** The adapter's `LinkId` is not the id the
 upstream system indexes under. Check which id the downstream system stores (order id
 vs `ClOrdID`), and put the other one in the upstream level's `AltId`.
+
+**FIX: a whole level is `ORPHAN` or `NO_LINK`.** Run `fix_check` on the folder. `NO_LINK`
+means the level's `link_tag` is on none of the order's reports. `ORPHAN` means the tag
+is there but its value is not an id the parent system reports (in its `id_tags`). The
+first unlinked orders are printed with the value they carried.
+
+**FIX: a system shows 0 messages.** Its `files` globs matched nothing. The startup banner
+and `fix_check` both list what each glob matched. Globs are relative to the folder.
 
 **Every child is `MISMATCH`.** The systems code `Side` differently (FIX `1`/`2` vs
 `BUY`/`SELL`). Decode in the adapter, as `RAPTOR_SIDE` does.

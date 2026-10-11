@@ -1,13 +1,20 @@
-"""Entry point: mock native tables -> adapters -> order-tree DAG -> query API -> dashboard.
+"""Entry point: source tables -> per-level tables -> order-tree DAG -> query API -> dashboard.
 
 Works in **Application Mode** (``docker/apps/order-tree-recon/`` points at this file
 through the shared loader) and when exec'd in a Deephaven console. Everything it builds
 is published as a module-level global, so it shows up in the IDE's Panels menu and is
 reachable from ``pydeephaven``.
 
-To run it over real tables, replace the three ``native`` tables below with your own and
-edit :func:`order_tree_recon.sources.adapters` -- the DAG, the API and the dashboard are
-unchanged (doc 14 section 3).
+Two sources (``OTR_SOURCE``):
+
+* ``mock`` (default) -- generated native Raptor / algo / router tables and the adapters
+  in :mod:`order_tree_recon.sources`. To run over your own order *tables*, replace the
+  native tables and edit the adapters (doc 14 section 3).
+* ``fix-files`` -- FIX drop-copy logs in ``OTR_FIX_DIR``, mapped by a JSON tag config
+  (:mod:`order_tree_recon.fix`, :mod:`order_tree_recon.fix_dag`; doc 14 section 12).
+  The raw messages are published as ``fix_<system>_messages``.
+
+Either way the DAG, the API and the dashboard are unchanged.
 
 Re-running the script is safe: the built globals are memoised on the package object
 (which lives in ``sys.modules``), so a second execution re-exports the same tables.
@@ -28,7 +35,7 @@ for _candidate in (_SRC_DIR, "/otr-scripts"):
         sys.path.insert(0, _candidate)
 
 import traceback  # noqa: E402
-from typing import Any, Dict, Mapping, MutableMapping, Optional  # noqa: E402
+from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Tuple  # noqa: E402
 
 import order_tree_recon  # noqa: E402
 from order_tree_recon import config, dag, mockdata, query_api, sources  # noqa: E402
@@ -39,18 +46,50 @@ DASHBOARD_NAME = "order_tree_dashboard"
 _RUNTIME_ATTR = "_ORDER_TREE_GLOBALS"
 
 
-def build(environ: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
-    """Build every global: native tables, ``otr_*`` tables, the API, the dashboard."""
-    topology = config.default_topology()
-    tol = config.qty_tolerance(environ)
+def _mock_source(topology: config.Topology, tol: float,
+                 environ: Optional[Mapping[str, str]]) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
     data = mockdata.generate(config.seed(environ), config.mock_families(environ))
-
     native = sources.native_tables(data)
     level_tables = sources.adapters(native["raptor_orders"], native["algo_orders"], native["router_orders"])
     tables = dag.build_order_tree(topology, level_tables, tol)
+    banner = [
+        f"mock: seed={config.seed(environ)} families={config.mock_families(environ)} -> "
+        f"{len(data.raptor)} raptor / {len(data.algo)} algo / {len(data.router)} router orders"
+    ]
+    return native, tables, banner
+
+
+def _fix_files_source(topology: config.Topology, tol: float,
+                      environ: Optional[Mapping[str, str]]) -> Tuple[Dict[str, Any], Dict[str, Any], List[str]]:
+    from order_tree_recon import fix, fix_dag
+
+    directory = config.fix_dir(environ)
+    config_path = config.fix_config_path(environ)
+    fix_config = fix.load_fix_config(config_path, topology)
+    messages, files = fix_dag.fix_file_tables(fix_config, directory)
+    tables = fix_dag.build_from_fix(topology, fix_config, messages, tol)
+    published = {f"fix_{system.lower()}_messages": table for system, table in messages.items()}
+    banner = [f"fix-files: {directory}, mapping {config_path or '(built-in DEFAULT_FIX_CONFIG)'}"]
+    for system in fix_config.systems:
+        names = ", ".join(os.path.basename(f) for f in files[system.system]) or "NO FILES MATCHED"
+        banner.append(f"  {system.system:<7} {list(system.files)} -> {names}; "
+                      f"{messages[system.system].size} messages")
+    if not any(files.values()):
+        banner.append(f"WARNING: no file in {directory} matches any 'files' glob -- every table is empty")
+    return published, tables, banner
+
+
+def build(environ: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+    """Build every global: the source tables, ``otr_*`` tables, the API, the dashboard."""
+    topology = config.default_topology()
+    tol = config.qty_tolerance(environ)
+    if config.source(environ) == "fix-files":
+        published, tables, banner = _fix_files_source(topology, tol, environ)
+    else:
+        published, tables, banner = _mock_source(topology, tol, environ)
     api = query_api.make_query_api(tables)
 
-    built: Dict[str, Any] = {**native, **tables, **api}
+    built: Dict[str, Any] = {**published, **tables, **api}
     try:
         from order_tree_recon.dashboard import build_dashboard
 
@@ -64,12 +103,9 @@ def build(environ: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
     print("[order-tree] topology:", flush=True)
     for line in topology.describe():
         print(f"[order-tree]   {line}", flush=True)
-    print(
-        f"[order-tree] mock: seed={config.seed(environ)} families={config.mock_families(environ)} -> "
-        f"{len(data.raptor)} raptor / {len(data.algo)} algo / {len(data.router)} router orders; "
-        f"qty tolerance {tol}",
-        flush=True,
-    )
+    for line in banner:
+        print(f"[order-tree] {line}", flush=True)
+    print(f"[order-tree] {tables['otr_nodes'].size} orders; qty tolerance {tol}", flush=True)
     print(f"[order-tree] tree panel: {'otr_tree' if 'otr_tree' in tables else 'UNAVAILABLE'}; "
           f"dashboard: {DASHBOARD_NAME if DASHBOARD_NAME in built else 'UNAVAILABLE'}", flush=True)
     return built

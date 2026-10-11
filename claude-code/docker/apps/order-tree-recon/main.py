@@ -1,7 +1,8 @@
 """App entrypoint: the Raptor -> algo -> router order tree (doc 14).
 
-Runs `order-tree-recon/src/order_tree_recon/app.py` -- mock native tables -> per-level
-adapters -> linking / root walk / per-edge recon -> query API -> `deephaven.ui` dashboard.
+Runs `order-tree-recon/src/order_tree_recon/app.py` -- mock native tables (or FIX logs
+from /otr-fix, OTR_SOURCE=fix-files) -> per-level tables -> linking / root walk / per-edge
+recon -> query API -> `deephaven.ui` dashboard.
 
   /otr-scripts = order-tree-recon/src  (the order_tree_recon package)
 

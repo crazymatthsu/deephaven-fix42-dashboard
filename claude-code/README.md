@@ -684,8 +684,13 @@ bash order-tree-recon/scripts/run_demo.sh down
 Type a moniker prefix, press an exposure row, expand the native tree down to the venue
 orders. `order_tree("DUNE", "MSFT", "BUY")`, `find_tree("<any id from any system>")` and
 `exposure(...)` do the same from the console. To run it over real tables, rewrite only
-`order-tree-recon/src/order_tree_recon/sources.py`. Design, break taxonomy, the exposure
-identities and verification: [docs/14-order-tree-reconciliation.md](docs/14-order-tree-reconciliation.md);
+`order-tree-recon/src/order_tree_recon/sources.py`. To run it on the three systems' **FIX
+drop copies**, map their tags in one JSON file and point it at the logs
+(`OTR_SOURCE=fix-files OTR_FIX_HOST_DIR=/path/to/logs bash order-tree-recon/scripts/run_demo.sh`;
+`python -m order_tree_recon.fix_check` dry-runs the mapping without Deephaven). The module is
+standalone: `order-tree-recon/scripts/export_standalone.sh DEST` copies it into another
+project with its compose file and `repos.env`. Design, break taxonomy, the exposure
+identities, the FIX layer and verification: [docs/14-order-tree-reconciliation.md](docs/14-order-tree-reconciliation.md);
 runbook: [order-tree-recon/README.md](order-tree-recon/README.md).
 
 ---

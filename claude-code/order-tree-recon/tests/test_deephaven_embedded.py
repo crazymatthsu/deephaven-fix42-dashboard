@@ -10,7 +10,10 @@ deephaven-server==42.4`` -- ~600 MB with its JVM jars, needs JDK 17+) and
 * the tree, the query API, the app entrypoint and the ``deephaven.ui`` dashboard build;
 * the DAG is incremental: one new fill on a venue order (a keyed input table here,
   your live order feed in production) re-derives the break and the bucket exposure
-  without rebuilding anything.
+  without rebuilding anything;
+* the FIX path: the engine's fold of raw messages equals :func:`fix.fold_all`, the tree
+  it builds equals the reference, an appended ExecutionReport ticks through to a break,
+  and ``OTR_SOURCE=fix-files`` builds the app from ``fix-samples/``.
 """
 
 from __future__ import annotations
@@ -201,3 +204,122 @@ def test_app_entrypoint_builds_everything(server):
     for name in ("raptor_orders", "algo_orders", "router_orders", "otr_recon", "otr_tree",
                  "order_tree", "find_tree", "exposure", app.DASHBOARD_NAME):
         assert name in built, name
+
+
+# --------------------------------------------------------------------------------------
+# The FIX path (fix_dag)
+# --------------------------------------------------------------------------------------
+
+SAMPLES_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fix-samples")
+
+
+@pytest.fixture(scope="module")
+def fix_book(server, book):
+    from order_tree_recon import fix, fix_dag, fix_mock
+
+    topology = config.default_topology()
+    cfg = fix.load_fix_config("", topology)
+    tapes = fix_mock.tapes(book)
+    # A null, an empty line, garbage and a report without an order id: all skipped.
+    noise = [None, "", "garbage", fix_mock.fix_message([("35", "8"), ("37", ""), ("14", "abc")])]
+    messages = {system: fix_dag.fix_messages_table(lines + noise) for system, lines in tapes.items()}
+    levels, ids = fix_dag.fix_level_tables(topology, cfg, messages)
+    rows, py_ids = fix.fold_all(cfg, tapes)
+    return {"cfg": cfg, "tapes": tapes, "levels": levels, "ids": ids, "rows": rows, "py_ids": py_ids}
+
+
+def test_fix_fold_matches_python_fold(fix_book):
+    def key(r):
+        return (r["Level"], r["OrderId"])
+
+    engine = [dict(r, Level=level) for level, table in fix_book["levels"].items() for r in _rows(table)]
+    assert sorted(engine, key=key) == sorted(fix_book["rows"], key=key)
+    assert {(r["System"], r["Id"], r["OrderId"]) for r in _rows(fix_book["ids"])} == set(fix_book["py_ids"])
+
+
+def test_fix_path_recon_matches_reference(fix_book, book):
+    from order_tree_recon import dag, fix_mock
+    from order_tree_recon.query_api import make_query_api
+
+    topology = config.default_topology()
+    tables = dag.build_order_tree(topology, fix_book["levels"], 1e-6, extra_ids=fix_book["ids"])
+    ref = reference.reconcile(topology, fix_book["rows"], 1e-6, extra_ids=fix_book["py_ids"])
+    engine = {r["NodeKey"]: r for r in _rows(tables["otr_recon"])}
+    assert set(engine) == set(ref)
+    diffs = [
+        (key, column, engine[key][column], ref[key][column])
+        for key in ref
+        for column in dag.RECON_COLUMNS
+        if not _same(engine[key][column], ref[key][column])
+    ]
+    assert diffs == []
+
+    # The router parent of the amended DMA order linked through Raptor's id history, and
+    # find_tree resolves the amended-away ClOrdID too.
+    _, client_id = book.scenario_roots[fix_mock.AMENDED_SCENARIO]
+    client = next(r for r in fix_book["rows"] if r["OrderId"] == client_id)
+    original = client["AltId"][: -len("-R1")]
+    tree = _rows(make_query_api(tables)["find_tree"](original))
+    assert {r["RootKey"] for r in tree} == {f"RAPTOR|{client_id}"}
+    assert all(r["LinkState"] in ("ROOT", "LINKED") for r in tree)
+
+
+def test_fix_messages_tick_through_to_a_break(fix_book, book):
+    """An appended venue fill the router parent never books -> UNBOOKED_FILL, live."""
+    from deephaven import input_table
+    from order_tree_recon import fix_dag, fix_mock, mockdata as md
+
+    topology = config.default_topology()
+    router = input_table(init_table=fix_dag.fix_messages_table(fix_book["tapes"]["OR"]))  # append-only
+    messages = {
+        "RAPTOR": fix_dag.fix_messages_table(fix_book["tapes"]["RAPTOR"]),
+        "ALGO": fix_dag.fix_messages_table(fix_book["tapes"]["ALGO"]),
+        "OR": router,
+    }
+    tables = fix_dag.build_from_fix(topology, fix_book["cfg"], messages, 1e-6)
+
+    system, order_id = book.scenario_roots["working"]
+    root = next(r for r in book.roots if r.order_id == order_id)
+    venue = next(o for o in root.walk() if o.level == "OR_CHILD" and o.leaves >= 100)
+    parent_key = f"OR|{venue.link_id}"
+
+    def kind_of(key):
+        rows = _rows(tables["otr_recon"].where(f"NodeKey == `{key}`").view(["BreakKind"]))
+        return rows[0]["BreakKind"] if rows else None
+
+    assert kind_of(parent_key) == "NONE"
+    fill = fix_mock.fix_message([
+        ("35", "8"), ("37", venue.order_id), ("150", "1"), ("39", "1"), ("55", venue.symbol),
+        ("54", md.SIDE_TO_FIX[venue.side]), ("38", str(int(venue.qty))), ("14", str(int(venue.cum + 100))),
+        ("151", str(int(venue.leaves - 100))), ("6", repr(venue.px)),
+    ])
+    router.add(fix_dag.fix_messages_table([fill]))
+
+    assert _wait_for(lambda: kind_of(parent_key) == "UNBOOKED_FILL")
+    bucket = _rows(tables["otr_exposure"].where(["RootMoniker == `ACME`", "RootSymbol == `MSFT`", "RootSide == `BUY`"]))
+    assert bucket[0]["NetUnbookedQty"] == 100.0
+
+
+def test_app_entrypoint_fix_files(server, book, ref):
+    from order_tree_recon import app
+
+    built = app.build({"OTR_SOURCE": "fix-files", "OTR_FIX_DIR": SAMPLES_DIR})
+    for name in ("fix_raptor_messages", "fix_algo_messages", "fix_or_messages", "otr_recon", "otr_tree",
+                 "order_tree", app.DASHBOARD_NAME):
+        assert name in built, name
+    assert built["otr_nodes"].size == len(mockdata.canonical_rows(book))
+    assert built["otr_breaks"].size == sum(n["Breaks"] for n in ref.values())
+
+
+def test_fix_files_with_a_system_missing(server, tmp_path):
+    """Only Raptor's log present: the other levels are empty, everything still builds."""
+    import shutil
+
+    from order_tree_recon import app
+
+    shutil.copy(os.path.join(SAMPLES_DIR, "raptor.log"), tmp_path / "raptor.log")
+    built = app.build({"OTR_SOURCE": "fix-files", "OTR_FIX_DIR": str(tmp_path)})
+    nodes = _rows(built["otr_recon"].view(["Level", "LinkState"]))
+    assert nodes and {(n["Level"], n["LinkState"]) for n in nodes} == {("CLIENT", "ROOT")}
+    assert built["fix_algo_messages"].size == 0
+    assert app.DASHBOARD_NAME in built

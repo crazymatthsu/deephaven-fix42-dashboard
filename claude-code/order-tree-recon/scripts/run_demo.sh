@@ -8,8 +8,10 @@
 #   bash order-tree-recon/scripts/run_demo.sh logs       # the app's log lines
 #
 # Knobs (all optional): DH_PORT (10000), DH_XMX (2g), DH_CONTAINER (otr-deephaven) and the
-# OTR_* variables of docs/14-order-tree-reconciliation.md section 3 -- e.g.
+# OTR_* variables of docs/14-order-tree-reconciliation.md sections 3 and 12 -- e.g.
 #   OTR_MOCK_FAMILIES=200 OTR_SEED=7 bash order-tree-recon/scripts/run_demo.sh
+#   OTR_SOURCE=fix-files bash order-tree-recon/scripts/run_demo.sh      # the sample FIX tapes
+#   OTR_SOURCE=fix-files OTR_FIX_HOST_DIR=/abs/path/to/your/logs bash order-tree-recon/scripts/run_demo.sh
 set -euo pipefail
 # Artifact sources -- container registries, pip index, ... -- from claude-code/repos.env and
 # your override file (docs/15). Loaded before anything pulls an image or installs a package.
@@ -21,6 +23,15 @@ COMPOSE_FILE="$ROOT/docker/docker-compose.order-tree.yml"
 CONTAINER="${DH_CONTAINER:-otr-deephaven}"
 PORT="${DH_PORT:-10000}"
 COMPOSE=(podman compose -f "$COMPOSE_FILE")
+
+# A relative OTR_FIX_HOST_DIR would resolve against docker/, not the caller's directory.
+if [ -n "${OTR_FIX_HOST_DIR:-}" ]; then
+  [ -d "$OTR_FIX_HOST_DIR" ] || { echo "[order-tree] OTR_FIX_HOST_DIR=$OTR_FIX_HOST_DIR is not a directory" >&2; exit 2; }
+  OTR_FIX_HOST_DIR="$(cd "$OTR_FIX_HOST_DIR" && pwd)"
+  # Git Bash: /c/Users/... -> C:/Users/..., the form a Windows podman understands.
+  if command -v cygpath >/dev/null 2>&1; then OTR_FIX_HOST_DIR="$(cygpath -m "$OTR_FIX_HOST_DIR")"; fi
+  export OTR_FIX_HOST_DIR
+fi
 
 cmd="${1:-up}"
 
@@ -56,7 +67,7 @@ case "$cmd" in
     else
       echo "[order-tree] WARNING: the app has not reported 'entrypoint loaded OK' yet; check: $0 logs"
     fi
-    printf '%s\n' "$LOG" | grep '^\[order-tree\]' | tail -5 || true
+    printf '%s\n' "$LOG" | grep '^\[order-tree\]' | tail -9 || true
     echo
     echo "  IDE:        http://localhost:$PORT/ide                (Panels ▸ order_tree_dashboard)"
     echo "  Dashboard:  http://localhost:$PORT/iframe/widget/?name=order_tree_dashboard"

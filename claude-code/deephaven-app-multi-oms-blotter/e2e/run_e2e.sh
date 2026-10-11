@@ -213,12 +213,16 @@ fi
 # ---------------------------------------------------------------------------
 # 3. Python client venv
 # ---------------------------------------------------------------------------
-if [[ ! -x "$VENV/bin/python" ]]; then
+# bin/python on macOS/Linux, Scripts/python.exe on Windows; find_python3 tries python3,
+# python and `py -3` (both helpers are in scripts/repos.sh, sourced above).
+if ! VENV_PY="$(venv_python "$VENV")"; then
   log "creating client venv at $VENV"
-  python3 -m venv "$VENV" || die "python3 -m venv failed -- is python3 installed?"
+  HOST_PY="$(find_python3 3.9)" || die "no Python 3.9+ found -- install one or set PYTHON=/path/to/python"
+  "$HOST_PY" -m venv "$VENV" || die "python -m venv failed ($HOST_PY)"
+  VENV_PY="$(venv_python "$VENV")" || die "the venv at $VENV has no python"
 fi
 log "installing client requirements (pydeephaven 42.4 + pytest)"
-"$VENV/bin/pip" install --quiet --disable-pip-version-check -r "$HERE/requirements.txt" \
+"$VENV_PY" -m pip install --quiet --disable-pip-version-check -r "$HERE/requirements.txt" \
   || die "pip install failed"
 
 # ---------------------------------------------------------------------------
@@ -240,6 +244,6 @@ echo "    expected export: $EXPECTED ($(wc -l < "$EXPECTED" | tr -d ' ') lines)"
 log "running pytest"
 cd "$HERE"
 MOMS_EXPECTED="$EXPECTED" DH_CONTAINER="$DH_CONTAINER_NAME" CONTAINER_CLI="$CONTAINER_CLI" \
-  "$VENV/bin/python" -m pytest test_blotter_e2e.py -v ${PYTEST_ARGS:+$PYTEST_ARGS}
+  "$VENV_PY" -m pytest test_blotter_e2e.py -v ${PYTEST_ARGS:+$PYTEST_ARGS}
 
 log "multi-OMS e2e passed"

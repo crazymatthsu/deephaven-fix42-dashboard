@@ -25,3 +25,20 @@ override file. Never hardcode a public source anywhere else. When adding or chan
   key table.
 
 Check a change with `claude-code/scripts/repos.sh check`.
+
+## Scripts run on macOS, Linux and Windows Git Bash
+
+See doc 15 section 10.
+
+- **Shell compatibility:** bash 3.2 (macOS `/bin/bash`) and BSD tools. No associative arrays,
+  `mapfile` or `${x,,}`; no GNU-only flags (`sed -i` without a suffix, `readlink -f`, `date -d`,
+  `grep -P`, `timeout`).
+- **Python:** find it with `find_python3 <min>` and a venv's interpreter with
+  `venv_python <dir>` (both in `claude-code/scripts/repos.sh`). Never hardcode `python3` or
+  `.venv/bin/`.
+- **Container paths:** a container-internal absolute path passed as a command-line argument
+  (`podman exec <ctr> /opt/...`) needs `MSYS_NO_PATHCONV=1` in front, or Git Bash rewrites it.
+- **Gradle:** `Exec` tasks that run a script pass `file.invariantSeparatorsPath`.
+- **Line endings:** `.gitattributes` keeps every text file LF on checkout; only `.bat` and
+  `.cmd` are CRLF.
+

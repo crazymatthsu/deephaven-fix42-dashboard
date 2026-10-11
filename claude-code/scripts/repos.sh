@@ -21,7 +21,9 @@
 # optional leading `export `, ${KEY} references, '#' comments on their own line, optional
 # surrounding quotes. A key with an empty value is left unset (= the public default).
 #
-# Written for bash 3.2 (macOS /bin/bash): no associative arrays, no mapfile.
+# Portable across macOS (bash 3.2, BSD tools), Linux and Windows Git Bash: no associative
+# arrays, no mapfile, no GNU-only flags. It also provides find_python3 and venv_python, the
+# portable way for every script to find a Python and a virtualenv's interpreter (docs/15 §10).
 
 REPOS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPOS_DEFAULTS_FILE="$REPOS_ROOT/repos.env"
@@ -48,6 +50,7 @@ _repos_load_file() {
   [ -f "$file" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
+    line="${line#$'\xef\xbb\xbf'}"
     line="${line#"${line%%[![:space:]]*}"}"
     case "$line" in '' | '#'*) continue ;; esac
     line="${line#export }"
@@ -182,6 +185,50 @@ repos_pull() {
     podman pull "$(printenv "$key")" || failed=1
   done
   return "$failed"
+}
+
+# ---- portability helpers (macOS, Linux, Windows Git Bash) ----------------------------
+
+# Print the absolute path of a working Python >= $1 (default 3.10): $PYTHON if set, else
+# the first of python3, python, `py -3` that runs and is new enough. On Windows `python3`
+# is often only a Microsoft Store stub that fails, and the installer provides `python` and
+# the `py` launcher instead. The result is a single path (converted to /c/... form under
+# Git Bash), so callers can quote it like any other path.
+_repos_try_python() {
+  "$@" -c "import sys; sys.exit(0 if sys.version_info >= ($_REPOS_PY_MIN) else 1)" >/dev/null 2>&1 \
+    || return 1
+  "$@" -c 'import sys; print(sys.executable)' 2>/dev/null
+}
+
+find_python3() {
+  local min="${1:-3.10}" exe=""
+  _REPOS_PY_MIN="${min%%.*}, ${min#*.}"
+  if [ -n "${PYTHON:-}" ]; then
+    exe="$(_repos_try_python "$PYTHON")" \
+      || { echo "PYTHON=$PYTHON is not a working Python >= $min" >&2; return 1; }
+  else
+    exe="$(_repos_try_python python3)" || exe="$(_repos_try_python python)" \
+      || exe="$(_repos_try_python py -3)" || {
+        echo "no Python >= $min found (tried python3, python, py -3)." >&2
+        echo "Install one (python.org, brew install python@3.12, ...) or set PYTHON=/path/to/python." >&2
+        return 1
+      }
+  fi
+  exe="${exe%$'\r'}"
+  if command -v cygpath >/dev/null 2>&1; then exe="$(cygpath -u "$exe")"; fi
+  printf '%s\n' "$exe"
+}
+
+# Print the interpreter inside virtualenv $1: bin/python (macOS, Linux) or
+# Scripts/python.exe (Windows). Returns 1 if there is none (the venv does not exist yet).
+venv_python() {
+  if [ -x "$1/bin/python" ]; then
+    printf '%s\n' "$1/bin/python"
+  elif [ -x "$1/Scripts/python.exe" ]; then
+    printf '%s\n' "$1/Scripts/python.exe"
+  else
+    return 1
+  fi
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then

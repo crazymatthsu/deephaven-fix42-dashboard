@@ -189,6 +189,9 @@ So that one override file keeps working for every new demo:
 5. **A new upstream** (another registry, npm, …): add a key with the public default to
    `repos.env`, a commented JFrog example to `repos.local.env.example`, a row to section 2,
    and read it in the place that downloads.
+6. **Portability** (section 10): scripts stay bash 3.2 / BSD-tool safe, find Python with
+   `find_python3` and venv interpreters with `venv_python`, and Gradle `Exec` tasks pass
+   script paths as `invariantSeparatorsPath`.
 
 ## 9. Out of scope
 
@@ -197,3 +200,38 @@ So that one override file keeps working for every new demo:
 - **Host tools** (podman, a JDK, python3) are installed by your company's usual means.
 - **The running Deephaven server** downloads nothing at startup: `deephaven.ui` and
   `deephaven.plot.express` are bundled in the image.
+
+## 10. Windows (Git Bash) and macOS
+
+Every script runs from **Git Bash** on Windows and from Terminal on macOS:
+
+| | macOS | Windows + Git Bash |
+|---|---|---|
+| shell | `/bin/bash` is **3.2**: the scripts use no bash 4 feature (associative arrays, `mapfile`, `${x,,}`) and no GNU-only flag (`sed -i` without a suffix, `readlink -f`, `date -d`, `grep -P`, `timeout`) | Git for Windows' bash 5 and its bundled `printenv`, `sed`, `awk`, `curl`, `cygpath` |
+| line endings | n/a | the root `.gitattributes` forces LF on checkout whatever `core.autocrlf` says (CRLF breaks bash scripts, `gradlew` and Dockerfiles). If you cloned **before** this file existed, re-clone (or, with no local changes, `git rm -rq --cached . && git reset --hard`) |
+| Python | `python3` (python.org, Homebrew) | usually `python` and the `py` launcher, while `python3` is often a Microsoft Store stub that fails. `find_python3` (in `scripts/repos.sh`) tries `$PYTHON`, `python3`, `python`, `py -3` and uses the first working 3.10+ |
+| virtualenvs | `.venv/bin/python` | `.venv/Scripts/python.exe`: `venv_python` handles both |
+| Gradle | `./gradlew` | `./gradlew` **from Git Bash**. The Python test tasks run `bash run_tests.sh`, and from cmd / PowerShell `bash` can resolve to WSL's `bash.exe`. `gradlew.bat` is fine for Java-only tasks |
+| containers | `podman machine` | `podman machine` (WSL2), plus a compose provider on PATH (`docker-compose` or `podman-compose`) for `podman compose` |
+| open the dashboard | `open http://localhost:10000/...` | `start http://localhost:10000/...` |
+| the override file | `~/.config/jfrog/repos.env` | the same from Git Bash (`C:\Users\<you>\.config\jfrog\repos.env`). Gradle also accepts a `/c/Users/...` path in `REPOS_ENV` |
+
+An override file saved by Notepad (CRLF line endings, or "UTF-8 with BOM") reads correctly
+in both parsers.
+
+Git Bash rewrites command-line arguments that look like POSIX paths before handing them to
+Windows programs such as `podman.exe`. That is right for host paths
+(`-f /c/Users/.../docker-compose.yml`) but wrong for paths **inside** a container. The scripts
+pass none today. A new `podman exec <ctr> /opt/...` call needs `MSYS_NO_PATHCONV=1` in front.
+
+**Verified** (on Linux, simulating Windows):
+- `find_python3` with a failing Store-stub `python3`, `python` only, the `py -3` launcher
+  only, nothing, a `PYTHON` path containing spaces, and an interpreter printing
+  `C:\...\python.exe` with CRLF that `cygpath` converts;
+- `venv_python` with both layouts;
+- BOM + CRLF override files through the shell loader and through Gradle;
+- all six Python suites (773 tests) run by Gradle through the reworked `run_tests.sh`;
+- the `.gitattributes` effect on a `core.autocrlf=true` clone.
+
+**Not run:** an actual Windows or macOS machine. The bash 3.2 compatibility is by
+construction; bash 3.2 itself couldn't be obtained in the build sandbox.

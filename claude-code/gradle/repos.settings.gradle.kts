@@ -25,6 +25,19 @@ val reposDefaults: File = generateSequence(settingsDir) { it.parentFile }
     .firstOrNull { it.isFile }
     ?: throw GradleException("repos.env not found in $settingsDir or any parent directory (docs/15)")
 
+// A path as Java sees it. Git Bash normally converts /c/Users/... to C:/Users/... for native
+// programs; if it did not (or the value came from elsewhere), translate it here.
+fun hostFile(path: String): File {
+    val asGiven = File(path)
+    val msys = Regex("^/([A-Za-z])/(.*)$").matchEntire(path)
+    val windows = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
+    return if (!asGiven.isFile && msys != null && windows) {
+        File("${msys.groupValues[1]}:/${msys.groupValues[2]}")
+    } else {
+        asGiven
+    }
+}
+
 val reposConfig: Map<String, String> = run {
     val keyPattern = Regex("[A-Za-z_][A-Za-z0-9_]*")
     val refPattern = Regex("""\$\{([^}]*)}""")
@@ -33,7 +46,8 @@ val reposConfig: Map<String, String> = run {
 
     fun load(file: File) {
         file.readLines().forEach { raw ->
-            val line = raw.trimEnd('\r').trim().removePrefix("export ").trim()
+            // trimStart('\uFEFF'): a file saved by Windows Notepad as "UTF-8 with BOM".
+            val line = raw.trimStart('\uFEFF').trimEnd('\r').trim().removePrefix("export ").trim()
             if (line.isEmpty() || line.startsWith("#")) return@forEach
             val eq = line.indexOf('=')
             if (eq < 0) return@forEach
@@ -52,7 +66,7 @@ val reposConfig: Map<String, String> = run {
 
     val explicit = env("REPOS_ENV")?.takeIf { it.isNotBlank() }
     val override = if (explicit != null) {
-        File(explicit).also {
+        hostFile(explicit).also {
             if (!it.isFile) throw GradleException("REPOS_ENV=$explicit does not exist (docs/15)")
         }
     } else {

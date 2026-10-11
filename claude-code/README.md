@@ -60,11 +60,14 @@ Rationale in [docs/00-overview.md](docs/00-overview.md#2-the-state-machine-scena
 |---|---|
 | **podman** (or Docker) | podman 5.x with `podman-compose`, or `docker` with `compose`. On macOS the podman VM must be running: `podman machine start`. |
 | **JDK** | Not required up front — the Gradle toolchain auto-provisions **Java 21** via foojay (on a network that blocks `api.foojay.io`, install JDK 21 and set `GRADLE_JDK_AUTO_DOWNLOAD=false`, see below). |
-| **python3** | 3.10+ on the host, for the `deephaven-scripts` unit tests and the integration-test client venv. |
+| **python3** | 3.10+ on the host, for the `deephaven-scripts` unit tests and the integration-test client venv (on Windows `python` or `py -3` is found automatically; `PYTHON=/path/to/python` picks one). |
 | **RAM** | The Deephaven container is configured with `-Xmx4g`; give the podman machine ≥6 GB. The multi-server stack (`docker-compose.remote-uri.yml`) runs three servers at `-Xmx1g/1g/1536m` for that same 6 GB — do not run both stacks at once; `DH_XMX_LEAF` / `DH_XMX_COLLECTOR` raise the heaps on a bigger machine. |
 
 Nothing else is installed globally: the Gradle wrapper is committed, and the integration
 test builds its own throwaway virtualenv.
+
+**Windows:** run every script and `./gradlew` from **Git Bash**; macOS is supported with its stock
+bash 3.2. Details: [docs/15 §10](docs/15-corporate-artifact-repositories.md#10-windows-git-bash-and-macos).
 
 **Behind a company artifact proxy (JFrog Artifactory)?** Every image, Maven / Gradle
 repository, the Gradle distribution, the pip index and the apt mirror come from

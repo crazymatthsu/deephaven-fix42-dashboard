@@ -24,6 +24,16 @@ Variable                  Default   Meaning
 ``OTR_SEED``              ``42``    mock data seed
 ``OTR_MOCK_FAMILIES``     ``24``    random clean/working/DMA families on top of the
                                     fixed scenario catalog
+``OTR_SOURCE``            ``mock``  ``mock`` (generated native tables), ``amps`` (FIX
+                                    order states from AMPS SOW topics) or ``fix-files``
+                                    (the same messages from files) -- doc 14 section 12
+``OTR_FIX_DIR``           see note  ``/otr-fix`` in the container (compose mounts
+                                    ``OTR_FIX_HOST_DIR``): the mapping, and the files
+                                    ``fix-files`` reads
+``OTR_FIX_CONFIG``        see note  the JSON tag mapping; default
+                                    ``<OTR_FIX_DIR>/fix_config.json`` if that exists,
+                                    else ``fixstate.DEFAULT_FIX_CONFIG``
+``OTR_AMPS_*``                      connection settings, see :mod:`amps_sow`
 ========================  ========  =================================================
 """
 
@@ -39,6 +49,11 @@ __all__ = [
     "QTY_TOL_ENV",
     "SEED_ENV",
     "MOCK_FAMILIES_ENV",
+    "SOURCE_ENV",
+    "FIX_DIR_ENV",
+    "FIX_CONFIG_ENV",
+    "SOURCES",
+    "DEFAULT_FIX_DIR",
     "DEFAULT_QTY_TOL",
     "DEFAULT_SEED",
     "DEFAULT_MOCK_FAMILIES",
@@ -58,11 +73,21 @@ __all__ = [
     "qty_tolerance",
     "seed",
     "mock_families",
+    "source",
+    "fix_dir",
+    "fix_config_path",
 ]
 
 QTY_TOL_ENV = "OTR_QTY_TOL"
 SEED_ENV = "OTR_SEED"
 MOCK_FAMILIES_ENV = "OTR_MOCK_FAMILIES"
+SOURCE_ENV = "OTR_SOURCE"
+FIX_DIR_ENV = "OTR_FIX_DIR"
+FIX_CONFIG_ENV = "OTR_FIX_CONFIG"
+
+#: ``OTR_SOURCE`` values.
+SOURCES: Tuple[str, ...] = ("mock", "amps", "fix-files")
+DEFAULT_FIX_DIR = "/otr-fix"
 
 #: Shares are integral, so anything below one share is "equal"; 1e-6 matches doc 09.
 DEFAULT_QTY_TOL = 1e-6
@@ -339,3 +364,40 @@ def seed(environ: Optional[Mapping[str, str]] = None) -> int:
 def mock_families(environ: Optional[Mapping[str, str]] = None) -> int:
     """``OTR_MOCK_FAMILIES`` -- random families added on top of the scenario catalog."""
     return _int_env(MOCK_FAMILIES_ENV, DEFAULT_MOCK_FAMILIES, 0, environ)
+
+
+def source(environ: Optional[Mapping[str, str]] = None) -> str:
+    """``OTR_SOURCE`` -- ``mock``, ``amps`` or ``fix-files``."""
+    raw = _env(environ).get(SOURCE_ENV, "").strip().lower()
+    if not raw:
+        return SOURCES[0]
+    if raw not in SOURCES:
+        raise ValueError(f"{SOURCE_ENV}={raw!r}: expected one of {list(SOURCES)}")
+    return raw
+
+
+def fix_dir(environ: Optional[Mapping[str, str]] = None, required: bool = True) -> str:
+    """``OTR_FIX_DIR`` -- the mapping (and, for ``fix-files``, the message files) live here.
+
+    With ``required`` a missing directory is an error; otherwise it is returned as is.
+    """
+    path = _env(environ).get(FIX_DIR_ENV, "").strip() or DEFAULT_FIX_DIR
+    if required and not os.path.isdir(path):
+        raise ValueError(f"{FIX_DIR_ENV}={path!r}: not a directory (mount your FIX files there)")
+    return path
+
+
+def fix_config_path(environ: Optional[Mapping[str, str]] = None) -> str:
+    """``OTR_FIX_CONFIG``, else ``<fix dir>/fix_config.json`` if present, else ``""`` (built-in default).
+
+    A relative ``OTR_FIX_CONFIG`` is resolved against the FIX directory.
+    """
+    directory = fix_dir(environ, required=False)
+    raw = _env(environ).get(FIX_CONFIG_ENV, "").strip()
+    if raw:
+        path = raw if os.path.isabs(raw) else os.path.join(directory, raw)
+        if not os.path.isfile(path):
+            raise ValueError(f"{FIX_CONFIG_ENV}={raw!r}: no such file ({path})")
+        return path
+    candidate = os.path.join(directory, "fix_config.json")
+    return candidate if os.path.isfile(candidate) else ""

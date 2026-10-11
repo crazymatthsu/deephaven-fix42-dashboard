@@ -11,8 +11,10 @@ The question this answers:
 > systems' exposure to **bought shares** and **open order shares**?
 
 The submodule [`order-tree-recon/`](../order-tree-recon/) is the runnable answer. It runs
-on mock Raptor / algo / router tables in their own native shapes, and every number in
-this doc is checked against the real engine (section 10). This doc is **binding** for
+on mock Raptor / algo / router tables in their own native shapes, or on each system's
+**FIX order states from AMPS SOW topics** (section 12), and every number in this doc is checked against
+the real engine (section 10). It is self-contained and can be exported into another
+project with one script (section 13). This doc is **binding** for
 that module the way docs 09 and 13 are for theirs: table names, column names and
 formulas below are frozen, and a deviation updates this doc in the same change.
 
@@ -108,9 +110,10 @@ Rules that matter in a real deployment:
   but the order shows up at only one level.
 - **Which id a downstream system stores.** In the mock, the algo server stores Raptor's
   `OrderId` while DMA flow stamps Raptor's outbound `ClOrdID`. Index both (`AltId`), or
-  the DMA router parents come out `ORPHAN`. If a system re-uses amend `ClOrdID`s (a
-  cancel/replace rotates the id), feed the current *and* original id the way doc 09's
-  id index covers every `ClOrdID` ever seen.
+  the DMA router parents come out `ORPHAN`. If a cancel/replace rotates the id a
+  downstream system stored, pass every id an order was ever known by as `extra_ids`
+  (`System, Id, OrderId`) to `build_order_tree`. Current ids win a collision. The FIX
+  order-state layer does this for every OrderID / ClOrdID / OrigClOrdID it receives (section 12).
 - **The input tables can be anything that is a Deephaven table**: Kafka, a JDBC poll
   (doc 07), parquet, or a remote URI from other servers (doc 10). The DAG is
   incremental, so ticking sources need no code change (section 10, live-fill test).
@@ -375,6 +378,12 @@ All values go through `sanitize_id` (doc 09's rules) before reaching a query str
 | `OTR_QTY_TOL` | `1e-6` | absolute tolerance for every quantity comparison |
 | `OTR_SEED` | `42` | mock data seed |
 | `OTR_MOCK_FAMILIES` | `24` | random healthy families on top of the scenario catalog |
+| `OTR_SOURCE` | `mock` | `mock`, `amps` (FIX order states from AMPS SOW topics) or `fix-files` (the same from files) — section 12 |
+| `OTR_FIX_DIR` | `/otr-fix` | the mapping and, for `fix-files`, the message files; compose mounts `OTR_FIX_HOST_DIR` (default `order-tree-recon/fix-samples`) there |
+| `OTR_FIX_CONFIG` | `<OTR_FIX_DIR>/fix_config.json` | the tag mapping; the built-in `fixstate.DEFAULT_FIX_CONFIG` if that file does not exist |
+| `OTR_AMPS_URI` | — | `amps` only: the AMPS URI(s), comma separated for an HA pair, e.g. `tcp://amps-host:9007/amps/fix` |
+| `OTR_AMPS_CLIENT_NAME` | `dh-order-tree` | the client name AMPS sees (unique per server: a duplicate logon displaces the other) |
+| `OTR_AMPS_BATCH_SIZE` / `OTR_AMPS_TIMEOUT_MS` / `OTR_AMPS_MAX_PENDING` | `1000` / `10000` / `250000` | SOW batch size, command timeout, events buffered between two update cycles |
 
 A malformed value is a startup error. The topology is code (`config.DEFAULT_LEVELS`),
 not an environment variable, because it is coupled to the adapters.
@@ -391,16 +400,35 @@ not an environment variable, because it is coupled to the adapters.
 
 - **Reference oracle.** [`reference.py`](../order-tree-recon/src/order_tree_recon/reference.py)
   computes every `otr_recon` column, the ladder and the exposure table with dicts and
-  loops. 81 host tests pin it down: every scenario's expected breaks, the edge taxonomy
+  loops. 132 host tests pin it down: every scenario's expected breaks, the edge taxonomy
   case by case, signed gaps, DMA via `AltId`, candidate order, nested algo, `TOO_DEEP`
   and cycles, depth-first `TreePath`, both identities on every complete bucket, the
-  filter builders and the mock book's invariants.
+  filter builders and the mock book's invariants. For the FIX order-state layer:
+  - the parser (AMPS bodies, framed messages, log prefixes) and tag-mapping validation;
+  - the SOW mirror (latest per key, `oof`, a reconnect snapshot dropping records deleted
+    meanwhile) and the fold (sequence / arrival ordering, AvgPx, id history);
+  - the mock book as FIX order states, which reconciles exactly like the table path
+    (every column but `AltId`, the latest ClOrdID by design);
+  - `fixstate_check` on files and on a stubbed AMPS `sow` query;
+  - the AMPS source's settings, message classification and subscribe calls.
 - **Embedded engine** (`OTR_DH_TEST=1`, `deephaven-server==42.4`). The DAG matches the
   reference **row for row**: 340 nodes × 54 columns, 132 ladder rows, 29 exposure rows,
   zero differences. Also covered: tree, query API and app entrypoint. A **live-fill**
   test makes the router table a keyed input table and adds one venue fill the router
   parent never booked. The parent turns `UNBOOKED_FILL` and the bucket's
-  `NetUnbookedQty` becomes 100 incrementally, with no rebuild.
+  `NetUnbookedQty` becomes 100 incrementally, with no rebuild. For the FIX order-state
+  path:
+  - the engine's SOW mirror and fold equal the python twins, deletes and a reconnect
+    snapshot included, with garbage and malformed values mixed in;
+  - the tree equals the reference on every `otr_recon` column;
+  - the AMPS source, fed real `AMPS.Message` objects (amps-python-client 5.3.5) through a
+    stub client and the real `TablePublisher`, ticks the tree live: snapshot, a fill, an
+    `oof`, a reconnect snapshot;
+  - `OTR_SOURCE=fix-files` builds the app from `fix-samples/`, and `OTR_SOURCE=amps`
+    comes up with empty tables while AMPS is unreachable.
+
+  Not run here: a real AMPS broker (there is none in this environment).
+  `order-tree-recon/amps/amps-config.xml` and the overlay's `broker` profile are untested.
 - **Browser.** The app was loaded through the same loader path Application Mode uses
   and driven in headless Chromium: typing a prefix, pinning a bucket by row press,
   expanding a tree to the venue level, searching by a venue order id. The
@@ -441,25 +469,299 @@ The scenario catalog ([`mockdata.py`](../order-tree-recon/src/order_tree_recon/m
   system, an `AltId` that equals another order's `OrderId` resolves to the `AltId` owner,
   so keep id schemes distinct.
 - **Relationship to doc 09.** Doc 09 starts from FIX drop-copy tapes and folds them
-  through a state machine. This module starts *after* that, from current-state order
-  tables, wherever they come from. A doc 09 deployment can feed it by mapping
+  through a state machine. This module starts *after* that, from order states: tables
+  (section 3) or each system's latest FIX order state from AMPS (section 12). A doc 09 deployment can feed it by mapping
   `oms_orders_latest` per hub through adapters (`LinkId = ExtOrdID`).
 
-## 12. Module layout
+## 12. FIX order states from AMPS SOW topics
+
+Each system publishes its orders' **latest state as FIX messages** into one or more AMPS
+SOW topics: Raptor into its topics, the algo server into its own, the router into its own.
+Deephaven subscribes to every topic and keeps the order tree, the recon and the dashboard
+current as states change. Nothing after section 3 changes. The FIX layer produces the
+five level tables.
+
+```
+AMPS SOW topics (per system: 1..n)        order_tree_recon.amps_sow
+  raptor.orders ─────────────┐            sow_and_subscribe (oof, send_keys) per topic
+  algo.parent.orders ────────┤──────────► one blink event table per system:
+  algo.child.orders ─────────┤            Topic, SowKey, Action, Epoch, Arrival, RawFix
+  router.parent.orders ──────┤
+  router.child.orders ───────┘
+                                          order_tree_recon.fixstate_dag
+   events ── pick tags (python UDF) ──► T<tag> columns
+     ├─ SOW mirror: latest per (Topic, SowKey) · oof removes · stale epochs drop
+     │    └─ latest state per order ─► levels + canonical columns (section 3 contract) ──┐
+     └─ id history: every 37 / 11 / 41 of every message ─────────────────────────────────┴─► dag.build_order_tree
+```
+
+### 12.1 From AMPS messages to orders
+
+| AMPS message | Event | Effect |
+|---|---|---|
+| `group_begin` | (the topic's `Epoch` += 1) | a new snapshot starts |
+| `sow`, `publish` | `UPSERT` | the record's new state replaces the old one |
+| `oof`, `sow_delete` | `DELETE` | the record left the SOW (deleted, expired, filtered out): the order leaves the tree |
+| `group_end` | `SNAPSHOT_END` | the snapshot is complete |
+
+- **The SOW mirror** keeps the latest event per `(Topic, SowKey)`. The key falls back to
+  the order id tag when a message has no SowKey; `send_keys` makes AMPS send one with
+  every publish. Aggregations keep their state on a blink table, so memory is one row per
+  live record and one per id, not one per message.
+- **Reconnects.** The HA client reconnects and re-issues every `sow_and_subscribe`. The
+  new snapshot (a new epoch) re-sends every live record, and at its `group_end` the mirror
+  drops whatever was not re-sent. Those are records deleted while disconnected, for which
+  no `oof` could arrive; without this they would linger as phantom open orders and
+  overstate the street exposure. Until `group_end`, the old records stay, so the tree
+  never blinks empty.
+- **Several topics per system** merge into one table. An order normally lives in one
+  topic. If one order can appear in two topics of the same system, set `sequence_tag`
+  (e.g. `60` TransactTime, or a version tag) so the latest state wins by content. Without
+  it the latest arrival wins.
+- **Latest state per order**, then the mapping: the level from the `when` rules, the
+  parent link from `link_tag`, and quantities, side and status from the tags.
+  - Side and OrdStatus codes are decoded (`"fix"` code tables).
+  - A malformed number reads as null, never as an error.
+  - AvgPx is null until CumQty > 0, because FIX reports `6=0` on an unfilled order.
+- **The id history.** Every OrderID / ClOrdID / OrigClOrdID an order carried in any message
+  stays an id of that order. After a cancel/replace, a downstream order that still names
+  the original ClOrdID links: through 41 on the latest state, or through the history after
+  a second amend. The samples do this; without either, that router parent is `ORPHAN`.
+- **Parsing** takes what AMPS delivers: a `fix` topic sends SOH-delimited **bodies without
+  the `8=` / `9=` / `10=` framing**. Framed messages, `|` / `^A` delimiters and log
+  prefixes are accepted too. The first occurrence of a tag wins.
+- **Startup.** The connection runs in a background thread and retries every 5 s, so the
+  server and the dashboard come up even while AMPS is unreachable. The tables fill as each
+  snapshot arrives; `amps_source.status()` in the console shows each topic's epoch,
+  record counts and snapshots completed.
+
+### 12.2 The mapping config
+
+Standard FIX tags are the defaults, so a system usually lists only its topics, its levels
+and how parent links are carried. This is `fixstate.DEFAULT_FIX_CONFIG`, also
+`fix-samples/fix_config.json`:
+
+```json
+{"systems": [
+  {"system": "RAPTOR", "topics": ["raptor.orders"], "files": ["raptor.*.fix"],
+   "levels": [
+     {"level": "CLIENT"}
+  ]},
+  {"system": "ALGO", "topics": ["algo.parent.orders", "algo.child.orders"], "files": ["algo.*.fix"], "tags": {"Destination": "847"},
+   "levels": [
+     {"level": "ALGO_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+     {"level": "ALGO_PARENT", "link_tag": "11"}
+  ]},
+  {"system": "OR", "topics": ["router.parent.orders", "router.child.orders"], "files": ["router.*.fix"],
+   "levels": [
+     {"level": "OR_CHILD", "when": {"tag": "20001"}, "link_tag": "20001"},
+     {"level": "OR_PARENT", "link_tag": "11"}
+  ]}
+]}
+```
+
+How to read it:
+
+- **Cross-system links.** The parent link is the downstream order's own ClOrdID (11):
+  the id the upstream sent it with, which the upstream reports as its OrderID (37) or one
+  of its ClOrdIDs (11 / 41).
+- **In-system links.** An in-system child names its parent in a custom tag (20001 here).
+- **Levels.** Each level is chosen by its `when`. The first match wins, and a level
+  without `when` is the system's default.
+
+| Key (per system) | Default | Meaning |
+|---|---|---|
+| `system` | required | a topology system: `RAPTOR`, `ALGO`, `OR` |
+| `topics` | `[]` | its AMPS SOW topics (`amps`); a topic belongs to one system |
+| `filter` | none | an AMPS content filter applied to every topic of the system, e.g. `/39 NOT IN ('8')` |
+| `files` | `[]` | globs under `OTR_FIX_DIR` (`fix-files`); the topic is the file name without extension |
+| `order_id_tag` | `"37"` | the stable per-order key |
+| `alt_id_tag` | `"11"` | fills `AltId` (latest ClOrdID); `null` for none |
+| `id_tags` | `["37", "11", "41"]` | every tag whose values, in any message, identify the order |
+| `tags` | `DEFAULT_TAGS` | canonical column → tag, over `Moniker 1`, `Symbol 55`, `Side 54`, `OrderQty 38`, `CumQty 14`, `LeavesQty 151`, `AvgPx 6`, `Status 39`, `Destination 100`; `null` unmaps |
+| `side_codes`, `status_codes` | `"fix"` | `"fix"`, `{"code": "NAME"}`, or `null` (values as sent) |
+| `sequence_tag` | none (arrival order) | orders one order's states, numerically if numeric, else as text |
+| `levels` | required | `[{"level", "when"?: {"tag", "equals"?}, "link_tag"?}]`: every topology level exactly once; root levels have no `link_tag` |
+
+A router that marks its children with a role tag and keeps the parent in 9101 writes:
+
+```json
+   "levels": [
+     {"level": "OR_CHILD", "when": {"tag": "9100", "equals": "CHILD"}, "link_tag": "9101"},
+     {"level": "OR_PARENT", "link_tag": "11"}
+  ]
+```
+
+`fixstate.parse_fix_config` validates everything at startup and names the system, level
+and key at fault. A typo is an error, never a silently empty level. In the Deephaven
+tables a tag's value appears as column `T<tag>`, so the SOW mirrors (`fix_<system>_sow`)
+show `T37`, `T11`, `T14`, ...
+
+### 12.3 Pointing it at your AMPS
+
+1. **Write `fix_config.json`**: your topics per system, then your tags. Starting from
+   `order-tree-recon/fix-samples/fix_config.json`, usually only `topics`, the `when` rules
+   and the `link_tag`s change.
+2. **Dry-run it against your AMPS.** It runs a one-off `sow` query per topic; nothing is
+   subscribed or changed. It is pure python plus `pip install amps-python-client`, with no
+   Deephaven:
+
+   ```bash
+   cd order-tree-recon
+   PYTHONPATH=src python -m order_tree_recon.fixstate_check --amps tcp://amps-host:9007/amps/fix --config /path/to/fix_config.json
+   ```
+
+   It prints, per topic:
+   - the record counts;
+   - any mapped tag that no message carries (`MISSING: tag 9101 (parent link of OR_CHILD) is in none of the 5120 messages`);
+   - orders per level and the `ROOT` / `LINKED` / `ORPHAN` / `NO_LINK` counts;
+   - the breaks;
+   - the first unlinked orders with the value they carried (`tag 11 = 'X', not an id of any ALGO / RAPTOR order`).
+
+   Iterate on the config until the links look right. `--dir` runs the same check on files
+   (SOW dumps, one message per line).
+3. **Run the dashboard on the live topics:**
+
+   ```bash
+   OTR_SOURCE=amps OTR_AMPS_URI=tcp://amps-host:9007/amps/fix OTR_FIX_HOST_DIR=/folder/with/fix_config.json \
+     bash order-tree-recon/scripts/run_demo.sh
+   ```
+
+   This adds `docker/docker-compose.order-tree-amps.yml`, which builds the server image
+   with the AMPS client (`docker/deephaven-amps.Dockerfile`; base image and pip index
+   from `repos.env`, so a JFrog override applies) and sets `OTR_SOURCE=amps`. The banner
+   lists every `sow_and_subscribe`. Each server needs its own `OTR_AMPS_CLIENT_NAME`.
+
+### 12.4 Without the container, and from your own code
+
+- **Your own Deephaven server.** Put `order-tree-recon/src` on its `PYTHONPATH`, install
+  `amps-python-client` into its venv, set the `OTR_*` variables, then run
+  `from order_tree_recon import app; app.main(globals())`.
+- **As a library:**
+
+  ```python
+  from order_tree_recon import amps_sow, config, dag, fixstate, fixstate_dag, query_api
+  topology = config.default_topology()
+  fix_config = fixstate.load_fix_config("/path/fix_config.json", topology)
+  source = amps_sow.start_source(fix_config, amps_sow.AmpsSettings(["tcp://amps-host:9007/amps/fix"]))
+  levels, extra_ids, sow = fixstate_dag.fix_level_tables(topology, fix_config, source.tables)
+  tables = dag.build_order_tree(topology, levels, extra_ids=extra_ids)
+  ```
+
+  Any other event source works the same way: a table with `Topic, SowKey, Action, Epoch,
+  Arrival, RawFix`, or `fixstate_dag.file_event_tables` for files.
+
+### 12.5 What the FIX layer assumes
+
+- **Each message is the order's complete state**, as a SOW record is. A tag missing from
+  the latest state reads as empty, not as "unchanged".
+- **A stable order id per system** (`order_id_tag`, 37 by default). If a system re-keys an
+  order on amend, use a stable tag (an internal order id) and list the changing ones in
+  `id_tags`.
+- **Unique ids within a system.** Current ids beat history on a collision, but two orders
+  of one system sharing an id will mislink.
+- **Throughput.** Measured on the test machine: 200 000 events from one system fold into
+  86 000 orders in 4.7 s. Parsing is the cost, one python call per message. The first
+  build in a server session also spends about 8 s compiling formulas, once. Live, only new
+  messages are parsed.
+
+### 12.6 Trying it without your firm's AMPS
+
+`fix-samples/` holds the mock book as FIX order states, one file per SOW topic, recorded
+like a `sow_and_subscribe` (several states per order; the latest wins).
+`OTR_SOURCE=fix-files bash order-tree-recon/scripts/run_demo.sh` reads them through the same
+mirror and fold. With a locally built AMPS image (`AMPS_IMAGE`, as in doc 10),
+`OTR_SOURCE=amps OTR_AMPS_BROKER=local bash order-tree-recon/scripts/run_demo.sh` does three
+things:
+
+- starts a broker with the five SOW topics keyed on `/37` (`order-tree-recon/amps/amps-config.xml`);
+- builds the AMPS-enabled server;
+- publishes the samples with `python -m order_tree_recon.fixstate_mock --publish`.
+  `OTR_PUBLISH_DELAY_MS=20 bash order-tree-recon/scripts/run_demo.sh publish` replays them
+  slowly enough to watch the tree tick.
+
+This broker setup has not been run here: there is no AMPS in this environment. Check the
+config with `ampServer --verify-config` first.
+
+## 13. Using the module in another project
+
+The module is self-contained. The `order_tree_recon` package imports only the standard
+library, `deephaven` and `deephaven.ui` (the dashboard only), and has no pip
+dependencies; the AMPS source also needs `amps-python-client`. The pure modules (`config`,
+`reference`, `mockdata`, `states`, `fixstate`, `fixstate_mock`, `fixstate_check`, the filter
+builders) run on any Python 3.10+. What it borrows from this
+repository is four small pieces of scaffolding: the compose file, the app folder with
+the shared loader, `repos.env` with `scripts/repos.sh` (doc 15), and `.gitattributes`.
+
+**Export it** with everything it needs, keeping the relative layout so every path still
+works:
+
+```bash
+bash order-tree-recon/scripts/export_standalone.sh ~/work/order-tree   # --force to overwrite
+cd ~/work/order-tree
+bash order-tree-recon/run_tests.sh
+bash order-tree-recon/scripts/run_demo.sh
+```
+
+`DEST` gets `order-tree-recon/`, `docker/` (compose + AMPS overlay, `deephaven-amps.Dockerfile`, loader, app folder), `scripts/repos.sh`,
+`repos.env`, `repos.local.env.example`, docs 14 and 15, `.gitattributes`, a `.gitignore`
+and a README. Into an existing project, files that already exist are kept unless you
+pass `--force`, and `.gitignore` only gets the missing lines appended. It leaves out
+`build.gradle.kts` (it plugs into this repo's Gradle build), virtualenvs and caches, and
+your `repos.local.env`, which may hold credentials. The export was tested by exporting,
+running the exported test suite, resolving the exported compose file with and without a
+JFrog override, and re-exporting from the export.
+
+**Into an existing Deephaven server**, no compose needed. Put `order-tree-recon/src` on
+the server's `PYTHONPATH` (mount it, or `pip install ./order-tree-recon` into the
+server's venv), then from the console or your own Application Mode script:
+
+```python
+from order_tree_recon import app
+app.main(globals())                 # honours OTR_SOURCE / OTR_AMPS_URI / OTR_FIX_DIR / ... (section 9)
+```
+
+Or, as a library:
+
+```python
+from order_tree_recon import config, dag, fixstate, fixstate_dag, query_api
+topology = config.default_topology()
+# from FIX order-state events (section 12): {system: event table, e.g. amps_sow source.tables}
+tables = fixstate_dag.build_from_fix_states(topology, fixstate.load_fix_config("fix_config.json", topology), events)
+# or from order tables already in Deephaven (section 3): {level: canonical table}
+tables = dag.build_order_tree(topology, level_tables)
+api = query_api.make_query_api(tables)     # order_tree / find_tree / exposure
+```
+
+What you change for your firm is one of: the FIX tag mapping and AMPS topics (section 12), or the
+adapters in `sources.py` (section 3). Change `config.DEFAULT_LEVELS` only if your flow
+has a different shape. The DAG, the API and the dashboard stay as they are.
+
+## 14. Module layout
 
 ```
 order-tree-recon/
 ├── README.md                    # runbook
 ├── build.gradle.kts / pyproject.toml / run_tests.sh
+├── fix-samples/                 # the mock book as FIX order states, one file per SOW topic + fix_config.json
+├── amps/amps-config.xml         # a local AMPS with the five SOW topics (section 12.6)
 ├── scripts/run_demo.sh          # podman compose up | down | status | logs
+├── scripts/export_standalone.sh # section 13
 ├── src/order_tree_recon/
 │   ├── config.py                # pure: levels, topology validation, taxonomy, OTR_* env
 │   ├── reference.py             # pure: the oracle of every DAG formula
 │   ├── mockdata.py              # pure: native Raptor / algo / router tables + scenarios
 │   ├── query_api.py             # pure filter builders + the console API
-│   ├── sources.py               # native tables + per-level adapters  <- rewrite for real data
+│   ├── states.py                # pure: the generic latest-state fold over named fields
+│   ├── fixstate.py              # pure: FIX parser, tag mapping, SOW mirror + fold twins   <- section 12
+│   ├── fixstate_mock.py         # pure: the mock book as FIX order states (fix-samples/, --publish to AMPS)
+│   ├── fixstate_check.py        # pure: dry-run a mapping on files or a live AMPS sow query
+│   ├── states_dag.py            # the latest-state fold in Deephaven
+│   ├── fixstate_dag.py          # events -> SOW mirror -> level tables + id history
+│   ├── amps_sow.py              # sow_and_subscribe per topic -> live event tables
+│   ├── sources.py               # native tables + per-level adapters  <- rewrite for real tables
 │   ├── dag.py                   # section 4
 │   ├── dashboard.py             # section 7
-│   └── app.py                   # Application-Mode entrypoint
+│   └── app.py                   # Application-Mode entrypoint (OTR_SOURCE=mock | amps | fix-files)
 └── tests/                       # host suite + the opt-in embedded-engine suite
 ```

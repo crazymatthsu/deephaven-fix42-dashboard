@@ -93,6 +93,7 @@ def reconcile(
     topology: Topology,
     rows: Iterable[Mapping[str, Any]],
     qty_tol: float = config.DEFAULT_QTY_TOL,
+    extra_ids: Optional[Iterable[Tuple[str, str, str]]] = None,
 ) -> "OrderedDict[str, Dict[str, Any]]":
     """Link, root and reconcile canonical rows; one output row per ``NodeKey``.
 
@@ -101,6 +102,9 @@ def reconcile(
         rows: Canonical rows, each carrying ``Level`` (later duplicates of a
             ``NodeKey`` replace earlier ones, as the DAG's ``last_by`` does).
         qty_tol: Absolute quantity tolerance.
+        extra_ids: Optional ``(System, Id, OrderId)`` triples: further ids an order is
+            known by (amended-away ClOrdIDs from earlier order-state messages). Indexed before the current
+            ids, so a current id wins a collision; triples for unknown orders are ignored.
 
     Returns:
         ``{NodeKey: row}`` with every column ``orders_recon`` carries.
@@ -116,9 +120,13 @@ def reconcile(
         node["NodeKey"] = f"{level.system}|{node['OrderId']}"
         nodes[node["NodeKey"]] = node  # last_by: the last writer wins
 
-    # (System, Id) -> NodeKey over OrderId, then AltId (AltId wins a collision, as the
-    # DAG's merge([order ids, alt ids]).last_by does).
+    # (System, Id) -> NodeKey over extra ids, OrderId, then AltId (a later source wins a
+    # collision, as the DAG's merge([extra ids, order ids, alt ids]).last_by does).
     index: Dict[Tuple[str, str], str] = {}
+    for system, id_, order_id in extra_ids or ():
+        key = f"{system}|{order_id}"
+        if id_ and key in nodes:
+            index[(system, id_)] = key
     for node in nodes.values():
         index[(node["System"], node["OrderId"])] = node["NodeKey"]
     for node in nodes.values():

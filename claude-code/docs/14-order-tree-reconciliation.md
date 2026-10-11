@@ -427,6 +427,14 @@ not an environment variable, because it is coupled to the adapters.
   - `OTR_SOURCE=fix-files` builds the app from `fix-samples/`, and `OTR_SOURCE=amps`
     comes up with empty tables while AMPS is unreachable.
 
+  Python's `faulthandler` is off while the embedded JVM runs. The JVM handles SIGSEGV
+  itself (safepoint polls, implicit null checks). At session end, pytest's faulthandler
+  plugin restores its pre-JVM handlers, or re-enables itself under `-X dev` /
+  `PYTHONFAULTHANDLER`, and that
+  used to kill Deephaven's atexit shutdown (the Jetty stop) with exit 139 after every
+  test had passed. A native crash in this suite therefore leaves an `hs_err_pid*.log`,
+  not a Python traceback.
+
   Not run here: a real AMPS broker (there is none in this environment).
   `order-tree-recon/amps/amps-config.xml` and the overlay's `broker` profile are untested.
 - **Browser.** The app was loaded through the same loader path Application Mode uses

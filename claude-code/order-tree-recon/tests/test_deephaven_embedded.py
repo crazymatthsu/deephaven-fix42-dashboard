@@ -20,6 +20,7 @@ deephaven-server==42.4`` -- ~600 MB with its JVM jars, needs JDK 17+) and
 
 from __future__ import annotations
 
+import faulthandler
 import os
 import time
 from typing import Any, Dict, List
@@ -37,6 +38,12 @@ from order_tree_recon import config, mockdata, reference  # noqa: E402
 
 @pytest.fixture(scope="module")
 def server():
+    # The JVM traps SIGSEGV itself (safepoint polls, implicit null checks). pytest enabled
+    # faulthandler before the JVM existed, and its faulthandler.disable() at session end
+    # would restore those pre-JVM default handlers under Deephaven's atexit shutdown (Jetty
+    # stop), killing the process with 139 after every test passed. Off before the JVM starts,
+    # that disable() is a no-op (conftest.py's pytest_unconfigure covers a re-enable).
+    faulthandler.disable()
     port = int(os.environ.get("OTR_DH_TEST_PORT", "10096"))
     srv = deephaven_server.Server(port=port, jvm_args=["-Xmx1g"])
     srv.start()

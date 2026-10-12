@@ -350,6 +350,13 @@ and in the podman stack (server 42.4, deephaven.ui 0.40.2) by driving the dashbo
 browser: symbol toggles, add box, presets, interval and chart pickers, hide-gaps, the
 daily-summary click and all six chart types.
 
+Python's `faulthandler` is off while the embedded JVM runs. The JVM handles SIGSEGV
+itself (safepoint polls, implicit null checks). At session end, pytest's faulthandler
+plugin restores its pre-JVM handlers, or re-enables itself under `-X dev` /
+`PYTHONFAULTHANDLER`, and that used to kill Deephaven's atexit shutdown (the Jetty stop)
+with exit 139 after every test had passed. A native crash in this suite therefore leaves an
+`hs_err_pid*.log`, not a Python traceback.
+
 ---
 
 ## 11. Deployment (`docker/docker-compose.market-data.yml`)

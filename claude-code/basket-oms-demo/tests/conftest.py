@@ -3,12 +3,27 @@
 from __future__ import annotations
 
 import datetime as dt
+import faulthandler
+import sys
 from dataclasses import replace
 from typing import List
 
 import pytest
 
 from basket_oms_demo.core import Basket, Event, Execution, OmsCore, Order, Quote
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure():
+    """Keep faulthandler off over an embedded Deephaven JVM (see the ``server`` fixture in
+    ``test_deephaven_embedded.py``).
+
+    Under ``PYTHONFAULTHANDLER`` / ``-X dev`` pytest re-enables it on its way out, on top of
+    the JVM's handlers: it would catch the JVM's next routine SIGSEGV and abort the process.
+    """
+    deephaven_server = sys.modules.get("deephaven_server")
+    if deephaven_server is not None and deephaven_server.Server.instance is not None:
+        faulthandler.disable()
 
 
 class FixedClock:

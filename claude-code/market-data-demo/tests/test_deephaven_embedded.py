@@ -16,6 +16,7 @@ is set, so the default unit run stays light. What it proves, on a generated loca
 from __future__ import annotations
 
 import datetime as dt
+import faulthandler
 import os
 
 import pytest
@@ -39,6 +40,12 @@ def server():
     captures a poisoned update graph and the later ``merge`` fails -- which is what
     ``BarReader`` guards against by re-applying its captured context on its workers.
     """
+    # The JVM traps SIGSEGV itself (safepoint polls, implicit null checks). pytest enabled
+    # faulthandler before the JVM existed, and its faulthandler.disable() at session end
+    # would restore those pre-JVM default handlers under Deephaven's atexit shutdown (Jetty
+    # stop), killing the process with 139 after every test passed. Off before the JVM starts,
+    # that disable() is a no-op (conftest.py's pytest_unconfigure covers a re-enable).
+    faulthandler.disable()
     port = int(os.environ.get("MD_DH_TEST_PORT", "10095"))
     srv = deephaven_server.Server(port=port, jvm_args=["-Xmx1g"])
     srv.start()

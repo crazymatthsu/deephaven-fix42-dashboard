@@ -7,10 +7,15 @@ import com.fix42.dashboard.connectors.TestConnectors;
 import com.fix42.dashboard.connectors.config.ConnectorProperties;
 import com.fix42.dashboard.connectors.config.ConnectorValidator;
 import com.fix42.dashboard.connectors.decode.RecordDecoderFactory;
+import com.fix42.dashboard.connectors.deephaven.DeephavenGateway;
+import com.fix42.dashboard.connectors.deephaven.DeephavenUnavailableException;
 import com.fix42.dashboard.connectors.deephaven.RecordingDeephavenGateway;
+import com.fix42.dashboard.connectors.mapping.TableSchema;
 import com.fix42.dashboard.connectors.source.SourceRecord;
 import com.fix42.dashboard.connectors.source.FakeRecordSource;
 import com.fix42.dashboard.connectors.transform.RecordTransform;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -18,8 +23,11 @@ import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.util.unit.DataSize;
 
 /** The per-message pipeline: decode -> map -> (merge) -> batch -> publish. */
 class ConnectorTest {
@@ -30,17 +38,27 @@ class ConnectorTest {
     private final RecordDecoderFactory decoders = new RecordDecoderFactory(new ObjectMapper());
     private final FakeRecordSource subscriber = new FakeRecordSource();
 
+    /** Where a connector's spool spills, so a test can look for (the absence of) segment files. */
+    @TempDir
+    Path spoolDir;
+
     private Connector connector(ConnectorProperties properties) {
         return connector(properties, List.of());
     }
 
     private Connector connector(
             ConnectorProperties properties, List<RecordTransform> transforms) {
+        return connector(properties, transforms, gateway);
+    }
+
+    private Connector connector(
+            ConnectorProperties properties, List<RecordTransform> transforms, DeephavenGateway target) {
         properties.getDeephaven().setFlushInterval(Duration.ofHours(1));
+        properties.getSpool().setDirectory(spoolDir.toString());
         return new Connector(
                 properties,
                 decoders.create(properties),
-                gateway,
+                target,
                 unused -> subscriber,
                 unused -> transforms,
                 Clock.fixed(INGEST, ZoneOffset.UTC));
@@ -309,5 +327,122 @@ class ConnectorTest {
 
         Object[] afterRestart = gateway.rowsFor("amps_positions", "add").get(1);
         assertThat(afterRestart[3]).as("AvgCost is not carried across a restart").isNull();
+    }
+
+
+    // ---- the spool and replay batching (s8.1) --------------------------------------------
+
+    private static SourceRecord order(int index) {
+        return SourceRecord.of(TestConnectors.delimited("11", "C-" + index, "55", "AAPL"), "SOW-" + index);
+    }
+
+    private long segmentFiles() throws Exception {
+        try (Stream<Path> files = Files.walk(spoolDir)) {
+            return files.filter(file -> file.getFileName().toString().endsWith(".seg")).count();
+        }
+    }
+
+    @Test
+    @DisplayName("a snapshot replay goes out in one large batch, then live traffic in live-sized ones")
+    void publishesASnapshotReplayInLargeBatches() throws Exception {
+        ConnectorProperties properties = TestConnectors.fixOrders();
+        properties.getDeephaven().setMaxBatchRows(2);
+        properties.getDeephaven().setReplayBatchRows(100);
+        Connector connector = connector(properties);
+        connector.start();
+
+        subscriber.snapshotBegin();
+        for (int i = 0; i < 5; i++) {
+            subscriber.deliver(order(i));
+        }
+        subscriber.snapshotEnd();
+        for (int i = 5; i < 8; i++) {
+            subscriber.deliver(order(i));
+        }
+        connector.stop();
+
+        assertThat(gateway.publishes()).extracting(publish -> publish.rows().size())
+                .containsExactly(5, 2, 1);
+        assertThat(gateway.rowsFor("amps_orders", "add")).extracting(row -> row[0])
+                .containsExactly("C-0", "C-1", "C-2", "C-3", "C-4", "C-5", "C-6", "C-7");
+        assertThat(connector.isReplaying()).isFalse();
+        assertThat(connector.receivedRecords()).isEqualTo(8);
+    }
+
+    @Test
+    @DisplayName("a backlog beyond memory-limit spills to segment files, gone by the time stop returns")
+    void spillsToDiskAndPublishesInOrder() throws Exception {
+        ConnectorProperties properties = TestConnectors.fixOrders();
+        properties.getSpool().setMemoryLimit(DataSize.ofBytes(0));
+        properties.getSpool().setSegmentSize(DataSize.ofKilobytes(2));
+        Connector connector = connector(properties);
+        connector.start();
+        for (int i = 0; i < 300; i++) {
+            subscriber.deliver(order(i));
+        }
+        connector.stop();
+
+        assertThat(connector.receivedRecords()).isEqualTo(300);
+        assertThat(connector.spilledRecords()).isEqualTo(300);
+        assertThat(connector.discardedOnStop()).isZero();
+        List<Object> keys = gateway.rowsFor("amps_orders", "add").stream().map(row -> row[0]).toList();
+        assertThat(keys).hasSize(300).startsWith("C-0", "C-1", "C-2").endsWith("C-298", "C-299");
+        assertThat(segmentFiles()).isZero();
+    }
+
+    @Test
+    @DisplayName("stop() drains for stop-timeout, then discards the backlog and deletes the files")
+    void stopDiscardsTheBacklogAfterTheTimeout() throws Exception {
+        RecordingDeephavenGateway slow = new RecordingDeephavenGateway() {
+            @Override
+            public void addRows(TableSchema schema, List<Object[]> rows) {
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new DeephavenUnavailableException("interrupted");
+                }
+                super.addRows(schema, rows);
+            }
+        };
+        ConnectorProperties properties = TestConnectors.fixOrders();
+        properties.getDeephaven().setMaxBatchRows(1);
+        properties.getDeephaven().setReplayBatchRows(1);
+        properties.getSpool().setMemoryLimit(DataSize.ofBytes(0));
+        properties.getSpool().setStopTimeout(Duration.ofMillis(300));
+        Connector connector = connector(properties, List.of(), slow);
+        connector.start();
+        for (int i = 0; i < 50; i++) {
+            subscriber.deliver(order(i));
+        }
+
+        long started = System.nanoTime();
+        connector.stop();
+        Duration took = Duration.ofNanos(System.nanoTime() - started);
+
+        assertThat(took).isLessThan(Duration.ofSeconds(5));
+        assertThat(connector.discardedOnStop()).isPositive();
+        assertThat(connector.publishedRows() + connector.discardedOnStop()).isLessThanOrEqualTo(50);
+        assertThat(segmentFiles()).isZero();
+    }
+
+    @Test
+    @DisplayName("with the spool disabled, the pipeline runs on the source's thread")
+    void runsThePipelineInlineWithoutASpool() throws Exception {
+        ConnectorProperties properties = TestConnectors.fixOrders();
+        properties.getSpool().setEnabled(false);
+        Connector connector = connector(properties);
+        connector.start();
+
+        subscriber.deliver(SourceRecord.of(TestConnectors.delimited("11", "C-1", "38", "not-a-number"), "SOW-1"));
+        assertThat(connector.rejectedRecords()).as("rejected before deliver returned").isEqualTo(1);
+
+        subscriber.snapshotBegin();
+        subscriber.deliver(order(2));
+        assertThat(connector.isReplaying()).isTrue();
+        subscriber.snapshotEnd();
+        assertThat(gateway.rowsFor("amps_orders", "add")).as("ending the replay flushed inline").hasSize(1);
+        assertThat(connector.spoolBacklog()).isZero();
+        connector.stop();
     }
 }

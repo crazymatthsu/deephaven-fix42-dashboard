@@ -89,6 +89,8 @@ flowchart LR
 
     DEC["RecordDecoder<br/>payload → tag → raw value<br/>a key present means the payload carried the field:<br/>absent ≠ empty, which is what delta correctness rides on"]
 
+    SPOOL["RecordSpool (spool:)<br/>memory first (memory-limit), then segment files<br/>deleted as soon as they are consumed; the source<br/>thread only queues, a drain thread runs the rest"]
+
     TRF["RecordTransform chain (optional — transforms:)<br/>stateless per-record rewrites of the tag namespace,<br/>by bean name, in order; null drops the record"]
 
     MAP["FieldMapper — the allowlist<br/>only mapped tags are published<br/>type coercion per column, plus value shaping:<br/>decode: SIDE (54=1 → BUY) · values: inline rewrites<br/>default-value when the field is absent"]
@@ -97,7 +99,7 @@ flowchart LR
 
     MRG["DeltaRowMerger (optional — publish-mode: DELTA)<br/>partial update merged over the last full row for its key,<br/>so omitted columns keep their stored values"]
 
-    BAT["RowBatcher<br/>flush by max-batch-rows or flush-interval<br/>upserts and deletes, in arrival order"]
+    BAT["RowBatcher<br/>flush by max-batch-rows or flush-interval;<br/>a snapshot replay (group_begin .. group_end)<br/>by replay-batch-rows<br/>upserts and deletes, in arrival order"]
 
     GW["FlightDeephavenGateway<br/>Arrow Flight + generated python bootstrap<br/>creates the table if missing, refuses to adopt a<br/>table whose columns, types or keys disagree"]
 
@@ -111,7 +113,8 @@ flowchart LR
 
     SOW --> SUB
     JRN --> SUB
-    SUB --> DEC
+    SUB --> SPOOL
+    SPOOL --> DEC
     FMT -. "format: selects the decoder" .-> DEC
     DEC --> TRF
     TRF --> MAP
@@ -384,6 +387,11 @@ existed, so existing configuration keeps its behaviour.
 `BLINK` and `RING` bound memory for real: nothing upstream keeps the rows. `KEYED` is the only
 type that can apply an out-of-focus removal, and the only one `publish-mode: DELTA` can merge
 into.
+
+Upstream of the table, each connector's spool bounds what a slow Deephaven costs: records queue
+in memory up to `spool.memory-limit`, then in segment files that are deleted as they are
+consumed, so a SOW replay never turns the connector into an AMPS slow client; and the replay
+itself is published in `replay-batch-rows` batches rather than live-sized ones (doc 07 §8.1).
 
 Add a connector by appending to `dh-connectors.connectors` in an application's file (a new
 application is a new `config/<env>/<flow>/<app-name>/application.yml`). The essentials:

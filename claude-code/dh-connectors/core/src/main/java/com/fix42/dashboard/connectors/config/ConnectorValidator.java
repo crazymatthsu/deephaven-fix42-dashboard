@@ -205,6 +205,41 @@ public final class ConnectorValidator {
             errors.add(id + "no fields configured, so nothing would ever be published");
         }
         errors.addAll(validateTransforms(id, connector));
+        errors.addAll(validateSpool(id, connector));
+        return errors;
+    }
+
+    /**
+     * The spool and the replay batch (doc 07 section 8.1): sizes that would stop the spool
+     * from ever spilling, or make a replay slower than live traffic, are mistakes to report
+     * rather than honour.
+     */
+    private static List<String> validateSpool(String id, ConnectorProperties connector) {
+        List<String> errors = new ArrayList<>();
+        DeephavenTableProperties target = connector.getDeephaven();
+        if (target.getReplayBatchRows() < target.getMaxBatchRows()) {
+            errors.add(id + "deephaven.replay-batch-rows (" + target.getReplayBatchRows()
+                    + ") is below max-batch-rows (" + target.getMaxBatchRows() + "): a snapshot "
+                    + "replay is published in larger batches than live traffic, never smaller");
+        }
+        SpoolProperties spool = connector.getSpool();
+        if (spool == null) {
+            return errors;
+        }
+        if (spool.getMemoryLimit() == null || spool.getMemoryLimit().isNegative()) {
+            errors.add(id + "spool.memory-limit cannot be negative (0 spills every record)");
+        }
+        long segment = spool.getSegmentSize() == null ? 0L : spool.getSegmentSize().toBytes();
+        if (segment <= 0L) {
+            errors.add(id + "spool.segment-size must be positive");
+        }
+        if (spool.getDiskLimit() == null || spool.getDiskLimit().toBytes() < segment) {
+            errors.add(id + "spool.disk-limit must be at least spool.segment-size, or the first "
+                    + "segment could never fill");
+        }
+        if (spool.getStopTimeout() == null || spool.getStopTimeout().isNegative()) {
+            errors.add(id + "spool.stop-timeout cannot be negative (0 discards the backlog at once)");
+        }
         return errors;
     }
 

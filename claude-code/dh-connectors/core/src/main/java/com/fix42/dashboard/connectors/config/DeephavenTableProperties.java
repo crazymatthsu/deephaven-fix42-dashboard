@@ -62,6 +62,16 @@ public class DeephavenTableProperties {
     private Duration flushInterval = Duration.ofMillis(250);
 
     /**
+     * Batch size while the source replays a snapshot of its state -- an AMPS SOW replay,
+     * between the server's {@code group_begin} and {@code group_end}. The replay is current
+     * state arriving as fast as the server can send it, so it goes out in far larger batches
+     * than live traffic, and the flush tick waits for it to pause rather than cutting it up.
+     * Must not be below {@code max-batch-rows}.
+     */
+    @Min(1)
+    private int replayBatchRows = 100_000;
+
+    /**
      * Whether key columns were configured.
      *
      * <p>Not the same question as "is the target keyed": that is
@@ -162,5 +172,13 @@ public class DeephavenTableProperties {
 
     public void setFlushInterval(Duration flushInterval) {
         this.flushInterval = flushInterval;
+    }
+
+    public int getReplayBatchRows() {
+        return replayBatchRows;
+    }
+
+    public void setReplayBatchRows(int replayBatchRows) {
+        this.replayBatchRows = replayBatchRows;
     }
 }

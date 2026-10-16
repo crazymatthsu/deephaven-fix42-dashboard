@@ -117,6 +117,7 @@ dh-connectors:
         create-if-missing: true
         max-batch-rows: 5000
         flush-interval: 250ms
+        replay-batch-rows: 100000  # a snapshot replay's batch, group_begin .. group_end (s8.1)
       fields:                    # the allowlist
         - { tag: "11", column: ClOrdID, type: STRING }
         - { tag: "54", column: Side,    type: STRING, decode: SIDE }
@@ -126,6 +127,13 @@ dh-connectors:
         key-column: Symbol
         fields:
           - { tag: qty, column: Qty, type: DOUBLE }
+      spool:                     # the queue between the source thread and the publish path (s8.1)
+        enabled: true            # false: the pipeline runs on the source's thread, as before
+        memory-limit: 64MB       # records held in memory before spilling to segment files
+        segment-size: 64MB       # one file per segment, deleted as soon as it is consumed
+        disk-limit: 4GB          # cap on the spilled backlog; the source blocks beyond it
+        directory: /var/tmp/dh-connectors   # default: java.io.tmpdir
+        stop-timeout: 10s        # how long stop() drains before discarding what is left
 ```
 
 Bound by `ConnectorsProperties` (`@ConfigurationProperties("dh-connectors")`) and validated at
@@ -608,6 +616,11 @@ can see which block was supposed to provide one.
 - `source.amps.subscription-mode: DELTA` requires a SOW topic **and** `publish-mode: DELTA`
   (§4). There is deliberately no "DELTA requires AMPS" rule: the setting lives *on* the AMPS
   block, so a connector without one cannot ask for deltas at all
+- `deephaven.replay-batch-rows` is not below `max-batch-rows` — a snapshot replay is published
+  in larger batches than live traffic, never smaller (§8.1)
+- `spool.memory-limit` is not negative (`0` spills every record), `segment-size` is positive,
+  `disk-limit` is at least `segment-size` (or the first segment could never fill) and
+  `stop-timeout` is not negative (`0` discards the backlog at once) (§8.1)
 - `decode` requires `type: STRING`; an inline `values` map does not, because it is applied
   before coercion
 - `default-value` coerces to its column's type, and is not set on a key column
@@ -659,12 +672,60 @@ row that was never published.
 `TableSchema` is the single source of truth for column *order*: the generated `col_defs`, the
 `Object[]` a mapped row is built into, and the Arrow batch all index by the same positions.
 
-`RowBatcher` buffers rows and publishes on whichever comes first — `max-batch-rows` (flushed by
-the submitting thread, which also back-pressures a fast feed) or `flush-interval`. Within a batch,
-upserts and deletes are published as consecutive runs in arrival order; regrouping them would
-resurrect a record deleted and re-added in the same batch. A failed flush is logged and counted,
-not thrown: losing Deephaven is precisely what triggers the reconnect and replay that
-republishes current state.
+`RowBatcher` buffers rows and publishes on whichever comes first — the batch filling up (flushed
+by the submitting thread) or `flush-interval`. How full is full depends on what is flowing:
+`max-batch-rows` for live traffic, `replay-batch-rows` while a source replays a snapshot (§8.1).
+Within a batch, upserts and deletes are published as consecutive runs in arrival order;
+regrouping them would resurrect a record deleted and re-added in the same batch. A failed flush
+is logged and counted, not thrown: losing Deephaven is precisely what triggers the reconnect and
+replay that republishes current state.
+
+### 8.1 The spool: memory first, then segment files — and replay batching
+
+Between the source and the pipeline sits `RecordSpool`, and the pipeline runs on a drain thread
+the connector owns rather than on the source's delivery thread. The reason is the slow-client
+policy of an AMPS server. A SOW replay arrives as fast as the server can send it, and a consumer
+that blocks on every Deephaven round trip stops reading its socket; once the server's buffer for
+that client is exhausted it disconnects the client, the `HAClient` reconnects and re-issues
+`sow_and_subscribe`, and the same replay starts over — a loop that never completes while
+Deephaven is slower than the replay. With the spool the delivery thread only queues, so the
+socket is always being read.
+
+The queue is **memory first**: records accumulate in heap up to `spool.memory-limit`. Beyond it
+they **spill to segment files** under `spool.directory` (one subdirectory per connector,
+`java.io.tmpdir` by default), each file rolled at `spool.segment-size` and **deleted as soon as
+every record in it has been taken**, so disk holds the unread backlog plus at most the segment
+being written. When the disk tier has drained, the queue is back in memory. Order is preserved
+across the tiers: once a spill starts, every new record goes to disk behind the ones already
+there, and memory is used again only when the disk is empty — mixing the tiers would let an
+older SOW record overtake a newer live update for its key. The files are throwaway: no fsync,
+nothing is read back after a restart (every start replays the feed, §6), and leftovers of a
+crashed run are removed when the spool opens. `spool.disk-limit` caps the spilled backlog; at
+the cap the delivery thread blocks, which is the back-pressure the pipeline used to apply on
+every full batch, kept as the last resort. A disk that fails under the writer degrades the same
+way: what reached the file still drains, and the source blocks until memory has room.
+
+`stop()` is bounded by `spool.stop-timeout`: the drain thread gets that long to finish the
+backlog, then whatever is left is discarded, the segment files are deleted, and the shutdown
+continues. The next start replays the feed, so a discarded backlog is a gap of seconds rather
+than lost state. `spool.enabled: false` removes the queue and the thread: the pipeline runs on
+the source's thread, exactly as before the spool existed.
+
+**Replay batching.** The AMPS server brackets a SOW replay with `group_begin` and `group_end`;
+`AmpsRecordSource` passes them on as `RecordHandler.onSnapshotBegin()` / `onSnapshotEnd()`, they
+travel through the spool in order with the records (so "the replay ended" is applied exactly
+after the last replayed record), and between them `RowBatcher` batches by
+`deephaven.replay-batch-rows` (default 100 000) instead of `max-batch-rows`. During a replay the
+flush tick leaves alone a batch that grew since the previous tick — a streaming replay goes out
+in full batches, a stalled one is still published — and `group_end` flushes what is left. The
+simulated source brackets its replay the same way; a journal topic has no bracket and is batched
+as live traffic. A replay that takes a few large round trips instead of hundreds of small ones is
+what keeps the spill short in the first place: the spool makes the replay safe, the batching
+makes it fast.
+
+The status line (`ConnectorManager.status()`) shows each connector's `backlog=` and whether it is
+`replaying`; the connector logs when a spill starts and when it drains (records, bytes, segments,
+duration), and when a replay starts and completes.
 
 ## 9. Module layout: framework + drivers + applications
 
@@ -687,7 +748,7 @@ dh-connectors/
 │       ├── deephaven/                  # DeephavenGateway, FlightDeephavenGateway, TableBootstrapScript
 │       ├── source/                     # the SPI: RecordSource, SourceRecord, SourceFactory,
 │       │                               #   SourceResolver + the in-process SimulatedSource
-│       └── runtime/                    # Connector, ConnectorManager, RowBatcher, DeephavenLifecycleMonitor
+│       └── runtime/                    # Connector, ConnectorManager, RowBatcher, RecordSpool, DeephavenLifecycleMonitor
 ├── source-amps/                        # :dh-connectors:source-amps — 60East client (§11)
 ├── source-kafka/                       # :dh-connectors:source-kafka — kafka-clients consumer (§11)
 ├── source-tcp/                         # :dh-connectors:source-tcp — framed socket, java.net only (§11)
@@ -1000,8 +1061,9 @@ the same shape: stateless, per-record, composable.
 The contract:
 
 - **Stateless.** One instance serves every connector that names it, it is called on the
-  source's delivery thread, and every restart replays the feed from the beginning (§6). A
-  transform that accumulated anything would accumulate it twice.
+  connector's drain thread (§8.1; on the source's delivery thread with the spool disabled), and
+  every restart replays the feed from the beginning (§6). A transform that accumulated anything
+  would accumulate it twice.
 - **`null` drops the record** — the filtering spelling. The connector counts it as *dropped*
   rather than *rejected*: it is a decision, not a failure.
 - **`DELETE` records go through too.** A delete's key columns are extracted from its fields the
@@ -1034,7 +1096,7 @@ the thing the rows are being published into.
           :dh-connectors:connector-app:test
 ```
 
-**323 JUnit 5 tests, no servers required** — core 248, source-amps 10, source-kafka 9,
+**356 JUnit 5 tests, no servers required** — core 280, source-amps 11, source-kafka 9,
 source-tcp 7, source-jdbc 8, source-s3 9, connector-app 32 — plus 6 opt-in tests that need one
 (`LiveTableTypeTest`, in the runner's `integrationTest` suite, below). No transport test needs
 external infrastructure: the Kafka suite drives a `MockConsumer`, the TCP suite a loopback
@@ -1055,9 +1117,10 @@ source decides sits above it.
 | `ValueShapingTest` | §5.2: decode, inline overrides, pass-through of unknown codes, defaults, and that a default seeds a delta's base row without ever clobbering it |
 | `DeephavenTableTypeTest` | the four types, the default drawn from the source's `stateful()`, and the schema each resolves to |
 | `TableBootstrapScriptTest` | the generated python for all four types, dtypes, idempotence, the column/type/key checks, the per-batch scratch name |
-| `RowBatcherTest` | size and timer flush, upsert/delete run ordering, failure is counted not thrown |
-| `ConnectorTest` | the per-message pipeline for all three formats, transforms included (order, drop, DELETE) |
-| `AmpsRecordSourceTest` | §11: the AMPS command each topic/mode resolves to, URI and bookmark building — no server |
+| `RowBatcherTest` | size and timer flush, upsert/delete run ordering, failure is counted not thrown; replay batching: the larger batch, `endReplay` flushing, the timer sparing a streaming replay and publishing a stalled one |
+| `RecordSpoolTest` / `SpoolCodecTest` | §8.1: order across memory → disk → memory, segments rolling and deleted as consumed, the disk cap blocking the producer, snapshot boundaries in order, finish/close/clear, leftovers removed, every record shape and an oversized record round-tripping |
+| `ConnectorTest` | the per-message pipeline for all three formats, transforms included (order, drop, DELETE); §8.1: a snapshot replay in one batch then live-sized ones, a spilled backlog published in order with no segment left behind, `stop-timeout` discarding the backlog, the spool switched off |
+| `AmpsRecordSourceTest` | §11: the AMPS command each topic/mode resolves to, URI and bookmark building, and what each received command becomes (`group_begin`/`group_end` → the snapshot callbacks, `sow`/`publish`/`delta_publish` → upserts, `oof`/`sow_delete` → deletes) — no server |
 | `KafkaRecordSourceTest` | §11: upserts keyed by the message key, tombstone → DELETE, where each configuration seeks, assign-not-subscribe, passthrough properties, close — a `MockConsumer`, no broker |
 | `TcpRecordSourceTest` | §11.3: delimited and length-prefixed framing, a frame split across two writes, a multi-byte delimiter, redial after the peer hangs up, close — a loopback `ServerSocket` |
 | `JdbcRecordSourceTest` | §11.4: the JSON a result set is serialised into and the types it keeps, the key carried on upserts, a vanished key → DELETE, no key column → no deletes at all, the incremental mark never re-emitting, an undialable URL looping the backoff, close mid-interval — a real in-memory H2 database |

@@ -727,6 +727,9 @@ The status line (`ConnectorManager.status()`) shows each connector's `backlog=` 
 `replaying`; the connector logs when a spill starts and when it drains (records, bytes, segments,
 duration), and when a replay starts and completes.
 
+The spool and the replay batch make a burst *safe*; shrinking the burst at its source is a
+separate lever, AMPS conflation, analysed in doc 16.
+
 ## 9. Module layout: framework + drivers + applications
 
 The submodule separates the **framework** (a `java-library`), the **source drivers** (one

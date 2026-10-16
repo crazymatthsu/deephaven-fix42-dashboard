@@ -816,7 +816,7 @@ Design and contract: [docs/07-dh-connectors.md](docs/07-dh-connectors.md).
 ```
 claude-code/
 ├── docs/                          # analysis & design — the binding contracts
-│   ├── 00-overview.md … 15-corporate-artifact-repositories.md
+│   ├── 00-overview.md … 16-amps-conflation.md
 ├── repos.env                      # EVERY external artifact source (images, maven, gradle, pip, apt) — docs/15
 ├── repos.local.env.example        # template for your company override (copy to repos.local.env, git-ignored)
 ├── scripts/repos.sh               # loads repos.env + override; `show` / `check` / `pull` / `run CMD`
@@ -906,3 +906,4 @@ claude-code/
 | [13 — Basket OMS demo](docs/13-basket-oms-demo.md) | **the contract** for the basket OMS app: order core, input tables, context-menu blotter, mock venue, console API, deployment |
 | [14 — Order tree reconciliation](docs/14-order-tree-reconciliation.md) | **the contract** for the Raptor → algo → router order tree: the adapter contract, linking with ordered candidate systems (DMA), the bounded root walk, root-attribute inheritance, signed per-edge gaps and the break taxonomy, the exposure identities, the level ladder, the tree UI and its verification |
 | [15 — Company artifact proxy (JFrog): `repos.env`](docs/15-corporate-artifact-repositories.md) | **the contract** for external artifact sources: one `repos.env` + an override file for container registries, Maven / Gradle plugin repos, the Gradle distribution, JDK auto-download, pip and apt; precedence, who reads it, credentials and certificates, verification, and the checklist every new module follows |
+| [16 — AMPS conflation](docs/16-amps-conflation.md) | analysis and how-to: where a same-key burst can be collapsed (conflated subscription, conflated topic, the keyed table, a proposed batch dedupe) and what must never be, with configuration and 60East client snippets for both AMPS mechanisms, and how it fits the spool and replay batching of doc 07 §8.1 |

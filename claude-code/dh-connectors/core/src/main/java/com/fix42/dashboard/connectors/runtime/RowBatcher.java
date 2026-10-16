@@ -16,9 +16,13 @@ import org.slf4j.LoggerFactory;
 /**
  * Buffers mapped rows and publishes them to Deephaven in batches.
  *
- * <p>A Flight round trip per AMPS message would be pointless overhead, so rows accumulate until
- * either {@code max-batch-rows} is reached (flushed by the submitting thread, which also
- * back-pressures a fast AMPS feed) or {@code flush-interval} elapses.
+ * <p>A Flight round trip per message would be pointless overhead, so rows accumulate until
+ * either the batch is full (flushed by the submitting thread) or {@code flush-interval}
+ * elapses. How full is full depends on what is flowing: {@code max-batch-rows} for live
+ * traffic, {@code replay-batch-rows} between {@link #beginReplay()} and {@link #endReplay()},
+ * while a source replays its state and every round trip saved shortens the replay. During a
+ * replay the timer flushes only a batch that has stopped growing since its last tick, so a
+ * streaming replay goes out in full batches and a stalled one is not left unpublished.
  *
  * <p>Order is preserved across the upsert/delete boundary: the buffer is published as
  * consecutive runs of a single action, never regrouped. Publishing all upserts and then all
@@ -32,11 +36,16 @@ public final class RowBatcher implements AutoCloseable {
     private final TableSchema schema;
     private final DeephavenGateway gateway;
     private final int maxBatchRows;
+    private final int replayBatchRows;
     private final Duration flushInterval;
 
     private final Object bufferLock = new Object();
     private final AtomicLong published = new AtomicLong();
     private final AtomicLong dropped = new AtomicLong();
+    private final AtomicLong submitted = new AtomicLong();
+    private volatile boolean replaying;
+    /** Scheduler thread only: what {@link #submitted} read at the previous tick. */
+    private long submittedAtLastTick;
 
     private List<MappedRow> buffer = new ArrayList<>();
     private ScheduledExecutorService scheduler;
@@ -46,11 +55,13 @@ public final class RowBatcher implements AutoCloseable {
             TableSchema schema,
             DeephavenGateway gateway,
             int maxBatchRows,
+            int replayBatchRows,
             Duration flushInterval) {
         this.connectorName = connectorName;
         this.schema = schema;
         this.gateway = gateway;
         this.maxBatchRows = maxBatchRows;
+        this.replayBatchRows = replayBatchRows;
         this.flushInterval = flushInterval;
     }
 
@@ -67,7 +78,7 @@ public final class RowBatcher implements AutoCloseable {
             });
             long periodMillis = Math.max(1L, flushInterval.toMillis());
             scheduler.scheduleWithFixedDelay(
-                    this::flushQuietly, periodMillis, periodMillis, TimeUnit.MILLISECONDS);
+                    this::tick, periodMillis, periodMillis, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -80,11 +91,35 @@ public final class RowBatcher implements AutoCloseable {
         boolean full;
         synchronized (bufferLock) {
             buffer.add(row);
-            full = buffer.size() >= maxBatchRows;
+            submitted.incrementAndGet();
+            full = buffer.size() >= (replaying ? replayBatchRows : maxBatchRows);
         }
         if (full) {
             flushQuietly();
         }
+    }
+
+    /**
+     * A snapshot replay begins: batch by {@code replay-batch-rows} until {@link #endReplay()},
+     * and let the timer leave a growing batch alone. Idempotent, so a replay restarted by a
+     * reconnect mid-way simply continues.
+     */
+    public void beginReplay() {
+        replaying = true;
+    }
+
+    /** The replay is over: publish what it left buffered and return to the live batch size. */
+    public void endReplay() {
+        if (!replaying) {
+            return;
+        }
+        replaying = false;
+        flushQuietly();
+    }
+
+    /** Whether rows are currently batched by {@code replay-batch-rows}. */
+    public boolean isReplaying() {
+        return replaying;
     }
 
     /**
@@ -124,6 +159,17 @@ public final class RowBatcher implements AutoCloseable {
             }
             start = end;
         }
+    }
+
+    /** The timer: a partial batch is published unless a replay is still filling it. */
+    private void tick() {
+        long seen = submitted.get();
+        boolean grew = seen != submittedAtLastTick;
+        submittedAtLastTick = seen;
+        if (replaying && grew) {
+            return;
+        }
+        flushQuietly();
     }
 
     private void flushQuietly() {

@@ -9,6 +9,7 @@ import com.fix42.dashboard.connectors.mapping.MappedRow;
 import com.fix42.dashboard.connectors.mapping.TableSchema;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -19,7 +20,11 @@ class RowBatcherTest {
     private final RecordingDeephavenGateway gateway = new RecordingDeephavenGateway();
 
     private RowBatcher batcher(int maxBatchRows, Duration flushInterval) {
-        return new RowBatcher("test", schema, gateway, maxBatchRows, flushInterval);
+        return batcher(maxBatchRows, maxBatchRows * 10, flushInterval);
+    }
+
+    private RowBatcher batcher(int maxBatchRows, int replayBatchRows, Duration flushInterval) {
+        return new RowBatcher("test", schema, gateway, maxBatchRows, replayBatchRows, flushInterval);
     }
 
     private static MappedRow row(String key, MappedRow.Action action) {
@@ -109,6 +114,85 @@ class RowBatcherTest {
             List.of("C-1", "C-2", "C-3").forEach(key -> batcher.submit(row(key, MappedRow.Action.UPSERT)));
             batcher.flush();
             assertThat(batcher.publishedRows()).isEqualTo(3);
+        }
+    }
+
+    // ---- replay mode ---------------------------------------------------------------------
+
+    @Test
+    @DisplayName("a replay batches by replay-batch-rows, and the live size returns after it")
+    void aReplayBatchesByTheLargerSize() {
+        try (RowBatcher batcher = batcher(2, 5, Duration.ofHours(1))) {
+            batcher.beginReplay();
+            assertThat(batcher.isReplaying()).isTrue();
+            for (int i = 1; i <= 4; i++) {
+                batcher.submit(row("C-" + i, MappedRow.Action.UPSERT));
+            }
+            assertThat(gateway.publishes()).as("below the replay batch").isEmpty();
+
+            batcher.submit(row("C-5", MappedRow.Action.UPSERT));
+            assertThat(gateway.publishes()).hasSize(1);
+            assertThat(gateway.publishes().get(0).rows()).hasSize(5);
+
+            batcher.endReplay();
+            assertThat(batcher.isReplaying()).isFalse();
+            batcher.submit(row("C-6", MappedRow.Action.UPSERT));
+            batcher.submit(row("C-7", MappedRow.Action.UPSERT));
+            assertThat(gateway.publishes()).as("live batch size again").hasSize(2);
+            assertThat(gateway.publishes().get(1).rows()).hasSize(2);
+        }
+    }
+
+    @Test
+    @DisplayName("ending a replay publishes what it left in the buffer")
+    void endReplayPublishesWhatTheReplayLeft() {
+        try (RowBatcher batcher = batcher(2, 100, Duration.ofHours(1))) {
+            batcher.beginReplay();
+            for (int i = 1; i <= 3; i++) {
+                batcher.submit(row("C-" + i, MappedRow.Action.UPSERT));
+            }
+            assertThat(gateway.publishes()).isEmpty();
+
+            batcher.endReplay();
+            assertThat(gateway.publishes()).hasSize(1);
+            assertThat(gateway.publishes().get(0).rows()).hasSize(3);
+            batcher.endReplay();
+            assertThat(gateway.publishes()).as("idempotent").hasSize(1);
+        }
+    }
+
+    @Test
+    @DisplayName("the timer leaves a replay alone while it is still streaming")
+    void theTimerLeavesAGrowingReplayAlone() throws Exception {
+        try (RowBatcher batcher = batcher(1_000, 1_000, Duration.ofMillis(150))) {
+            batcher.start();
+            batcher.beginReplay();
+            AtomicInteger submitted = new AtomicInteger();
+            long until = System.nanoTime() + Duration.ofMillis(600).toNanos();
+            while (System.nanoTime() < until) {
+                batcher.submit(row("C-" + submitted.incrementAndGet(), MappedRow.Action.UPSERT));
+                Thread.sleep(1);
+            }
+            assertThat(gateway.publishes()).as("no tick cut the streaming replay").isEmpty();
+
+            // The replay stalls: the next idle tick publishes what it left.
+            Awaitility.await().atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> assertThat(gateway.rowsFor("amps_orders", "add"))
+                            .hasSize(submitted.get()));
+        }
+    }
+
+    @Test
+    @DisplayName("a replay that stalls is still published by the timer")
+    void theTimerPublishesAStalledReplay() {
+        try (RowBatcher batcher = batcher(1_000, 1_000, Duration.ofMillis(20))) {
+            batcher.start();
+            batcher.beginReplay();
+            batcher.submit(row("C-1", MappedRow.Action.UPSERT));
+
+            Awaitility.await().atMost(Duration.ofSeconds(5))
+                    .untilAsserted(() -> assertThat(gateway.rowsFor("amps_orders", "add")).hasSize(1));
+            assertThat(batcher.isReplaying()).as("the timer does not end the replay").isTrue();
         }
     }
 }

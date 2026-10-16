@@ -40,10 +40,25 @@ public class FakeRecordSource implements RecordSource {
 
     /** Push a record as if the source had delivered it. */
     public void deliver(SourceRecord record) {
-        if (handler == null) {
+        requireHandler().onRecord(record);
+    }
+
+    /** Announce a snapshot replay, as the AMPS source does on {@code group_begin}. */
+    public void snapshotBegin() {
+        requireHandler().onSnapshotBegin();
+    }
+
+    /** End the snapshot replay, as the AMPS source does on {@code group_end}. */
+    public void snapshotEnd() {
+        requireHandler().onSnapshotEnd();
+    }
+
+    private RecordHandler requireHandler() {
+        RecordHandler current = handler;
+        if (current == null) {
             throw new IllegalStateException("not subscribed");
         }
-        handler.onRecord(record);
+        return current;
     }
 
     @Override

@@ -62,9 +62,12 @@ public class SimulatedSource implements RecordSource {
         running.set(true);
 
         if (source.stateful()) {
+            // Bracketed like an AMPS SOW replay, so the connector batches it as one.
+            handler.onSnapshotBegin();
             for (int key = 0; key < source.getSimulatedKeys(); key++) {
                 handler.onRecord(record(key));
             }
+            handler.onSnapshotEnd();
             log.info("[{}] simulated SOW replay: {} records", connector.getName(),
                     source.getSimulatedKeys());
         }

@@ -136,13 +136,15 @@ public class ConnectorManager implements AutoCloseable {
         StringBuilder text = new StringBuilder();
         for (Connector connector : connectors) {
             text.append(String.format(
-                    "%n  %-24s %-11s %-22s received=%d published=%d rejected=%d",
+                    "%n  %-24s %-11s %-22s received=%d published=%d rejected=%d backlog=%d%s",
                     connector.name(),
                     connector.isStarted() ? "RUNNING" : "STOPPED",
                     connector.schema().tableName(),
                     connector.receivedRecords(),
                     connector.publishedRows(),
-                    connector.rejectedRecords()));
+                    connector.rejectedRecords(),
+                    connector.spoolBacklog(),
+                    connector.isReplaying() ? " replaying" : ""));
         }
         return text.toString();
     }

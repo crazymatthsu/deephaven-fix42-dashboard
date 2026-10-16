@@ -3,10 +3,12 @@ package com.fix42.dashboard.connectors.config;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fix42.dashboard.connectors.TestConnectors;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.util.unit.DataSize;
 
 class ConnectorValidatorTest {
 
@@ -693,5 +695,51 @@ class ConnectorValidatorTest {
         properties.setConnectors(List.of(TestConnectors.fixOrders(), TestConnectors.fixOrders()));
         assertThat(ConnectorValidator.validate(properties))
                 .anyMatch(error -> error.contains("duplicate connector name: orders-fix"));
+    }
+
+
+    // ---- the spool and the replay batch (s8.1) ------------------------------------------
+
+    @Test
+    @DisplayName("a replay batch below the live batch would make a replay slower than live traffic")
+    void rejectsAReplayBatchSmallerThanTheLiveBatch() {
+        ConnectorProperties connector = TestConnectors.fixOrders();
+        connector.getDeephaven().setMaxBatchRows(5_000);
+        connector.getDeephaven().setReplayBatchRows(100);
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains(
+                        "deephaven.replay-batch-rows (100) is below max-batch-rows (5000)"));
+    }
+
+    @Test
+    void rejectsASpoolWhoseFirstSegmentCouldNeverFill() {
+        ConnectorProperties connector = TestConnectors.fixOrders();
+        connector.getSpool().setSegmentSize(DataSize.ofMegabytes(64));
+        connector.getSpool().setDiskLimit(DataSize.ofMegabytes(1));
+        assertThat(ConnectorValidator.validate(connector))
+                .anyMatch(error -> error.contains("spool.disk-limit must be at least spool.segment-size"));
+    }
+
+    @Test
+    void rejectsNegativeOrZeroSpoolSizes() {
+        ConnectorProperties connector = TestConnectors.fixOrders();
+        connector.getSpool().setMemoryLimit(DataSize.ofBytes(-1));
+        connector.getSpool().setSegmentSize(DataSize.ofBytes(0));
+        connector.getSpool().setStopTimeout(Duration.ofSeconds(-1));
+        List<String> errors = ConnectorValidator.validate(connector);
+        assertThat(errors).anyMatch(error -> error.contains("spool.memory-limit cannot be negative"));
+        assertThat(errors).anyMatch(error -> error.contains("spool.segment-size must be positive"));
+        assertThat(errors).anyMatch(error -> error.contains("spool.stop-timeout cannot be negative"));
+    }
+
+    @Test
+    @DisplayName("zero memory (spill everything), a zero stop-timeout (discard at once) and no spool are all legal")
+    void acceptsTheSpoolExtremes() {
+        ConnectorProperties connector = TestConnectors.fixOrders();
+        connector.getSpool().setMemoryLimit(DataSize.ofBytes(0));
+        connector.getSpool().setStopTimeout(Duration.ZERO);
+        assertThat(ConnectorValidator.validate(connector)).isEmpty();
+        connector.getSpool().setEnabled(false);
+        assertThat(ConnectorValidator.validate(connector)).isEmpty();
     }
 }

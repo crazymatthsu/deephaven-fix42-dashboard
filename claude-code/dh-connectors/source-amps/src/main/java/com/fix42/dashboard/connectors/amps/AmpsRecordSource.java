@@ -42,6 +42,11 @@ import org.slf4j.LoggerFactory;
  *   <tr><td>SOW</td><td>DELTA</td><td>{@code sow_and_delta_subscribe}</td></tr>
  *   <tr><td>journal</td><td>FULL</td><td>{@code subscribe} from the {@code epoch} bookmark</td></tr>
  * </table>
+ *
+ * <p>A SOW replay arrives bracketed by the server's {@code group_begin} and {@code group_end},
+ * which are passed on as {@link RecordHandler#onSnapshotBegin()} and
+ * {@link RecordHandler#onSnapshotEnd()}: that is what lets the connector publish the replay in
+ * large batches rather than live-sized ones. A journal topic has no such bracket.
  */
 public class AmpsRecordSource implements RecordSource {
 
@@ -150,15 +155,24 @@ public class AmpsRecordSource implements RecordSource {
         };
     }
 
-    private void dispatch(Message message, RecordHandler handler) {
+    /** Package-private so the command-to-callback mapping is unit-testable without a server. */
+    void dispatch(Message message, RecordHandler handler) {
         try {
             int command = message.getCommand();
+            if (command == Message.Command.GroupBegin) {
+                handler.onSnapshotBegin();
+                return;
+            }
+            if (command == Message.Command.GroupEnd) {
+                handler.onSnapshotEnd();
+                return;
+            }
             SourceRecord.Action action = switch (command) {
                 case Message.Command.SOW,
                      Message.Command.Publish,
                      Message.Command.DeltaPublish -> SourceRecord.Action.UPSERT;
                 case Message.Command.OOF, Message.Command.SOWDelete -> SourceRecord.Action.DELETE;
-                // GroupBegin/GroupEnd/Ack/Heartbeat carry no record.
+                // Ack/Heartbeat carry no record.
                 default -> null;
             };
             if (action == null) {

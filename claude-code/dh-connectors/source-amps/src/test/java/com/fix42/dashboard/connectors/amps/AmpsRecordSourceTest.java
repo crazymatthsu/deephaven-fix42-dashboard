@@ -4,12 +4,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.crankuptheamps.client.Client;
 import com.crankuptheamps.client.Command;
+import com.crankuptheamps.client.JSONMessage;
 import com.crankuptheamps.client.Message;
 import com.fix42.dashboard.connectors.TestConnectors;
 import com.fix42.dashboard.connectors.config.AmpsSourceProperties;
 import com.fix42.dashboard.connectors.config.ConnectorProperties;
 import com.fix42.dashboard.connectors.config.SourceFormat;
 import com.fix42.dashboard.connectors.config.UpdateMode;
+import com.fix42.dashboard.connectors.source.RecordHandler;
+import com.fix42.dashboard.connectors.source.SourceRecord;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -91,5 +97,67 @@ class AmpsRecordSourceTest {
         source.setMessageType("fix");
         source.setSubscriptionMode(UpdateMode.FULL);
         assertThat(source.resolveUri(SourceFormat.JSON)).isEqualTo("tcp://localhost:9007/amps/fix");
+    }
+
+
+    // ---- what each received command becomes -------------------------------------------------
+
+    private static Message message(int command, String data, String sowKey) {
+        Message message = new JSONMessage(
+                StandardCharsets.UTF_8.newEncoder(), StandardCharsets.UTF_8.newDecoder());
+        message.setCommand(command);
+        if (data != null) {
+            message.setData(data);
+        }
+        if (sowKey != null) {
+            message.setSowKey(sowKey);
+        }
+        return message;
+    }
+
+    /** Records what the source hands to the connector, in order. */
+    private static final class RecordingHandler implements RecordHandler {
+        final List<String> events = new ArrayList<>();
+
+        @Override
+        public void onRecord(SourceRecord record) {
+            events.add(record.action() + ":" + record.key() + ":" + record.data());
+        }
+
+        @Override
+        public void onSnapshotBegin() {
+            events.add("snapshot-begin");
+        }
+
+        @Override
+        public void onSnapshotEnd() {
+            events.add("snapshot-end");
+        }
+    }
+
+    @Test
+    @DisplayName("group_begin/group_end bracket the SOW replay as the snapshot callbacks")
+    void mapsEachCommandToItsCallback() {
+        AmpsRecordSource source = new AmpsRecordSource(TestConnectors.fixOrders());
+        RecordingHandler handler = new RecordingHandler();
+
+        source.dispatch(message(Message.Command.GroupBegin, null, null), handler);
+        source.dispatch(message(Message.Command.SOW, "11=C-1", "SOW-1"), handler);
+        source.dispatch(message(Message.Command.GroupEnd, null, null), handler);
+        source.dispatch(message(Message.Command.Publish, "11=C-1", "SOW-1"), handler);
+        source.dispatch(message(Message.Command.DeltaPublish, "38=200", "SOW-1"), handler);
+        source.dispatch(message(Message.Command.OOF, "", "SOW-1"), handler);
+        source.dispatch(message(Message.Command.SOWDelete, "", "SOW-1"), handler);
+        source.dispatch(message(Message.Command.Ack, null, null), handler);
+        source.dispatch(message(Message.Command.Heartbeat, null, null), handler);
+
+        assertThat(handler.events).containsExactly(
+                "snapshot-begin",
+                "UPSERT:SOW-1:11=C-1",
+                "snapshot-end",
+                "UPSERT:SOW-1:11=C-1",
+                "UPSERT:SOW-1:38=200",
+                "DELETE:SOW-1:",
+                "DELETE:SOW-1:");
     }
 }

@@ -57,6 +57,11 @@ public class ConnectorProperties {
     @Valid
     private ExplodeProperties explode;
 
+    /** The buffer between the source's delivery thread and the publish path (doc 07 section 8.1). */
+    @Valid
+    @NotNull
+    private SpoolProperties spool = new SpoolProperties();
+
     public String getName() {
         return name;
     }
@@ -127,6 +132,14 @@ public class ConnectorProperties {
 
     public void setExplode(ExplodeProperties explode) {
         this.explode = explode;
+    }
+
+    public SpoolProperties getSpool() {
+        return spool;
+    }
+
+    public void setSpool(SpoolProperties spool) {
+        this.spool = spool == null ? new SpoolProperties() : spool;
     }
 
     @Override

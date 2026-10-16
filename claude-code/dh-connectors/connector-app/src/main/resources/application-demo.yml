@@ -53,6 +53,20 @@ dh-connectors:
         ingest-timestamp-column: IngestTs
         max-batch-rows: 5000
         flush-interval: 250ms
+        # A SOW replay (group_begin .. group_end) is published in batches this large instead,
+        # and the flush tick waits for the replay to pause rather than cutting it up.
+        replay-batch-rows: 100000
+      # The queue between the AMPS receive thread and the publish path (doc 07 s8.1): memory
+      # first, segment files beyond memory-limit, each deleted as soon as it is consumed, so a
+      # SOW replay never makes this client an AMPS "slow client". Defaults shown; the whole
+      # block may be omitted.
+      spool:
+        enabled: true
+        memory-limit: 64MB
+        segment-size: 64MB
+        disk-limit: 4GB
+        # directory: /var/tmp/dh-connectors   # default: java.io.tmpdir
+        stop-timeout: 10s
       # Allowlist: a tag absent from this list is never published, whatever AMPS sends.
       #
       # Two optional per-field knobs shape the value on its way to the column:

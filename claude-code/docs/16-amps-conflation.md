@@ -303,6 +303,82 @@ Command command = new Command(Message.Command.SOWAndSubscribe)
   for every live key of every conflated subscription; a conflated topic holds it once.
 - **The cadence is a policy**, not a per-app choice: "the dashboards see order state at 4 Hz".
 
+### 5.5 A conflated topic is always built on a SOW topic
+
+In AMPS that is the only shape a conflated topic has: it is a server-side view over an
+**underlying SOW topic**, because conflation collapses updates by SOW key. A plain
+publish-and-subscribe topic with no SOW cannot be the base of one — for those, conflate on the
+subscription with `conflation=` and a `conflation_key` (§4.1). Once it is defined:
+
+- **Publishers keep publishing to the underlying topic.** The conflated topic is read-only and
+  derived; nothing in the OMS or the fill handlers changes.
+- **Subscribers treat it as a SOW topic.** It answers `sow` and `sow_and_subscribe`, brackets the
+  replay with `group_begin` / `group_end`, carries the underlying topic's SOW key, and accepts
+  content filters.
+- **It emits at most one update per key per `Interval`**, holding the latest state of each key
+  that changed. A `delta_publish` to the underlying topic is merged into the SOW record first, so
+  the conflated topic emits merged records.
+- **Its `Filter` is optional** and narrows the view for everyone; a subscriber's own filter
+  applies on top.
+- **Its state is kept by the server**, rebuilt from the underlying SOW at startup; it needs no
+  SOW file of its own.
+
+Two points to confirm against the installed version's configuration guide (§9): whether an AMPS
+View — itself a SOW-backed derived topic — is accepted as `UnderlyingTopic`, and how a
+`sow_delete` on the underlying topic reaches the conflated topic's subscribers, since the
+connector maps that message to a row removal.
+
+### 5.6 `sow_and_subscribe` against the conflated topic
+
+Yes, and it is the intended way to consume one. The command behaves exactly as it does against
+the underlying topic, only throttled:
+
+```mermaid
+sequenceDiagram
+    participant C as Connector (AmpsRecordSource)
+    participant A as AMPS: Orders-Conflated
+    participant U as AMPS: Orders (underlying SOW)
+    C->>A: sow_and_subscribe topic=Orders-Conflated options=oof
+    A-->>C: group_begin
+    A-->>C: sow C-1, sow C-2, ... (state as of the last tick, one record per key)
+    A-->>C: group_end
+    Note over C: replay published in replay-batch-rows batches (doc 07 §8.1)
+    U->>A: 40 publishes to C-1 within one interval
+    A-->>C: publish C-1 (once, at the tick: the latest merged state)
+    U->>A: sow_delete C-2
+    A-->>C: oof C-2 (verify on your version, §9)
+```
+
+1. The SOW query returns the conflated topic's current state, one record per key **as of its
+   last conflation tick**, bracketed by `group_begin` and `group_end`. The connector sees the
+   bracket and runs the replay in large batches as usual.
+2. After `group_end` the live stream carries at most one update per key per interval, each the
+   latest merged state of that key.
+3. `oof` and content filters work as on any SOW topic, and `sow_and_delta_subscribe` is available
+   for deltas.
+
+For the connector that is a topic rename and nothing else:
+
+```yaml
+      source:
+        amps:
+          topic: Orders-Conflated
+          sow: true                 # sow_and_subscribe, with oof, exactly as for Orders
+          subscription-mode: FULL
+```
+
+Two things to keep in mind:
+
+- **Do not add `options: conflation=...` on top of a conflated topic.** Both intervals would
+  apply in series and the table would lag twice.
+- **The snapshot is as of the last tick.** A publish that landed inside the current interval
+  appears in the first live update rather than in the SOW query result, so immediately after a
+  replay the table can be up to one interval behind the underlying topic — the same latency the
+  live stream has.
+
+Everything downstream — the spool, the replay batching, the keyed table, the `HAClient`
+resubscribe after a reconnect — behaves identically to subscribing to the underlying topic.
+
 ## 6. Choosing
 
 | Situation | Use |
@@ -363,6 +439,11 @@ side, not messages on the AMPS side. Worth a `deephaven.conflate-batches` switch
 - [ ] Confirm the `ConflatedTopic` element names (`Name`, `UnderlyingTopic`, `MessageType`,
       `Interval`, `Filter`) in the Configuration Guide of the installed version; 4.x spelled
       topic definitions differently.
+- [ ] Confirm whether an AMPS View (a SOW-backed derived topic) is accepted as
+      `UnderlyingTopic`, if you intend to conflate a view rather than a base SOW topic (§5.5).
+- [ ] Run `sow_and_subscribe` against the conflated topic and confirm the replay arrives
+      bracketed by `group_begin` / `group_end` with one record per key, then that a burst to one
+      key inside an interval arrives as a single update at the tick (§5.6).
 - [ ] Publish a burst to a test topic — a hundred updates to one key in a second — and count
       the messages a plain and a conflated subscription receive. The last message of the
       conflated one must equal the last publish.
